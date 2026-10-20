@@ -3,10 +3,11 @@
 Much of the remaining work is the same shape again and again: one family of
 instructions → decode, a runtime helper, an emitter case and tests. That work
 is handed to a smaller, cheaper model as a tightly scoped task, and a reviewer
-checks it before anything reaches the branch. Seven NEON tasks have landed
+checks it before anything reaches the branch. Eight NEON tasks have landed
 this way: F32 arithmetic in two parts, the integer multiply/saturate/shift set,
-the shuffles, VLD2–4/VST2–4, and the widening and narrowing forms, which
-were the first pair run in parallel. With disjoint insertion points that pair
+the shuffles, VLD2–4/VST2–4, the widening and narrowing forms, which
+were the first pair run in parallel, and the integer compares, max/min and
+absolute difference. With disjoint insertion points that pair
 rebased onto each other with no conflicts. Each task cost well under a dollar, and the
 reviewer rejected none outright. Review did catch errors in the reviewer's own briefs. It also
 caught one gap the agent could not have seen, which is how `neontest` came about.
