@@ -1968,6 +1968,280 @@ static void test_neon_ldst_multi(void) {
     printf("ok   neon structures: vld2-4/vst2-4 forms, Q pairs, writeback, and their rejects\n");
 }
 
+/* One decoded single-lane or all-lanes form. regs is the register count per
+ * element (2 only for VLD1 all lanes with T), inc the register step, index the
+ * lane (0 for all lanes), size the element size as neon_size. */
+static void check_lane_form(const arm_insn *in, arm_op op, const char *mn,
+                            int vd, int rn, int n, int inc, int index, int size,
+                            int regs, int wb, int rm) {
+    assert(in->cls == A_SIMD && in->op == op && strcmp(in->mnemonic, mn) == 0);
+    assert(in->vd == vd && in->rn == rn && (int)in->imm == n);
+    assert(in->neon_inc == inc && in->neon_lane == index && in->neon_size == size);
+    assert(in->neon_q == (regs == 2));
+    assert(in->writeback == wb && in->rm == rm);
+}
+
+/* A form that must not decode: it stays opaque SIMD with op NONE. */
+static void check_lane_reject(uint16_t h1, uint16_t h2) {
+    put16(0, h1); put16(2, h2);
+    arm_insn in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+}
+
+/* VLD1-4 / VST1-4 with A = 1: the single-lane and all-lanes forms. Encodings
+ * are from arm-vita-eabi-as and objdump. The all-lanes lists are written with
+ * a comma, {d0[], d1[]}: this assembler reads the range spelling {d0[]-d1[]}
+ * as the A = 0 multiple-structure form, which is a different instruction. The field map is imm = n, neon_inc =
+ * the register step, neon_lane = the lane, neon_size = the element size,
+ * neon_q = two registers per element. The rejects are computed from the
+ * index_align and size tables, not taken from the assembler (which refuses
+ * most of them). Each one shows the bit that makes it UNDEFINED, with a
+ * valid neighbour where the assembler gives one. */
+static void test_neon_ldst_lane(void) {
+    arm_insn in;
+
+    /* Single lane. The index is ia[3:1] for 8-bit, ia[3:2] for 16-bit and
+     * ia[3] for 32-bit; the step is ia[1] (16-bit) or ia[2] (32-bit). */
+    put16(0, 0xF9A0); put16(2, 0x002F);                  /* vld1.8 {d0[1]}, [r0] */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_LANE, "vld1", 0, 0, 1, 1, 1, 0, 1, 0, ARM_NO_REG);
+
+    put16(0, 0xF9A0); put16(2, 0x148D);                  /* vld1.16 {d1[2]}, [r0]! */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_LANE, "vld1", 1, 0, 1, 1, 2, 1, 1, 1, ARM_NO_REG);
+
+    put16(0, 0xF9E0); put16(2, 0x0882);                  /* vld1.32 {d16[1]}, [r0], r2 */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_LANE, "vld1", 16, 0, 1, 1, 1, 2, 1, 1, 2);
+
+    put16(0, 0xF9A0); put16(2, 0x083F);                  /* vld1.32 {d0[0]}, [r0 :32] */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_LANE, "vld1", 0, 0, 1, 1, 0, 2, 1, 0, ARM_NO_REG);
+
+    put16(0, 0xF9A0); put16(2, 0x016F);                  /* vld2.8 {d0[3],d1[3]}, [r0] */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_LANE, "vld2", 0, 0, 2, 1, 3, 0, 1, 0, ARM_NO_REG);
+
+    put16(0, 0xF9A0); put16(2, 0x056D);                  /* vld2.16 {d0[1],d2[1]}, [r0]! */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_LANE, "vld2", 0, 0, 2, 2, 1, 1, 1, 1, ARM_NO_REG);
+
+    put16(0, 0xF9A0); put16(2, 0x0563);                  /* vld2.16 {d0[1],d2[1]}, [r0], r3 */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_LANE, "vld2", 0, 0, 2, 2, 1, 1, 1, 1, 3);
+
+    put16(0, 0xF9E0); put16(2, 0x0982);                  /* vld2.32 {d16[1],d17[1]}, [r0], r2 */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_LANE, "vld2", 16, 0, 2, 1, 1, 2, 1, 1, 2);
+
+    put16(0, 0xF9A0); put16(2, 0x02EF);                  /* vld3.8 {d0[7],d1[7],d2[7]}, [r0] */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_LANE, "vld3", 0, 0, 3, 1, 7, 0, 1, 0, ARM_NO_REG);
+
+    put16(0, 0xF9A0); put16(2, 0x066D);                  /* vld3.16 {d0[1],d2[1],d4[1]}, [r0]! */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_LANE, "vld3", 0, 0, 3, 2, 1, 1, 1, 1, ARM_NO_REG);
+
+    put16(0, 0xF9E0); put16(2, 0x0A8F);                  /* vld3.32 {d16[1],d17[1],d18[1]}, [r0] */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_LANE, "vld3", 16, 0, 3, 1, 1, 2, 1, 0, ARM_NO_REG);
+
+    put16(0, 0xF9A0); put16(2, 0x032F);                  /* vld4.8 {d0[1],d1[1],d2[1],d3[1]}, [r0] */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_LANE, "vld4", 0, 0, 4, 1, 1, 0, 1, 0, ARM_NO_REG);
+
+    put16(0, 0xF9A0); put16(2, 0x07ED);                  /* vld4.16 {d0[3],d2[3],d4[3],d6[3]}, [r0]! */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_LANE, "vld4", 0, 0, 4, 2, 3, 1, 1, 1, ARM_NO_REG);
+
+    put16(0, 0xF9E0); put16(2, 0x0B02);                  /* vld4.32 {d16[0],d17[0],d18[0],d19[0]}, [r0], r2 */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_LANE, "vld4", 16, 0, 4, 1, 0, 2, 1, 1, 2);
+
+    /* The alignment hint in ia[0] is ignored: a 16-bit VLD1 with it set
+     * decodes like the one without. */
+    put16(0, 0xF9A0); put16(2, 0x045F);                  /* vld1.16 {d0[1]}, [r0 :16] */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_LANE, "vld1", 0, 0, 1, 1, 1, 1, 1, 0, ARM_NO_REG);
+
+    put16(0, 0xF9E0); put16(2, 0x0B8F);                  /* vld4.32 {d16[1],d17[1],d18[1],d19[1]}, [r0] */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_LANE, "vld4", 16, 0, 4, 1, 1, 2, 1, 0, ARM_NO_REG);
+
+    put16(0, 0xF9A0); put16(2, 0x057F);                  /* vld2.16 {d0[1],d2[1]}, [r0 :32] */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_LANE, "vld2", 0, 0, 2, 2, 1, 1, 1, 0, ARM_NO_REG);
+
+    /* Stores use the same index and step rules, with rn = r1. */
+    put16(0, 0xF981); put16(2, 0x00EF);                  /* vst1.8 {d0[7]}, [r1] */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VST_LANE, "vst1", 0, 1, 1, 1, 7, 0, 1, 0, ARM_NO_REG);
+
+    put16(0, 0xF981); put16(2, 0x140D);                  /* vst1.16 {d1[0]}, [r1]! */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VST_LANE, "vst1", 1, 1, 1, 1, 0, 1, 1, 1, ARM_NO_REG);
+
+    put16(0, 0xF9C1); put16(2, 0x0882);                  /* vst1.32 {d16[1]}, [r1], r2 */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VST_LANE, "vst1", 16, 1, 1, 1, 1, 2, 1, 1, 2);
+
+    put16(0, 0xF981); put16(2, 0x014F);                  /* vst2.8 {d0[2],d1[2]}, [r1] */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VST_LANE, "vst2", 0, 1, 2, 1, 2, 0, 1, 0, ARM_NO_REG);
+
+    put16(0, 0xF981); put16(2, 0x09CD);                  /* vst2.32 {d0[1],d2[1]}, [r1]! */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VST_LANE, "vst2", 0, 1, 2, 2, 1, 2, 1, 1, ARM_NO_REG);
+
+    put16(0, 0xF981); put16(2, 0x068F);                  /* vst3.16 {d0[2],d1[2],d2[2]}, [r1] */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VST_LANE, "vst3", 0, 1, 3, 1, 2, 1, 1, 0, ARM_NO_REG);
+
+    put16(0, 0xF981); put16(2, 0x03AF);                  /* vst4.8 {d0[5],d1[5],d2[5],d3[5]}, [r1] */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VST_LANE, "vst4", 0, 1, 4, 1, 5, 0, 1, 0, ARM_NO_REG);
+
+    put16(0, 0xF981); put16(2, 0x0BCD);                  /* vst4.32 {d0[1],d2[1],d4[1],d6[1]}, [r1]! */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VST_LANE, "vst4", 0, 1, 4, 2, 1, 2, 1, 1, ARM_NO_REG);
+
+    put16(0, 0xF981); put16(2, 0x07EF);                  /* vst4.16 {d0[3],d2[3],d4[3],d6[3]}, [r1] */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VST_LANE, "vst4", 0, 1, 4, 2, 3, 1, 1, 0, ARM_NO_REG);
+
+    /* All lanes. size is h2 bits 7:6, T is bit 5, a is bit 4. */
+    put16(0, 0xF9A0); put16(2, 0x0C0F);                  /* vld1.8 {d0[]}, [r0] */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_DUP, "vld1", 0, 0, 1, 1, 0, 0, 1, 0, ARM_NO_REG);
+
+    put16(0, 0xF9A0); put16(2, 0x0C6D);                  /* vld1.16 {d0[], d1[]}, [r0]! */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_DUP, "vld1", 0, 0, 1, 1, 0, 1, 2, 1, ARM_NO_REG);
+
+    put16(0, 0xF9E0); put16(2, 0x0C82);                  /* vld1.32 {d16[]}, [r0], r2 */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_DUP, "vld1", 16, 0, 1, 1, 0, 2, 1, 1, 2);
+
+    put16(0, 0xF9A0); put16(2, 0x0CAF);                  /* vld1.32 {d0[], d1[]}, [r0] */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_DUP, "vld1", 0, 0, 1, 1, 0, 2, 2, 0, ARM_NO_REG);
+
+    put16(0, 0xF9E0); put16(2, 0xEC2F);                  /* vld1.8 {d30[], d31[]}, [r0] */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_DUP, "vld1", 30, 0, 1, 1, 0, 0, 2, 0, ARM_NO_REG);
+
+    put16(0, 0xF9A0); put16(2, 0x0C5F);                  /* vld1.16 {d0[]}, [r0 :16] */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_DUP, "vld1", 0, 0, 1, 1, 0, 1, 1, 0, ARM_NO_REG);
+
+    put16(0, 0xF9A0); put16(2, 0x0D0F);                  /* vld2.8 {d0[], d1[]}, [r0] */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_DUP, "vld2", 0, 0, 2, 1, 0, 0, 1, 0, ARM_NO_REG);
+
+    put16(0, 0xF9A0); put16(2, 0x0D6D);                  /* vld2.16 {d0[],d2[]}, [r0]! */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_DUP, "vld2", 0, 0, 2, 2, 0, 1, 1, 1, ARM_NO_REG);
+
+    put16(0, 0xF9E0); put16(2, 0x0D8F);                  /* vld2.32 {d16[], d17[]}, [r0] */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_DUP, "vld2", 16, 0, 2, 1, 0, 2, 1, 0, ARM_NO_REG);
+
+    put16(0, 0xF9A0); put16(2, 0x0E0F);                  /* vld3.8 {d0[], d1[], d2[]}, [r0] */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_DUP, "vld3", 0, 0, 3, 1, 0, 0, 1, 0, ARM_NO_REG);
+
+    put16(0, 0xF9A0); put16(2, 0x0E6D);                  /* vld3.16 {d0[],d2[],d4[]}, [r0]! */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_DUP, "vld3", 0, 0, 3, 2, 0, 1, 1, 1, ARM_NO_REG);
+
+    put16(0, 0xF9E0); put16(2, 0x0E82);                  /* vld3.32 {d16[], d17[], d18[]}, [r0], r2 */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_DUP, "vld3", 16, 0, 3, 1, 0, 2, 1, 1, 2);
+
+    put16(0, 0xF9A0); put16(2, 0x0F0F);                  /* vld4.8 {d0[], d1[], d2[], d3[]}, [r0] */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_DUP, "vld4", 0, 0, 4, 1, 0, 0, 1, 0, ARM_NO_REG);
+
+    put16(0, 0xF9A0); put16(2, 0x0F6D);                  /* vld4.16 {d0[],d2[],d4[],d6[]}, [r0]! */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_DUP, "vld4", 0, 0, 4, 2, 0, 1, 1, 1, ARM_NO_REG);
+
+    put16(0, 0xF9E0); put16(2, 0x0F8F);                  /* vld4.32 {d16[], d17[], d18[], d19[]}, [r0] */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_DUP, "vld4", 16, 0, 4, 1, 0, 2, 1, 0, ARM_NO_REG);
+
+    /* size 11 is 32-bit elements for VLD4 only, with the a bit set as the
+     * 16-byte alignment hint. */
+    put16(0, 0xF9A0); put16(2, 0x0FDF);                  /* vld4.32 {d0[], d1[], d2[], d3[]}, [r0 :128] */
+    in = dec(ARM_T32, BASE);
+    check_lane_form(&in, OP_NEON_VLD_DUP, "vld4", 0, 0, 4, 1, 0, 2, 1, 0, ARM_NO_REG);
+
+    /* The A = 0 forms keep their own decode. */
+    put16(0, 0xF920); put16(2, 0x070F);                  /* vld1.8 {d0}, [r0] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VLD1 && in.vd == 0 && in.imm == 1);
+    put16(0, 0xF901); put16(2, 0x070F);                  /* vst1.8 {d0}, [r1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VST1 && in.vd == 0 && in.imm == 1);
+    put16(0, 0xF920); put16(2, 0x080F);                  /* vld2.8 {d0-d1}, [r0] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VLDN && in.vd == 0 && in.imm == 2);
+
+    /* Rejects, each computed from the tables. The comment names the field
+     * that makes it UNDEFINED and the valid neighbour, where there is one. */
+
+    /* VLD1 single 16-bit, ia = 0110: ia[1] must be 0 for VLD1 (neighbour
+     * 0x045F, ia = 0101). */
+    check_lane_reject(0xF9A0, 0x046F);
+
+    /* VLD3 single 32-bit, ia = 1001: ia[1:0] must be 00 for VLD3 (neighbour
+     * 0x0A8F, ia = 1000). */
+    check_lane_reject(0xF9E0, 0x0A9F);
+
+    /* VLD1 single 32-bit, ia = 0100: ia[2] must be 0 for VLD1 (neighbour
+     * 0x083F, ia = 0011). */
+    check_lane_reject(0xF9E0, 0x084F);
+
+    /* VLD1 single 32-bit, ia = 0010: ia[1:0] must be 00 or 11 for VLD1
+     * (neighbour 0x083F). */
+    check_lane_reject(0xF9E0, 0x082F);
+
+    /* VLD4 single 32-bit, ia = 0011: ia[1:0] must not be 11 for VLD4
+     * (neighbour 0x0B02, ia = 0000). */
+    check_lane_reject(0xF9E0, 0x0B3F);
+
+    /* A store with the all-lanes shape: h2 bits 11:10 = 11 with L = 0. */
+    check_lane_reject(0xF981, 0x0C0F);
+
+    /* VLD1 all lanes, size 11 (h2 bits 7:6): n = 1 has no size-11 form. */
+    check_lane_reject(0xF9A0, 0x0CCF);
+
+    /* VLD2 all lanes, size 11, a = 0: n = 2 has no size-11 form. */
+    check_lane_reject(0xF9A0, 0x0DCF);
+
+    /* VLD4 all lanes, size 11, a = 0: the size-11 form needs a = 1
+     * (neighbour 0x0FDF). */
+    check_lane_reject(0xF9A0, 0x0FCF);
+
+    /* VLD3 all lanes, a = 1 (h2 bit 4): VLD3 has no alignment hint (neighbour
+     * 0x0E0F). */
+    check_lane_reject(0xF9A0, 0x0E1F);
+
+    /* VLD1 all lanes with T, d = 31: the second register would be d32
+     * (neighbour 0xEC2F, d = 30). */
+    check_lane_reject(0xF9E0, 0xFC2F);
+
+    /* VLD4 single, d = 29 with 8-bit elements: d + 3 = 32 (neighbour 0xC30F,
+     * d = 28, last register d31). */
+    check_lane_reject(0xF9E0, 0xD30F);
+
+    /* Rn = pc (h1 bits 3:0 = 1111), with the all-lanes and single-lane shapes. */
+    check_lane_reject(0xF9AF, 0x0C0F);
+    check_lane_reject(0xF9AF, 0x002F);
+
+    printf("ok   neon structures: vld1-4/vst1-4 single lane and all lanes, index, step, size, writeback, and their rejects\n");
+}
+
 /* The narrowing forms. VQMOVN and VQMOVUN are in the two-register group, with
  * op = h2 bits 7:6. VSHRN to VQRSHRUN are in the shift group, with opc 1000
  * or 1001, and there h2 bit 6 is the rounding flag, not Q. Each encoding was
@@ -2707,6 +2981,7 @@ int main(void) {
     test_neon_shuffle_forms();
     test_neon_shift_imm_forms();
     test_neon_ldst_multi();
+    test_neon_ldst_lane();
     test_neon_narrow_forms();
     test_neon_cmp_forms();
     test_neon_shl_reg_forms();

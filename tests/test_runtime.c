@@ -2023,6 +2023,54 @@ static void test_neon_ldst(void) {
     printf("ok   neon structures: vld2/3/4 element order, Q pairs, interleave round trips\n");
 }
 
+/* VLD1-4 / VST1-4 to one lane and to all lanes. The emitter builds these from
+ * neon_set_lane (one element into one lane, the other lanes kept), neon_get_lane
+ * (one lane out, for a store) and neon_dup (one element in every lane). No
+ * helper was added for them, so this checks the existing ones at every size and
+ * index the forms can reach: bytes 0-7, halfwords 0-3, words 0-1. The emitted C
+ * is checked by compiling it, not here. */
+static void test_neon_ldst_lane_c(void) {
+    const uint64_t base = 0x7766554433221100ull;
+
+    /* Lane insert, bytes: lane i takes the value, every other byte is kept. */
+    for (int i = 0; i < 8; i++) {
+        uint64_t sh = (uint64_t)i * 8;
+        uint64_t r = neon_set_lane(base, 0xAB, 0, i);
+        assert(r == ((base & ~(0xFFull << sh)) | (0xABull << sh)));
+        assert(neon_get_lane(r, 0, i, 1) == 0xAB);
+        assert(neon_get_lane(r, 0, i, 0) == 0xFFFFFFABu);      /* signed: sign-extended */
+    }
+    /* The value is masked to the lane: a store reads back only its low byte. */
+    assert(neon_set_lane(0, 0x1FF, 0, 0) == 0xFFull);
+
+    /* Halfwords, lanes 0-3. */
+    for (int i = 0; i < 4; i++) {
+        uint64_t sh = (uint64_t)i * 16;
+        uint64_t r = neon_set_lane(base, 0xBEEF, 1, i);
+        assert(r == ((base & ~(0xFFFFull << sh)) | (0xBEEFull << sh)));
+        assert(neon_get_lane(r, 1, i, 1) == 0xBEEF);
+        assert(neon_get_lane(r, 1, i, 0) == 0xFFFFBEEFu);
+    }
+
+    /* Words, lanes 0-1. */
+    for (int i = 0; i < 2; i++) {
+        uint64_t sh = (uint64_t)i * 32;
+        uint64_t r = neon_set_lane(base, 0xDEADBEEFu, 2, i);
+        assert(r == ((base & ~(0xFFFFFFFFull << sh)) | (0xDEADBEEFull << sh)));
+        assert(neon_get_lane(r, 2, i, 1) == 0xDEADBEEFu);
+    }
+
+    /* All lanes: one element in every lane of the D word. */
+    assert(neon_dup(0x5A, 0) == 0x5A5A5A5A5A5A5A5Aull);
+    assert(neon_dup(0x1FF, 0) == 0xFFFFFFFFFFFFFFFFull);       /* masked to the byte */
+    assert(neon_dup(0x1234, 1) == 0x1234123412341234ull);
+    assert(neon_dup(0x89ABCDEFu, 2) == 0x89ABCDEF89ABCDEFull);
+    for (int j = 0; j < 8; j++)
+        assert(neon_get_lane(neon_dup(0x5A, 0), 0, j, 1) == 0x5A);
+
+    printf("ok   neon lanes: set/get lane at every byte, halfword and word index, and all-lanes replicate\n");
+}
+
 /* --- narrowing shifts and saturating narrows -------------------------------- */
 
 static void test_neon_narrow(void) {
@@ -2134,6 +2182,7 @@ int main(void) {
     test_neon_widen();
     test_neon_shuffle();
     test_neon_ldst();
+    test_neon_ldst_lane_c();
     test_neon_narrow();
     test_neon_cmpz_c();
     test_neon_misc_c();

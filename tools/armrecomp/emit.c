@@ -1704,6 +1704,45 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             break;
         }
 
+        case OP_NEON_VLD_LANE: case OP_NEON_VST_LANE: case OP_NEON_VLD_DUP: {
+            /* VLD1-4/VST1-4 to one lane, and VLD1-4 to all lanes. Element k is
+             * at base + k*esize. A single-lane element goes to lane neon_lane
+             * of register vd + k*inc and the other lanes keep their values; an
+             * all-lanes element is copied into every lane of vd + k*inc, and
+             * neon_q also fills the register after it. Loads read every element
+             * before any register changes. The base is read once, and writeback
+             * comes last, by the n*esize bytes moved or by Rm. */
+            int n = (int)in->imm, esz = 1 << in->neon_size;
+            int words = in->neon_q ? 2 : 1;
+            const char *rn = reg_name(in->rn);
+            const char *ws = in->neon_size == 0 ? "8" : in->neon_size == 1 ? "16" : "32";
+            int store = in->op == OP_NEON_VST_LANE;
+            fprintf(f, "    { uint32_t _a = %s;%s\n", rn, store ? "" : " uint32_t _e[4];");
+            if (store) {
+                for (int k = 0; k < n; k++)
+                    fprintf(f, "      vita_write%s(_a + %d, (uint%s_t)neon_get_lane(neon_getd(%d), %u, %d, 1));\n",
+                            ws, k * esz, ws, in->vd + k * in->neon_inc, in->neon_size, in->neon_lane);
+            } else {
+                for (int k = 0; k < n; k++)
+                    fprintf(f, "      _e[%d] = vita_read%s(_a + %d);\n", k, ws, k * esz);
+                for (int k = 0; k < n; k++) {
+                    int d = in->vd + k * in->neon_inc;
+                    if (in->op == OP_NEON_VLD_LANE)
+                        fprintf(f, "      neon_setd(%d, neon_set_lane(neon_getd(%d), _e[%d], %u, %d));\n",
+                                d, d, k, in->neon_size, in->neon_lane);
+                    else
+                        for (int w = 0; w < words; w++)
+                            fprintf(f, "      neon_setd(%d, neon_dup(_e[%d], %u));\n", d + w, k, in->neon_size);
+                }
+            }
+            if (in->writeback) {
+                if (in->rm != ARM_NO_REG) fprintf(f, "      %s = _a + %s;\n", rn, src_name(in, in->rm));
+                else                      fprintf(f, "      %s = _a + %d;\n", rn, n * esz);
+            }
+            fprintf(f, "    }\n");
+            break;
+        }
+
         case OP_VMOV_V_RR: case OP_VMOV_RR_V: {
             int w = in->vfp_dp ? in->vm * 2 : in->vm;     /* first word of the pair */
             if (in->op == OP_VMOV_V_RR)

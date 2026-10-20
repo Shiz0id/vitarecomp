@@ -1517,17 +1517,111 @@ static int decode_neon_lsn(uint16_t h1, uint16_t h2, arm_insn *o) {
     return 1;
 }
 
+/* VLD1-4 / VST1-4 with A = 1, the single-lane and all-lanes forms: h1
+ * 1111 1001 1D L0 nnnn, h2 dddd ssNN xxxx mmmm (single lane, ss 00, 01 or 10)
+ * or h2 dddd 11NN ssTa mmmm (all lanes, loads only). n = NN + 1 elements.
+ *
+ * Single lane: element k is at base + k*esize and goes to lane `index` of
+ * register d + k*inc; the other lanes are left alone. All lanes: element k is
+ * copied into every lane of register d + k*inc, and VLD1 with T writes two
+ * registers (d and d+1) with the one element.
+ *
+ * The index_align bits xxxx carry the index, the register step and the
+ * alignment. The alignment hints are ignored, as in decode_neon_ls: they only
+ * add a fault the hardware raises for a misaligned pointer. Every other bit
+ * the tables reserve must be zero or the form is UNDEFINED. Fields: imm = n,
+ * neon_inc = the step (1 or 2), neon_size = the element size, neon_lane = the
+ * index (single lane), neon_q = two registers per element (all lanes, VLD1
+ * with T). Rm as for decode_neon_ls. Every check is made before a field is
+ * set, so a reject leaves `o` alone and the caller reads it as opaque SIMD. */
+static int decode_neon_lss(uint16_t h1, uint16_t h2, arm_insn *o) {
+    static const char *const names[2][5] = {
+        { 0, "vst1", "vst2", "vst3", "vst4" },
+        { 0, "vld1", "vld2", "vld3", "vld4" },
+    };
+    int L = (h1 >> 5) & 1;
+    int d = (((h1 >> 6) & 1) << 4) | ((h2 >> 12) & 0xF);
+    int n = ((h2 >> 8) & 3) + 1;
+    int rn = h1 & 0xF, rm = h2 & 0xF;
+    int all = ((h2 >> 10) & 3) == 3;   /* all lanes; else single lane */
+    int size, index = 0, inc = 1, words = 1;
+    if (rn == 15) return 0;
+
+    if (all) {
+        /* All lanes. A store with this shape is UNDEFINED. */
+        if (!L) return 0;
+        int T = (h2 >> 5) & 1, a = (h2 >> 4) & 1;
+        size = (h2 >> 6) & 3;
+        if (size == 3) {
+            /* Only VLD4 has the size-11 form, which is 32-bit elements with
+             * the a bit as a 16-byte alignment hint. The a bit must be 1. */
+            if (n != 4 || !a) return 0;
+            size = 2;
+        }
+        if (n == 1 && size == 0 && a) return 0;   /* VLD1.8 with the a bit */
+        if (n == 3 && a) return 0;                /* VLD3 has no hint */
+        /* VLD1 with T writes two registers (d, d+1); VLD2-4 with T step by 2. */
+        words = (n == 1 && T) ? 2 : 1;
+        inc = (T && n > 1) ? 2 : 1;
+        if (d + (n - 1) * inc + words - 1 > 31) return 0;
+    } else {
+        /* Single lane: size 0 bytes, 1 halfwords, 2 words. ia is index_align. */
+        int ia = (h2 >> 4) & 0xF;
+        size = (h2 >> 10) & 3;
+        switch (size) {
+            case 0:
+                index = ia >> 1; inc = 1;
+                if ((n == 1 || n == 3) && (ia & 1)) return 0;
+                break;
+            case 1:
+                index = ia >> 2;
+                if (n == 1) { inc = 1; if (ia & 2) return 0; }
+                else        { inc = (ia & 2) ? 2 : 1; if (n == 3 && (ia & 1)) return 0; }
+                break;
+            default:
+                index = ia >> 3;
+                if (n == 1) {
+                    inc = 1;
+                    if ((ia & 4) || (ia & 3) == 1 || (ia & 3) == 2) return 0;
+                } else {
+                    inc = (ia & 4) ? 2 : 1;
+                    if (n == 2 && (ia & 2)) return 0;
+                    if (n == 3 && (ia & 3)) return 0;
+                    if (n == 4 && (ia & 3) == 3) return 0;
+                }
+                break;
+        }
+        if (d + (n - 1) * inc > 31) return 0;
+    }
+
+    o->op = all ? OP_NEON_VLD_DUP : (L ? OP_NEON_VLD_LANE : OP_NEON_VST_LANE);
+    o->rn = (int8_t)rn;
+    o->vd = (int8_t)d;
+    o->imm = (uint32_t)n;
+    o->has_imm = 1;
+    o->neon_size = (uint8_t)size;
+    o->neon_q = (uint8_t)(words == 2);
+    o->neon_inc = (uint8_t)inc;
+    o->neon_lane = (uint8_t)index;
+    o->writeback = (uint8_t)(rm != 15);
+    o->rm = (rm == 15 || rm == 13) ? ARM_NO_REG : (int8_t)rm;
+    set(o, A_SIMD, names[L][n]);
+    return 1;
+}
+
 /* Element and structure loads/stores: h1 1111 1001 AD L0 nnnn, h2 dddd tttt
  * sszz mmmm. VLD1/VST1 of whole registers (A=0, the four "multiple single
  * elements" types) are handled here, which is what memcpy, struct copies and
  * every vectorised zeroing loop use; the multiple-structures forms go to
- * decode_neon_lsn. Lane size is irrelevant to the bytes moved on a
- * little-endian machine, and the alignment hint only adds a fault the
- * hardware would raise for a misaligned pointer, so neither changes the
- * translation. Rm: 15 no writeback, 13 advance by the transfer size, any
- * other register advance by it. */
+ * decode_neon_lsn, and A=1 (single and all lanes) goes to decode_neon_lss.
+ * Lane size is irrelevant to the bytes moved on a little-endian machine, and
+ * the alignment hint only adds a fault the hardware would raise for a
+ * misaligned pointer, so neither changes the translation. Rm: 15 no
+ * writeback, 13 advance by the transfer size, any other register advance by
+ * it. */
 static int decode_neon_ls(uint16_t h1, uint16_t h2, arm_insn *o) {
-    if ((h1 & 0xFF90) != 0xF900) return 0;
+    if ((h1 & 0xFF10) != 0xF900) return 0;
+    if (h1 & 0x80) return decode_neon_lss(h1, h2, o);
     int L = (h1 >> 5) & 1;
     int d = (((h1 >> 6) & 1) << 4) | ((h2 >> 12) & 0xF);
     int type = (h2 >> 8) & 0xF, align = (h2 >> 4) & 3;

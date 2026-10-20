@@ -110,6 +110,12 @@ typedef enum {
     OP_NEON_VLDN, OP_NEON_VSTN, /* VLD2-4/VST2-4 (multiple structures): imm
                                    members, each neon_q ? a Q pair : a D,
                                    interleaved in memory; see neon_inc        */
+    OP_NEON_VLD_LANE, OP_NEON_VST_LANE, /* VLD1-4/VST1-4 to or from one lane: imm
+                                   elements, element k in register vd + k*neon_inc
+                                   at lane neon_lane, width from neon_size     */
+    OP_NEON_VLD_DUP,            /* VLD1-4 all lanes: imm elements, element k
+                                   copied to every lane of vd + k*neon_inc;
+                                   neon_q: two registers per element (VLD1 T)  */
     OP_NEON_NARROW_SHR, OP_NEON_NARROW_RSHR, /* VSHRN, VRSHRN: Qm narrowed to Dd by
                                    imm, truncated to neon_size; RSHR rounds  */
     OP_NEON_NARROW_QSHR, OP_NEON_NARROW_QRSHR, /* VQSHRN, VQRSHRN, and VQMOVN (imm 0):
@@ -259,6 +265,11 @@ typedef struct {
      * the words per member and the element size; no one of those fields can
      * carry a third value without the others changing meaning. */
     uint8_t    neon_inc;
+
+    /* VLD/VST single lane: the lane index, in elements of neon_size. Its own
+     * field because imm already holds the element count n for these ops, and
+     * neon_inc, neon_size and neon_q are all in use for the same op. */
+    uint8_t    neon_lane;
 
     /* Bitfield ops. Kept out of `imm`/`shift_amt` because a field named for
      * something else is how a reader ends up trusting the wrong one. */
