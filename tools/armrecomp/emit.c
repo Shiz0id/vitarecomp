@@ -466,6 +466,19 @@ static uint32_t through_veneer(const vm_image *img, uint32_t addr) {
     return addr + 8 + 8 + off;     /* the add's pc reads as its address + 8 */
 }
 
+/* The shuffles take their operands as arrays of one or two D words. Each
+ * element is read into the array before the helper runs, and stored only
+ * after it, so a destination that is also a source reads its old value. */
+static void emit_neon_load(FILE *f, const char *arr, int reg, int regs) {
+    for (int k = 0; k < regs; k++)
+        fprintf(f, " %s[%d] = neon_getd(%d);", arr, k, reg + k);
+}
+
+static void emit_neon_store(FILE *f, const char *arr, int reg, int regs) {
+    for (int k = 0; k < regs; k++)
+        fprintf(f, " neon_setd(%d, %s[%d]);", reg + k, arr, k);
+}
+
 static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db,
                      const funcset *fs, const fbody *b,
                      const arm_insn *in, FILE *f, emit_stats *st) {
@@ -1299,6 +1312,77 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             fprintf(f, "    neon_setd(%d, neon_movn(neon_getd(%d), neon_getd(%d), %d));\n",
                     in->vd, in->vm, in->vm + 1, in->neon_size);
             break;
+
+        /* Byte and element shuffles, and table lookup (neon.h). The Q forms
+         * are the two D words of each pair, and the helpers work on them as
+         * the architecture defines for each op. */
+        case OP_NEON_EXT: {
+            int regs = in->neon_q ? 2 : 1;
+            fprintf(f, "    { uint64_t a[2] = {0, 0}, b[2] = {0, 0};");
+            emit_neon_load(f, "a", in->vn, regs);
+            emit_neon_load(f, "b", in->vm, regs);
+            fprintf(f, " neon_ext(a, b, %d, %u);", regs, (unsigned)in->imm);
+            emit_neon_store(f, "a", in->vd, regs);
+            fprintf(f, " }\n");
+            break;
+        }
+
+        case OP_NEON_REV: {
+            int regs = in->neon_q ? 2 : 1;
+            fprintf(f, "    { uint64_t a[2] = {0, 0};");
+            emit_neon_load(f, "a", in->vm, regs);
+            fprintf(f, " neon_rev(a, %d, %u, %d);", regs, (unsigned)in->imm, in->neon_size);
+            emit_neon_store(f, "a", in->vd, regs);
+            fprintf(f, " }\n");
+            break;
+        }
+
+        /* Two outputs: d takes a and m takes b. Both are read first. */
+        case OP_NEON_SWP: case OP_NEON_TRN: case OP_NEON_UZP: case OP_NEON_ZIP: {
+            int regs = in->neon_q ? 2 : 1;
+            fprintf(f, "    { uint64_t a[2] = {0, 0}, b[2] = {0, 0};");
+            emit_neon_load(f, "a", in->vd, regs);
+            emit_neon_load(f, "b", in->vm, regs);
+            if (in->op == OP_NEON_SWP)
+                fprintf(f, " neon_swp(a, b, %d);", regs);
+            else
+                fprintf(f, " neon_%s(a, b, %d, %d);",
+                        in->op == OP_NEON_TRN ? "trn" : in->op == OP_NEON_UZP ? "uzp" : "zip",
+                        regs, in->neon_size);
+            emit_neon_store(f, "a", in->vd, regs);
+            emit_neon_store(f, "b", in->vm, regs);
+            fprintf(f, " }\n");
+            break;
+        }
+
+        /* The lane is read before any of the destination is written, so vd
+         * may equal vm. */
+        case OP_NEON_DUP_LANE: {
+            int regs = in->neon_q ? 2 : 1;
+            fprintf(f, "    { uint64_t _s = neon_dup_lane(neon_getd(%d), %d, %u);",
+                    in->vm, in->neon_size, (unsigned)in->imm);
+            for (int k = 0; k < regs; k++)
+                fprintf(f, " neon_setd(%d, _s);", in->vd + k);
+            fprintf(f, " }\n");
+            break;
+        }
+
+        /* The table is read in full, and the index and the old vd too, before
+         * the destination is written. VTBX passes the old vd as the value for
+         * an out-of-range index; VTBL passes zero. */
+        case OP_NEON_TBL: case OP_NEON_TBX: {
+            int cnt = (int)in->imm;
+            fprintf(f, "    { uint64_t t[4] = {0, 0, 0, 0};");
+            for (int k = 0; k < cnt; k++)
+                fprintf(f, " t[%d] = neon_getd(%d);", k, in->vn + k);
+            fprintf(f, " uint64_t ix = neon_getd(%d);", in->vm);
+            if (in->op == OP_NEON_TBX)
+                fprintf(f, " neon_setd(%d, neon_tbl(t, %d, ix, neon_getd(%d))); }\n",
+                        in->vd, cnt, in->vd);
+            else
+                fprintf(f, " neon_setd(%d, neon_tbl(t, %d, ix, 0)); }\n", in->vd, cnt);
+            break;
+        }
 
         case OP_NEON_DUP: {
             int regs = in->neon_q ? 2 : 1;

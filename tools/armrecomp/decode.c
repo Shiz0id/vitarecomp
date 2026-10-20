@@ -1051,6 +1051,109 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
             return 1;
         }
     }
+
+    /* VEXT: h1 1110 1111 1D11 nnnn, h2 dddd imm4 N Q M 0 mmmm. U (h1 bit 12)
+     * is 0, which the mask fixes, and bit 4 of h2 is 0. VEXT moves bytes, so
+     * it has no size field. imm4 is a byte offset: a D form with imm4 >= 8
+     * would read past the 16 bytes of the pair and is not encoded. */
+    if ((h1 & 0xFFB0) == 0xEFB0 && (h2 & 0x0010) == 0) {
+        int imm = (h2 >> 8) & 0xF;
+        if (Q && ((d | n | m) & 1)) return 0;
+        if (!Q && imm >= 8) return 0;
+        o->op = OP_NEON_EXT;
+        o->vd = (int8_t)d; o->vn = (int8_t)n; o->vm = (int8_t)m;
+        o->neon_q = (uint8_t)Q;
+        o->neon_size = 0;
+        o->imm = (uint32_t)imm;
+        o->has_imm = 1;
+        set(o, A_SIMD, "vext.8");
+        return 1;
+    }
+
+    /* VDUP (scalar): h1 1111 1111 1D11 imm4, h2 dddd 1100 0 Q M 0 mmmm. The
+     * lane size and the index share imm4. The lowest set bit p of imm4 gives
+     * the size (xxx1 is 8-bit, xx10 16-bit, x100 32-bit, p = 0, 1, 2), and the
+     * index is imm4 above that bit: imm4 >> (p + 1). x000 is not encoded. The
+     * source is always a D register, M:mmmm, even for a Q destination. */
+    if ((h1 & 0xFFB0) == 0xFFB0 && (h2 & 0x0F90) == 0x0C00) {
+        int imm4 = h1 & 0xF;
+        int p = (imm4 & 1) ? 0 : (imm4 & 2) ? 1 : (imm4 & 4) ? 2 : -1;
+        if (p < 0 || (Q && (d & 1))) return 0;
+        static const char *const nm[3] = { "vdup.8", "vdup.16", "vdup.32" };
+        o->op = OP_NEON_DUP_LANE;
+        o->vd = (int8_t)d; o->vm = (int8_t)m;
+        o->neon_q = (uint8_t)Q;
+        o->neon_size = (uint8_t)p;
+        o->imm = (uint32_t)(imm4 >> (p + 1));
+        o->has_imm = 1;
+        set(o, A_SIMD, nm[p]);
+        return 1;
+    }
+
+    /* VTBL and VTBX: h1 1111 1111 1D11 nnnn, h2 dddd 10 len(2) N op M 0 mmmm,
+     * op (h2 bit 6) 1 for VTBX. The table is len+1 consecutive D registers
+     * from N:nnnn, so n + len + 1 must not pass D31. Always D registers. */
+    if ((h1 & 0xFFB0) == 0xFFB0 && (h2 & 0x0C10) == 0x0800) {
+        int count = ((h2 >> 8) & 3) + 1;
+        int tbx = (h2 >> 6) & 1;
+        if (n + count > 32) return 0;
+        o->op = tbx ? OP_NEON_TBX : OP_NEON_TBL;
+        o->vd = (int8_t)d; o->vn = (int8_t)n; o->vm = (int8_t)m;
+        o->neon_q = 0;
+        o->neon_size = 0;
+        o->imm = (uint32_t)count;
+        o->has_imm = 1;
+        set(o, A_SIMD, tbx ? "vtbx.8" : "vtbl.8");
+        return 1;
+    }
+
+    /* Two registers, the reversals and permutes: h1 1111 1111 1D11 ssAA,
+     * h2 dddd opc(4) 0 Q M 0 mmmm, with h2 bits 11 and 4 clear. A (h1 bits
+     * 1:0) picks the group. A = 00 is VREV, where opc gives the container
+     * (0 VREV64, 1 VREV32, 2 VREV16) and an element must be smaller than its
+     * container, so opc + size stays below 3. A = 10 is VSWP (opc 0000, size
+     * 0 only), VTRN (0001), VUZP (0010) and VZIP (0011). Size 3 is undefined
+     * for all of them, and so are VUZP and VZIP at size 2 with D registers.
+     * VMOVN (A = 10, opc 0100) and the F32 group (size 2, A bit 0 set) are
+     * handled above and their opc and A values do not reach this code. */
+    if ((h1 & 0xFFB0) == 0xFFB0 && (h2 & 0x0810) == 0) {
+        int A = h1 & 3, size = (h1 >> 2) & 3, opc = (h2 >> 7) & 0xF;
+        if (A == 0 && opc <= 2 && opc + size < 3) {
+            static const char *const nm[3][3] = {
+                { "vrev64.8", "vrev64.16", "vrev64.32" },
+                { "vrev32.8", "vrev32.16", "" },
+                { "vrev16.8", "", "" },
+            };
+            if (Q && ((d | m) & 1)) return 0;
+            o->op = OP_NEON_REV;
+            o->vd = (int8_t)d; o->vm = (int8_t)m;
+            o->neon_q = (uint8_t)Q;
+            o->neon_size = (uint8_t)size;
+            o->imm = (uint32_t)(64 >> opc);                /* container bits */
+            o->has_imm = 1;
+            set(o, A_SIMD, nm[opc][size]);
+            return 1;
+        }
+        if (A == 2 && opc <= 3) {
+            static const char *const nm[4][3] = {
+                { "vswp", "", "" },
+                { "vtrn.8", "vtrn.16", "vtrn.32" },
+                { "vuzp.8", "vuzp.16", "vuzp.32" },
+                { "vzip.8", "vzip.16", "vzip.32" },
+            };
+            if (size == 3) return 0;
+            if (opc == 0 && size != 0) return 0;           /* VSWP has no size */
+            if (opc >= 2 && !Q && size == 2) return 0;     /* VUZP/VZIP.32, D */
+            if (Q && ((d | m) & 1)) return 0;
+            o->op = opc == 0 ? OP_NEON_SWP : opc == 1 ? OP_NEON_TRN
+                  : opc == 2 ? OP_NEON_UZP : OP_NEON_ZIP;
+            o->vd = (int8_t)d; o->vm = (int8_t)m;
+            o->neon_q = (uint8_t)Q;
+            o->neon_size = (uint8_t)size;
+            set(o, A_SIMD, nm[opc][size]);
+            return 1;
+        }
+    }
     return 0;
 }
 

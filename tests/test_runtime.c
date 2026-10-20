@@ -901,6 +901,107 @@ static void test_neon_int_c(void) {
     printf("ok   neon int: wrapping mul/mla/mls, vqadd/vqsub clamp at both ends, shifts by immediate, vsra wrap\n");
 }
 
+static void test_neon_shuffle(void) {
+    /* A holds bytes 0x00..0x07 and B bytes 0x08..0x0F, so byte j of the pair
+     * is j. X and Y continue the count at 0x10 and 0x18. Every expected value
+     * below is worked out from that, by hand. */
+    const uint64_t A = 0x0706050403020100ull, B = 0x0F0E0D0C0B0A0908ull;
+    const uint64_t X = 0x1716151413121110ull, Y = 0x1F1E1D1C1B1A1918ull;
+    uint64_t a[2], b[2];
+
+    /* VEXT: the bytes of a:b from imm on. Q takes the second D word of b from
+     * the second half of the result, so bytes cross the halves. */
+    a[0] = A; b[0] = B;
+    neon_ext(a, b, 1, 3);
+    assert(a[0] == 0x0A09080706050403ull);
+    a[0] = A; b[0] = B;
+    neon_ext(a, b, 1, 7);
+    assert(a[0] == 0x0E0D0C0B0A090807ull);
+    a[0] = A; a[1] = B; b[0] = X; b[1] = Y;
+    neon_ext(a, b, 2, 0);
+    assert(a[0] == A && a[1] == B);                      /* imm 0 is a */
+    a[0] = A; a[1] = B; b[0] = X; b[1] = Y;
+    neon_ext(a, b, 2, 11);
+    assert(a[0] == 0x1211100F0E0D0C0Bull && a[1] == 0x1A19181716151413ull);
+
+    /* VREV: reverse the elements of each container. */
+    a[0] = A;
+    neon_rev(a, 1, 64, 0);
+    assert(a[0] == 0x0001020304050607ull);                /* VREV64.8 d */
+    a[0] = A;
+    neon_rev(a, 1, 32, 0);
+    assert(a[0] == 0x0405060700010203ull);                /* VREV32.8 d */
+    a[0] = A;
+    neon_rev(a, 1, 64, 1);
+    assert(a[0] == 0x0100030205040706ull);                /* VREV64.16 d */
+    a[0] = A;
+    neon_rev(a, 1, 32, 1);
+    assert(a[0] == 0x0504070601000302ull);                /* VREV32.16 d */
+    a[0] = A; a[1] = B;
+    neon_rev(a, 2, 16, 0);
+    assert(a[0] == 0x0607040502030001ull && a[1] == 0x0E0F0C0D0A0B0809ull); /* VREV16.8 q */
+    a[0] = A; a[1] = B;
+    neon_rev(a, 2, 64, 2);
+    assert(a[0] == 0x0302010007060504ull && a[1] == 0x0B0A09080F0E0D0Cull); /* VREV64.32 q */
+
+    /* VSWP exchanges the words. */
+    a[0] = A; a[1] = B; b[0] = X; b[1] = Y;
+    neon_swp(a, b, 2);
+    assert(a[0] == X && a[1] == Y && b[0] == A && b[1] == B);
+
+    /* VTRN: lane 2i+1 of a with lane 2i of b. */
+    a[0] = A; b[0] = B;
+    neon_trn(a, b, 1, 1);                                 /* 16-bit, d */
+    assert(a[0] == 0x0D0C050409080100ull && b[0] == 0x0F0E07060B0A0302ull);
+    a[0] = A; a[1] = B; b[0] = X; b[1] = Y;
+    neon_trn(a, b, 2, 2);                                 /* 32-bit, q: per half */
+    assert(a[0] == 0x1312111003020100ull && a[1] == 0x1B1A19180B0A0908ull);
+    assert(b[0] == 0x1716151407060504ull && b[1] == 0x1F1E1D1C0F0E0D0Cull);
+
+    /* VUZP: a gets the even elements of a:b, b the odd. The Q case takes its
+     * elements from both words, so word 0 of a holds elements of a's word 1. */
+    a[0] = A; b[0] = B;
+    neon_uzp(a, b, 1, 0);                                 /* 8-bit, d */
+    assert(a[0] == 0x0E0C0A0806040200ull && b[0] == 0x0F0D0B0907050301ull);
+    a[0] = A; a[1] = B; b[0] = X; b[1] = Y;
+    neon_uzp(a, b, 2, 1);                                 /* 16-bit, q */
+    assert(a[0] == 0x0D0C090805040100ull && a[1] == 0x1D1C191815141110ull);
+    assert(b[0] == 0x0F0E0B0A07060302ull && b[1] == 0x1F1E1B1A17161312ull);
+
+    /* VZIP: a0,b0,a1,b1,... ; a takes the first half of the interleave. */
+    a[0] = A; b[0] = B;
+    neon_zip(a, b, 1, 0);                                 /* 8-bit, d */
+    assert(a[0] == 0x0B030A0209010800ull && b[0] == 0x0F070E060D050C04ull);
+    a[0] = A; a[1] = B; b[0] = X; b[1] = Y;
+    neon_zip(a, b, 2, 1);                                 /* 16-bit, q: crosses */
+    assert(a[0] == 0x1312030211100100ull && a[1] == 0x1716070615140504ull);
+    assert(b[0] == 0x1B1A0B0A19180908ull && b[1] == 0x1F1E0F0E1D1C0D0Cull);
+    a[0] = A; a[1] = B; b[0] = X; b[1] = Y;
+    neon_zip(a, b, 2, 2);                                 /* 32-bit, q */
+    assert(a[0] == 0x1312111003020100ull && a[1] == 0x1716151407060504ull);
+    assert(b[0] == 0x1B1A19180B0A0908ull && b[1] == 0x1F1E1D1C0F0E0D0Cull);
+
+    /* VDUP (scalar): the lane is every lane of the result. */
+    assert(neon_dup_lane(A, 0, 5) == 0x0505050505050505ull);          /* .8 */
+    assert(neon_dup_lane(B, 1, 2) == 0x0D0C0D0C0D0C0D0Cull);          /* .16 */
+    assert(neon_dup_lane(A, 2, 1) == 0x0706050407060504ull);          /* .32 */
+
+    /* VTBL: an index past the table gives zero. Table of one D word: the
+     * index 8 is exactly 8 * len and 0xFF is far past it. */
+    uint64_t t[4] = { A, B, 0, 0 };
+    assert(neon_tbl(t, 1, 0x01070C080700FF03ull, 0) == 0x0107000007000003ull);
+    /* Table of two words, indices 16 (= 8 * 2) and 0xFF out of range. */
+    assert(neon_tbl(t, 2, 0x07FF100A000F0810ull, 0) == 0x0700000A000F0800ull);
+
+    /* VTBX: an out-of-range byte keeps the old destination byte. The old value
+     * is 0xEEDDCCBBAA998877, byte j being 0x77 + 0x11 * j. */
+    const uint64_t old = 0xEEDDCCBBAA998877ull;
+    assert(neon_tbl(t, 2, 0x07FF100A000F0810ull, old) == 0x07DDCC0A000F0877ull);
+    assert(neon_tbl(t, 1, 0x01070C080700FF03ull, old) == 0x0107CCBB07008803ull);
+
+    printf("ok   neon shuffles: vext, vrev, vswp, vtrn, vuzp, vzip, vdup scalar, vtbl/vtbx\n");
+}
+
 static void test_bit_ops(void) {
     assert(vita_rbit(1u) == 0x80000000u);
     assert(vita_rbit(0x12345678u) == 0x1E6A2C48u);
@@ -935,6 +1036,7 @@ int main(void) {
     test_neon_f32();
     test_neon_f32_b();
     test_neon_int_c();
+    test_neon_shuffle();
     test_bit_ops();
     test_parallel_and_lanes();
     test_vfp_d32();

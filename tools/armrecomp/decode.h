@@ -123,6 +123,12 @@ typedef enum {
     OP_NEON_SHL, OP_NEON_SHR, OP_NEON_SRA, /* by immediate: imm is the amount,
                                    neon_size the lane; SHR and SRA use
                                    vfp_unsigned for the signedness            */
+    OP_NEON_EXT,                /* vd = bytes imm.. of vn:vm, imm a byte offset */
+    OP_NEON_REV,                /* reverse elements in each imm-bit container  */
+    OP_NEON_SWP, OP_NEON_TRN, OP_NEON_UZP, OP_NEON_ZIP, /* permutes, neon_size lane */
+    OP_NEON_DUP_LANE,           /* every lane of vd = lane imm of D register vm */
+    OP_NEON_TBL, OP_NEON_TBX,   /* imm D registers from vn as a table; TBX keeps
+                                   the vd byte where the index is out of range  */
     OP_VMOV_V_RR,               /* two core regs (rt, rt2) -> a D register or
                                    an S pair, vm naming it                   */
     OP_VMOV_RR_V,               /* the reverse                              */

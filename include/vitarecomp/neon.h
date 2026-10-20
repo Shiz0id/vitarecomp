@@ -428,6 +428,133 @@ static inline uint64_t neon_sra(uint64_t d, uint64_t m, int amt, int size, int i
     return neon_add(d, neon_shr(m, amt, size, is_unsigned), size);
 }
 
+/* --- Advanced SIMD shuffles, table lookup and lane duplicate ----------------
+ *
+ * The array helpers take one or two D words (a[0], a[1] for a Q pair) and
+ * update them in place. They are written so that no output is stored until
+ * every input has been read, and the emitter loads its operands before it
+ * calls them, so a destination that is also a source behaves as the
+ * architecture defines it. */
+
+/* Byte i (0..7 within the word) of a word array, counted from word 0. */
+static inline uint64_t neon_byte(const uint64_t *w, int i) {
+    return (w[i >> 3] >> (8 * (i & 7))) & 0xFF;
+}
+
+/* Lane `i` of x, lanes of 8 << size bits, with v in place of its old value. */
+static inline uint64_t neon_put_lane(uint64_t x, int size, int i, uint64_t v) {
+    int sh = i * (8 << size);
+    return (x & ~(neon_lmask(size) << sh)) | (v << sh);
+}
+
+/* Element j of a word array, lanes of 8 << size bits, counted from word 0. */
+static inline uint64_t neon_elem(const uint64_t *w, int size, int j) {
+    int per = 8 >> size;                         /* lanes per D word */
+    return neon_lane_of(w[j / per], size, j % per);
+}
+
+/* VEXT: the bytes of a then b (a first), read from byte imm on, become a.
+ * imm is below the register width, so the index stays within a:b. */
+static inline void neon_ext(uint64_t *a, const uint64_t *b, int words, int imm) {
+    uint64_t r[2] = {0, 0};
+    int nb = 8 * words;
+    for (int i = 0; i < nb; i++) {
+        int j = i + imm;
+        uint64_t v = j < nb ? neon_byte(a, j) : neon_byte(b, j - nb);
+        r[i >> 3] |= v << (8 * (i & 7));
+    }
+    for (int k = 0; k < words; k++) a[k] = r[k];
+}
+
+/* VREV: the size-bit elements of each container of `cont` bits (64, 32 or
+ * 16) come in reverse order. Q does this to each D word. */
+static inline void neon_rev(uint64_t *a, int words, int cont, int size) {
+    int w = 8 << size, per = cont / w;           /* elements per container */
+    for (int k = 0; k < words; k++) {
+        uint64_t r = 0;
+        for (int j = 0; j < 64 / w; j++) {
+            int base = (j / per) * per;
+            r |= neon_lane_of(a[k], size, base + per - 1 - (j - base)) << (j * w);
+        }
+        a[k] = r;
+    }
+}
+
+/* VSWP: a and b exchange their words. */
+static inline void neon_swp(uint64_t *a, uint64_t *b, int words) {
+    for (int k = 0; k < words; k++) {
+        uint64_t t = a[k];
+        a[k] = b[k];
+        b[k] = t;
+    }
+}
+
+/* VTRN: within each D word, lane 2i+1 of a swaps with lane 2i of b. Q is two
+ * independent words, so nothing crosses the halves. */
+static inline void neon_trn(uint64_t *a, uint64_t *b, int words, int size) {
+    int lanes = 8 >> size;
+    for (int k = 0; k < words; k++)
+        for (int i = 0; i + 1 < lanes; i += 2) {
+            uint64_t x = neon_lane_of(a[k], size, i + 1), y = neon_lane_of(b[k], size, i);
+            a[k] = neon_put_lane(a[k], size, i + 1, y);
+            b[k] = neon_put_lane(b[k], size, i, x);
+        }
+}
+
+/* VUZP: a then b is one run of 2n elements, n = words * lanes-per-word, and
+ * it is split by parity: a gets the even ones, b the odd ones. For Q this
+ * runs across the two D words, not within each. */
+static inline void neon_uzp(uint64_t *a, uint64_t *b, int words, int size) {
+    int lanes = 8 >> size, n = words * lanes;
+    uint64_t ra[2] = {0, 0}, rb[2] = {0, 0};
+    for (int k = 0; k < n; k++) {
+        int e0 = 2 * k, e1 = 2 * k + 1;
+        uint64_t x = e0 < n ? neon_elem(a, size, e0) : neon_elem(b, size, e0 - n);
+        uint64_t y = e1 < n ? neon_elem(a, size, e1) : neon_elem(b, size, e1 - n);
+        ra[k / lanes] = neon_put_lane(ra[k / lanes], size, k % lanes, x);
+        rb[k / lanes] = neon_put_lane(rb[k / lanes], size, k % lanes, y);
+    }
+    for (int k = 0; k < words; k++) { a[k] = ra[k]; b[k] = rb[k]; }
+}
+
+/* VZIP: the elements of a and b are interleaved a0,b0,a1,b1,... over the
+ * whole register (both words of a Q). a takes the first n of them, b the
+ * rest. As with VUZP, a Q is not done half by half. */
+static inline void neon_zip(uint64_t *a, uint64_t *b, int words, int size) {
+    int lanes = 8 >> size, n = words * lanes;
+    uint64_t ra[2] = {0, 0}, rb[2] = {0, 0};
+    for (int k = 0; k < n; k++) {
+        int j0 = k, j1 = n + k;                  /* positions in the interleave */
+        uint64_t x = (j0 & 1) ? neon_elem(b, size, j0 >> 1) : neon_elem(a, size, j0 >> 1);
+        uint64_t y = (j1 & 1) ? neon_elem(b, size, j1 >> 1) : neon_elem(a, size, j1 >> 1);
+        ra[k / lanes] = neon_put_lane(ra[k / lanes], size, k % lanes, x);
+        rb[k / lanes] = neon_put_lane(rb[k / lanes], size, k % lanes, y);
+    }
+    for (int k = 0; k < words; k++) { a[k] = ra[k]; b[k] = rb[k]; }
+}
+
+/* VDUP (scalar): lane `idx` of the D word m, copied to every lane. */
+static inline uint64_t neon_dup_lane(uint64_t m, int size, int idx) {
+    int w = 8 << size;
+    uint64_t v = neon_lane_of(m, size, idx), r = 0;
+    for (int i = 0; i < 64 / w; i++)
+        r |= v << (i * w);
+    return r;
+}
+
+/* VTBL and VTBX: each byte of idx selects a byte of the table, which is
+ * `count` D words (1 to 4) laid end to end. An index at or past 8 * count
+ * takes the byte of `fill`: zero for VTBL, the old destination for VTBX. */
+static inline uint64_t neon_tbl(const uint64_t *t, int count, uint64_t idx, uint64_t fill) {
+    uint64_t r = 0;
+    for (int i = 0; i < 8; i++) {
+        uint64_t ix = (idx >> (8 * i)) & 0xFF, b;
+        b = ix < 8u * (uint64_t)count ? neon_byte(t, (int)ix) : ((fill >> (8 * i)) & 0xFF);
+        r |= b << (8 * i);
+    }
+    return r;
+}
+
 #ifdef __cplusplus
 }
 #endif
