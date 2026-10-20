@@ -132,6 +132,13 @@ typedef enum {
     OP_NEON_CMPZ, OP_NEON_FCMPZ, /* compare with zero: imm is the condition, 0 GT,
                                     1 GE, 2 EQ, 3 LE, 4 LT; FCMPZ is F32 lanes  */
     OP_NEON_ABS, OP_NEON_NEG,   /* integer absolute value and negate, wrapping */
+    OP_NEON_PADDL, OP_NEON_PADAL, /* pairwise add long, and accumulate into vd;
+                                   neon_size is the SOURCE lane, vfp_unsigned
+                                   the signedness                              */
+    OP_NEON_CLS, OP_NEON_CLZ,   /* count leading sign bits (not the sign bit
+                                   itself), and leading zeros                  */
+    OP_NEON_CNT, OP_NEON_MVN,   /* per-byte population count; bitwise NOT      */
+    OP_NEON_QABS, OP_NEON_QNEG, /* saturating absolute value and negate        */
     OP_NEON_MUL, OP_NEON_MLA, OP_NEON_MLS, /* integer, lanes of 8/16/32, wrapping */
     OP_NEON_QADD, OP_NEON_QSUB, /* saturating; vfp_unsigned picks the signedness */
     OP_NEON_CGT, OP_NEON_CGE,   /* integer compares, all-ones where true; vfp_unsigned */

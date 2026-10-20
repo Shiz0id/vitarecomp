@@ -1264,6 +1264,37 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             break;
         }
 
+        /* Two registers, miscellaneous, A = 00: the pairwise adds, the per-lane
+         * counts, VMVN and the saturating abs and neg (neon.h). neon_size is the
+         * SOURCE lane, as in the mnemonic, and vfp_unsigned the signedness of the
+         * pairwise adds. VPADAL reads vd as well as vm. Each D half reads only
+         * its own half of vm and vd, so the result may overwrite vm. */
+        case OP_NEON_PADDL: case OP_NEON_PADAL: case OP_NEON_CLS: case OP_NEON_CLZ:
+        case OP_NEON_CNT: case OP_NEON_MVN: case OP_NEON_QABS: case OP_NEON_QNEG: {
+            int regs = in->neon_q ? 2 : 1;
+            for (int k = 0; k < regs; k++) {
+                int d = in->vd + k, m = in->vm + k, sz = in->neon_size;
+                fprintf(f, "    neon_setd(%d, ", d);
+                if (in->op == OP_NEON_PADDL)
+                    fprintf(f, "neon_paddl(neon_getd(%d), %d, %d)", m, sz, in->vfp_unsigned);
+                else if (in->op == OP_NEON_PADAL)
+                    fprintf(f, "neon_padal(neon_getd(%d), neon_getd(%d), %d, %d)",
+                            d, m, sz, in->vfp_unsigned);
+                else if (in->op == OP_NEON_CLS)
+                    fprintf(f, "neon_cls(neon_getd(%d), %d)", m, sz);
+                else if (in->op == OP_NEON_CLZ)
+                    fprintf(f, "neon_clz(neon_getd(%d), %d)", m, sz);
+                else if (in->op == OP_NEON_CNT)
+                    fprintf(f, "neon_cnt(neon_getd(%d))", m);
+                else if (in->op == OP_NEON_MVN)
+                    fprintf(f, "~neon_getd(%d)", m);
+                else
+                    fprintf(f, "neon_qabs(neon_getd(%d), %d, %d)", m, sz, in->op == OP_NEON_QNEG);
+                fprintf(f, ");\n");
+            }
+            break;
+        }
+
         /* The integer signedness is the vfp_unsigned flag, as in the VFP forms. */
         case OP_NEON_FCVT_TO_INT: case OP_NEON_FCVT_FROM_INT: {
             int regs = in->neon_q ? 2 : 1;

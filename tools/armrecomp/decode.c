@@ -1340,15 +1340,20 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
         return 1;
     }
 
-    /* Two registers, the reversals and permutes: h1 1111 1111 1D11 ssAA,
-     * h2 dddd opc(4) 0 Q M 0 mmmm, with h2 bits 11 and 4 clear. A (h1 bits
-     * 1:0) picks the group. A = 00 is VREV, where opc gives the container
-     * (0 VREV64, 1 VREV32, 2 VREV16) and an element must be smaller than its
-     * container, so opc + size stays below 3. A = 10 is VSWP (opc 0000, size
-     * 0 only), VTRN (0001), VUZP (0010) and VZIP (0011). Size 3 is undefined
-     * for all of them, and so are VUZP and VZIP at size 2 with D registers.
-     * VMOVN (A = 10, opc 0100) and the F32 group (size 2, A bit 0 set) are
-     * handled above and their opc and A values do not reach this code. */
+    /* Two registers, the reversals, permutes and the rest of A = 00: h1
+     * 1111 1111 1D11 ssAA, h2 dddd opc(4) 0 Q M 0 mmmm, with h2 bits 11 and 4
+     * clear. A (h1 bits 1:0) picks the group. A = 00 is VREV, where opc gives
+     * the container (0 VREV64, 1 VREV32, 2 VREV16) and an element must be
+     * smaller than its container, so opc + size stays below 3. The other A =
+     * 00 forms are opc 0100 to 1111 less 0110 and 0111: VPADDL (0100 signed,
+     * 0101 unsigned), VCLS (1000), VCLZ (1001), VCNT (1010, size 0), VMVN
+     * (1011, size 0), VPADAL (1100 signed, 1101 unsigned), VQABS (1110) and
+     * VQNEG (1111). opc 0011, 0110 and 0111 are not claimed. A = 10 is VSWP
+     * (opc 0000, size 0 only), VTRN (0001), VUZP (0010) and VZIP (0011).
+     * Size 3 is undefined for all of them, and so are VUZP and VZIP at size 2
+     * with D registers. VMOVN (A = 10, opc 0100) and the F32 group (size 2, A
+     * bit 0 set) are handled above and their opc and A values do not reach
+     * this code. */
     if ((h1 & 0xFFB0) == 0xFFB0 && (h2 & 0x0810) == 0) {
         int A = h1 & 3, size = (h1 >> 2) & 3, opc = (h2 >> 7) & 0xF;
         if (A == 0 && opc <= 2 && opc + size < 3) {
@@ -1365,6 +1370,40 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
             o->imm = (uint32_t)(64 >> opc);                /* container bits */
             o->has_imm = 1;
             set(o, A_SIMD, nm[opc][size]);
+            return 1;
+        }
+        /* A = 00, opc 0100 to 1111 less 0110 and 0111: the pairwise adds, the
+         * counts, VMVN and the saturating abs and neg. opc 0011 is not here
+         * and falls through to the return at the end. The size rules: VCLS and
+         * VCLZ are undefined at size 3, VCNT and VMVN only exist at size 0, and
+         * the pairwise adds and VQABS/VQNEG are undefined at size 3. neon_size
+         * is the source lane, so it is the mnemonic's size for the pairwise
+         * adds. */
+        if (A == 0 && opc >= 4 && opc != 6 && opc != 7) {
+            if (Q && ((d | m) & 1)) return 0;
+            if (opc == 0x4 || opc == 0x5 || opc == 0xC || opc == 0xD) {  /* VPADDL, VPADAL */
+                if (size == 3) return 0;
+                int acc = opc >> 3, uns = opc & 1;      /* 1100 and 1101 accumulate */
+                o->op = acc ? OP_NEON_PADAL : OP_NEON_PADDL;
+                o->vfp_unsigned = (uint8_t)uns;
+                if (acc) set(o, A_SIMD, uns ? "vpadal.u" : "vpadal.s");
+                else     set(o, A_SIMD, uns ? "vpaddl.u" : "vpaddl.s");
+            } else if (opc == 0x8 || opc == 0x9) {        /* VCLS, VCLZ */
+                if (size == 3) return 0;
+                o->op = opc == 0x8 ? OP_NEON_CLS : OP_NEON_CLZ;
+                set(o, A_SIMD, opc == 0x8 ? "vcls.s" : "vclz.i");
+            } else if (opc == 0xA || opc == 0xB) {        /* VCNT, VMVN: bytes */
+                if (size != 0) return 0;
+                o->op = opc == 0xA ? OP_NEON_CNT : OP_NEON_MVN;
+                set(o, A_SIMD, opc == 0xA ? "vcnt.8" : "vmvn");
+            } else {                                      /* VQABS 1110, VQNEG 1111 */
+                if (size == 3) return 0;
+                o->op = opc == 0xE ? OP_NEON_QABS : OP_NEON_QNEG;
+                set(o, A_SIMD, opc == 0xE ? "vqabs.s" : "vqneg.s");
+            }
+            o->vd = (int8_t)d; o->vm = (int8_t)m;
+            o->neon_q = (uint8_t)Q;
+            o->neon_size = (uint8_t)size;
             return 1;
         }
         if (A == 2 && opc <= 3) {

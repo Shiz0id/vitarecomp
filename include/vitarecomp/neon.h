@@ -289,6 +289,104 @@ static inline uint64_t neon_abs(uint64_t x, int size) {
     return neon_sub(x ^ m, m, size);
 }
 
+/* --- Advanced SIMD two registers, miscellaneous, A = 00 ---------------------
+ *
+ * The pairwise adds, the per-lane counts, and the saturating abs and neg.
+ * Each takes one D word. These sit above neon_lmask, neon_lane_of and
+ * neon_sext, so they use only neon_add (for the accumulate) and plain shifts,
+ * and work each lane as an unsigned value with its sign taken by hand. */
+
+/* The leading zeros of a w-bit value, w for zero. A loop, not __builtin_clz,
+ * which is undefined at zero. */
+static inline int neon_clz_lane(uint64_t v, int w) {
+    int n = 0;
+    for (int b = w - 1; b >= 0 && !((v >> b) & 1); b--) n++;
+    return n;
+}
+
+/* VCLZ: the leading zeros of each lane. */
+static inline uint64_t neon_clz(uint64_t x, int size) {
+    int w = 8 << size;
+    uint64_t mask = size == 3 ? ~0ull : (1ull << w) - 1, r = 0;
+    for (int i = 0; i < 64 / w; i++)
+        r |= (uint64_t)neon_clz_lane((x >> (i * w)) & mask, w) << (i * w);
+    return r;
+}
+
+/* VCLS: the redundant sign bits of each lane, that is the bits below the top
+ * one that equal it. A negative lane is complemented first, which turns its
+ * run of ones into zeros, so the count is the leading zeros of that value
+ * less one: the sign bit, now clear, is one of those zeros and is not counted.
+ * The top bit of the complement is always clear, so the count is never
+ * negative. Zero and all ones both give w - 1. */
+static inline uint64_t neon_cls(uint64_t x, int size) {
+    int w = 8 << size;
+    uint64_t mask = size == 3 ? ~0ull : (1ull << w) - 1, r = 0;
+    for (int i = 0; i < 64 / w; i++) {
+        uint64_t v = (x >> (i * w)) & mask;
+        if ((v >> (w - 1)) & 1) v = ~v & mask;
+        r |= (uint64_t)(neon_clz_lane(v, w) - 1) << (i * w);
+    }
+    return r;
+}
+
+/* VCNT: the set bits of each byte, written in that byte. */
+static inline uint64_t neon_cnt(uint64_t x) {
+    uint64_t r = 0;
+    for (int i = 0; i < 8; i++) {
+        uint64_t b = (x >> (i * 8)) & 0xFF;
+        int c = 0;
+        for (int k = 0; k < 8; k++) c += (int)((b >> k) & 1);
+        r |= (uint64_t)c << (i * 8);
+    }
+    return r;
+}
+
+/* VQABS (neg = 0) and VQNEG (neg = 1): the absolute value or the negation of
+ * each lane, saturated. The minimum 2^(w-1) negated is one past the top, so it
+ * gives the maximum for both. Any other negative value negates as 0 - v in w
+ * bits, which is exact there. A positive value under VQABS is left alone.
+ * QC is not set, as with neon_qop. */
+static inline uint64_t neon_qabs(uint64_t x, int size, int neg) {
+    int w = 8 << size;
+    uint64_t mask = size == 3 ? ~0ull : (1ull << w) - 1;
+    uint64_t sign = 1ull << (w - 1), top = sign - 1, r = 0;
+    for (int i = 0; i < 64 / w; i++) {
+        uint64_t v = (x >> (i * w)) & mask, y;
+        if (v == sign) y = top;
+        else if (neg || (v & sign)) y = (0 - v) & mask;
+        else y = v;
+        r |= y << (i * w);
+    }
+    return r;
+}
+
+/* VPADDL: lane i of the result, which is 2w bits wide, is the sum of source
+ * lanes 2i and 2i+1 of x. Each is read signed or unsigned (is_unsigned). The
+ * sum is formed in int64_t, which holds two 32-bit lanes exactly, and cut to
+ * the result lane. size is the SOURCE lane size, as in the mnemonic. The
+ * result of one D word is 64 / (2w) lanes, so size 2 gives one 64-bit lane. */
+static inline uint64_t neon_paddl(uint64_t x, int size, int is_unsigned) {
+    int w = 8 << size, rw = 2 * w;
+    uint64_t mask = (1ull << w) - 1, sign = 1ull << (w - 1);
+    uint64_t rmask = rw == 64 ? ~0ull : (1ull << rw) - 1, r = 0;
+    for (int i = 0; i < 64 / rw; i++) {
+        int64_t s = 0;
+        for (int k = 0; k < 2; k++) {
+            uint64_t v = (x >> ((2 * i + k) * w)) & mask;
+            s += is_unsigned ? (int64_t)v : (int64_t)(v ^ sign) - (int64_t)sign;
+        }
+        r |= ((uint64_t)s & rmask) << (i * rw);
+    }
+    return r;
+}
+
+/* VPADAL: VPADDL of x, added to the result lanes of d, wrapping in each one.
+ * The add is neon_add at the result size, which is size + 1. */
+static inline uint64_t neon_padal(uint64_t d, uint64_t x, int size, int is_unsigned) {
+    return neon_add(d, neon_paddl(x, size, is_unsigned), size + 1);
+}
+
 /* F32 to S32 or U32, round toward zero. The float is checked against the
  * integer range before the cast: a cast of an out-of-range float is undefined
  * in C, and the architecture wants saturation there, not a host-dependent

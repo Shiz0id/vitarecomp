@@ -1575,6 +1575,122 @@ static void test_neon_cmpz_c(void) {
     printf("ok   neon cmpz: integer compares with zero at 8/16/32 bits, vabs/vneg wrap, f32 compares with zero\n");
 }
 
+/* The A = 00 forms of the two-registers-miscellaneous group on hand-worked
+ * lanes. Each expected lane follows from the definition: VCLS counts the bits
+ * below the top one that equal it, VCLZ the zeros above the top set bit, VQABS
+ * and VQNEG saturate the minimum to the maximum, and VPADDL sums each pair of
+ * lanes, read signed or unsigned, into lanes twice as wide. VPADAL adds that
+ * sum to the wide lanes of d, wrapping. Lane 0 is the lowest. */
+static void test_neon_misc_c(void) {
+    /* VCLS, 8-bit: 0 and -1 give 7 (the sign bit is not counted), the sign bit
+     * alone gives 0, 1 gives 6, 0x40 gives 0, 0xC0 gives 1 and 0xFE gives 6. */
+    uint64_t cls_in8[8] = { 0x00, 0xFF, 0x80, 0x01, 0x40, 0x7F, 0xC0, 0xFE };
+    uint64_t cls8[8]    = { 7, 7, 0, 6, 0, 0, 1, 6 };
+    assert(neon_cls(pack_lanes(cls_in8, 8, 8), 0) == pack_lanes(cls8, 8, 8));
+    /* 16 and 32 bits: the same kinds of lane. */
+    uint64_t cls_in16[4] = { 0x0000, 0xFFFF, 0x8000, 0x0001 };
+    uint64_t cls16[4]    = { 15, 15, 0, 14 };
+    assert(neon_cls(pack_lanes(cls_in16, 16, 4), 1) == pack_lanes(cls16, 16, 4));
+    uint64_t cls_in32[2] = { 0x00000000, 0x80000000 };
+    uint64_t cls32[2]    = { 31, 0 };
+    assert(neon_cls(pack_lanes(cls_in32, 32, 2), 2) == pack_lanes(cls32, 32, 2));
+    uint64_t cls_in32b[2] = { 0xFFFFFFFF, 0x00000001 };
+    uint64_t cls32b[2]    = { 31, 30 };
+    assert(neon_cls(pack_lanes(cls_in32b, 32, 2), 2) == pack_lanes(cls32b, 32, 2));
+
+    /* VCLZ: zero gives the lane width, and the sign bit alone gives 0. */
+    uint64_t clz_in8[8] = { 0x00, 0xFF, 0x80, 0x01, 0x40, 0x7F, 0x0F, 0x10 };
+    uint64_t clz8[8]    = { 8, 0, 0, 7, 1, 1, 4, 3 };
+    assert(neon_clz(pack_lanes(clz_in8, 8, 8), 0) == pack_lanes(clz8, 8, 8));
+    uint64_t clz_in16[4] = { 0x0000, 0x8000, 0x0001, 0x0100 };
+    uint64_t clz16[4]    = { 16, 0, 15, 7 };
+    assert(neon_clz(pack_lanes(clz_in16, 16, 4), 1) == pack_lanes(clz16, 16, 4));
+    uint64_t clz_in32[2] = { 0x00000000, 0x00000001 };
+    uint64_t clz32[2]    = { 32, 31 };
+    assert(neon_clz(pack_lanes(clz_in32, 32, 2), 2) == pack_lanes(clz32, 32, 2));
+
+    /* VCNT: the set bits of each byte, in that byte: 0x00 gives 0, 0xFF gives 8. */
+    uint64_t cnt_in[8] = { 0x00, 0xFF, 0x80, 0x55, 0x01, 0xFE, 0x7F, 0xAA };
+    uint64_t cnt[8]    = { 0, 8, 1, 4, 1, 7, 7, 4 };
+    assert(neon_cnt(pack_lanes(cnt_in, 8, 8)) == pack_lanes(cnt, 8, 8));
+
+    /* VMVN, through the register file as the emitter writes it. */
+    neon_setd(4, 0x0123456789ABCDEFull);
+    neon_setd(5, ~neon_getd(4));
+    assert(neon_getd(5) == 0xFEDCBA9876543210ull);
+
+    /* VQABS and VQNEG: the minimum saturates to the maximum, 0 stays 0, -1 and
+     * the maximum are exact. The 8-bit lanes are 0x80, -1, 0, 127, 1, -127, -2,
+     * -112. */
+    uint64_t qv8[8]   = { 0x80, 0xFF, 0x00, 0x7F, 0x01, 0x81, 0xFE, 0x90 };
+    uint64_t qabs8[8] = { 0x7F, 0x01, 0x00, 0x7F, 0x01, 0x7F, 0x02, 0x70 };
+    uint64_t qneg8[8] = { 0x7F, 0x01, 0x00, 0x81, 0xFF, 0x7F, 0x02, 0x70 };
+    assert(neon_qabs(pack_lanes(qv8, 8, 8), 0, 0) == pack_lanes(qabs8, 8, 8));
+    assert(neon_qabs(pack_lanes(qv8, 8, 8), 0, 1) == pack_lanes(qneg8, 8, 8));
+    uint64_t qv16[4]   = { 0x8000, 0xFFFF, 0x0000, 0x7FFF };
+    uint64_t qabs16[4] = { 0x7FFF, 0x0001, 0x0000, 0x7FFF };
+    uint64_t qneg16[4] = { 0x7FFF, 0x0001, 0x0000, 0x8001 };
+    assert(neon_qabs(pack_lanes(qv16, 16, 4), 1, 0) == pack_lanes(qabs16, 16, 4));
+    assert(neon_qabs(pack_lanes(qv16, 16, 4), 1, 1) == pack_lanes(qneg16, 16, 4));
+    uint64_t qv32[2]   = { 0x80000000, 0xFFFFFFFF };
+    uint64_t qabs32[2] = { 0x7FFFFFFF, 0x00000001 };
+    assert(neon_qabs(pack_lanes(qv32, 32, 2), 2, 0) == pack_lanes(qabs32, 32, 2));
+    assert(neon_qabs(pack_lanes(qv32, 32, 2), 2, 1) == pack_lanes(qabs32, 32, 2));
+    uint64_t qmax32[2]  = { 0x7FFFFFFF, 0x00000000 };
+    uint64_t qneg32m[2] = { 0x80000001, 0x00000000 };
+    assert(neon_qabs(pack_lanes(qmax32, 32, 2), 2, 0) == pack_lanes(qmax32, 32, 2));
+    assert(neon_qabs(pack_lanes(qmax32, 32, 2), 2, 1) == pack_lanes(qneg32m, 32, 2));
+
+    /* VPADDL, 8-bit pairs, signed and unsigned. 0x80 + 0xFF is -129, which is
+     * 0xFF7F in 16 bits, and read unsigned it is 0x017F. */
+    uint64_t pl8[8]  = { 0x80, 0xFF, 0x7F, 0x01, 0x00, 0x80, 0xFF, 0xFF };
+    uint64_t pls8[4] = { 0xFF7F, 0x0080, 0xFF80, 0xFFFE };
+    uint64_t plu8[4] = { 0x017F, 0x0080, 0x0080, 0x01FE };
+    assert(neon_paddl(pack_lanes(pl8, 8, 8), 0, 0) == pack_lanes(pls8, 16, 4));
+    assert(neon_paddl(pack_lanes(pl8, 8, 8), 0, 1) == pack_lanes(plu8, 16, 4));
+    /* Lane order: the pairs (1,2), (3,4), (5,6), (7,8), lowest first. */
+    uint64_t seq8[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    uint64_t seq8s[4] = { 3, 7, 11, 15 };
+    assert(neon_paddl(pack_lanes(seq8, 8, 8), 0, 1) == pack_lanes(seq8s, 16, 4));
+    /* 16-bit pairs into 32-bit lanes: 0x8000 + 0xFFFF is -32769 signed. */
+    uint64_t pl16[4]  = { 0x8000, 0xFFFF, 0x7FFF, 0x0001 };
+    uint64_t pls16[2] = { 0xFFFF7FFF, 0x00008000 };
+    uint64_t plu16[2] = { 0x00017FFF, 0x00008000 };
+    assert(neon_paddl(pack_lanes(pl16, 16, 4), 1, 0) == pack_lanes(pls16, 32, 2));
+    assert(neon_paddl(pack_lanes(pl16, 16, 4), 1, 1) == pack_lanes(plu16, 32, 2));
+    /* 32-bit pair into one 64-bit lane: -1 + -2^31 is -2^31 - 1, and unsigned
+     * the same two lanes sum to 0x17FFFFFFF. */
+    uint64_t pl32 = 0x80000000FFFFFFFFull;
+    assert(neon_paddl(pl32, 2, 0) == 0xFFFFFFFF7FFFFFFFull);
+    assert(neon_paddl(pl32, 2, 1) == 0x000000017FFFFFFFull);
+
+    /* VPADAL: the pair sums added to the 16-bit lanes of d, wrapping. The
+     * signed sums are 2, -256, 3, -2, so 0xFFFF + 2 wraps to 0x0001 and
+     * 0x0001 + 0xFF00 is 0xFF01. Unsigned the same pairs are 2, 256, 3, 510. */
+    uint64_t pa_d16[4] = { 0xFFFF, 0x0001, 0x7FFF, 0x0000 };
+    uint64_t pa_x8[8]  = { 0x01, 0x01, 0x80, 0x80, 0x01, 0x02, 0xFF, 0xFF };
+    uint64_t pa_s16[4] = { 0x0001, 0xFF01, 0x8002, 0xFFFE };
+    uint64_t pa_u16[4] = { 0x0001, 0x0101, 0x8002, 0x01FE };
+    assert(neon_padal(pack_lanes(pa_d16, 16, 4), pack_lanes(pa_x8, 8, 8), 0, 0) == pack_lanes(pa_s16, 16, 4));
+    assert(neon_padal(pack_lanes(pa_d16, 16, 4), pack_lanes(pa_x8, 8, 8), 0, 1) == pack_lanes(pa_u16, 16, 4));
+    /* 32-bit lanes: unsigned 0xFFFF + 1 and 0x8000 + 0x8000 are 0x10000 each,
+     * so lane 0 wraps to 0x0000FFFF. Signed, the first pair is 0 and the second
+     * is -65536, so lane 0 keeps its -1. */
+    uint64_t pa_d32[2] = { 0xFFFFFFFF, 0x00000001 };
+    uint64_t pa_x16[4] = { 0xFFFF, 0x0001, 0x8000, 0x8000 };
+    uint64_t pa_u32[2] = { 0x0000FFFF, 0x00010001 };
+    uint64_t pa_s32[2] = { 0xFFFFFFFF, 0xFFFF0001 };
+    assert(neon_padal(pack_lanes(pa_d32, 32, 2), pack_lanes(pa_x16, 16, 4), 1, 1) == pack_lanes(pa_u32, 32, 2));
+    assert(neon_padal(pack_lanes(pa_d32, 32, 2), pack_lanes(pa_x16, 16, 4), 1, 0) == pack_lanes(pa_s32, 32, 2));
+    /* 64-bit lane: ~0 + 3 wraps to 2, and two signed -2^31 sum to -2^32. */
+    uint64_t pa32[2]  = { 1, 2 };
+    uint64_t pa32s[2] = { 0x80000000, 0x80000000 };
+    assert(neon_padal(~0ull, pack_lanes(pa32, 32, 2), 2, 1) == 2);
+    assert(neon_padal(0, pack_lanes(pa32s, 32, 2), 2, 0) == 0xFFFFFFFF00000000ull);
+
+    printf("ok   neon misc A=00: vcls, vclz, vcnt, vmvn, vqabs and vqneg saturation, vpaddl signed and unsigned, vpadal wrap\n");
+}
+
 static void test_neon_shuffle(void) {
     /* A holds bytes 0x00..0x07 and B bytes 0x08..0x0F, so byte j of the pair
      * is j. X and Y continue the count at 0x10 and 0x18. Every expected value
@@ -1863,6 +1979,7 @@ int main(void) {
     test_neon_ldst();
     test_neon_narrow();
     test_neon_cmpz_c();
+    test_neon_misc_c();
     test_bit_ops();
     test_parallel_and_lanes();
     test_vfp_d32();
