@@ -17,6 +17,12 @@ Start with `docs/ROADMAP.md` for status, `docs/VITA3K_BRIDGE.md` for the
 bridge, `docs/TRANSLATION.md` for what translates, and `docs/LESSONS.md` for
 why things are the way they are.
 
+Repetitive per-instruction-family work is delegated to a smaller model, one
+worktree per task, and reviewed before it lands. `docs/DELEGATING.md` covers
+the brief, running two tasks at once, the review steps and how to land the
+result. Follow it rather than improvising: each step is there because leaving
+it out once cost a round.
+
 ## Build and test
 
 ```sh

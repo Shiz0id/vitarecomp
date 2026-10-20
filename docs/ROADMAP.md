@@ -129,6 +129,18 @@ obstacle on this platform.
       largest remaining bucket but the thing the RUNNING program stops on:
       everything earlier in the boot path is translated. *Advanced SIMD and NEON are the same instruction
       set — ARM's formal name and the marketing one — so this is one job.*
+      Landed, about 50 of ~110 mnemonics: integer add/sub/logic/compare/
+      pairwise/VMOVN, immediates, lane and core moves, VLD1/VST1, F32
+      arithmetic, by-scalar, min/max, compare, abs/neg and conversions,
+      integer VMUL/VMLA/VMLS, VQADD/VQSUB, shifts by immediate, the shuffles
+      (VEXT, VREV, VSWP/VTRN/VUZP/VZIP, VDUP lane, VTBL/VTBX) and VLD2-4/VST2-4.
+      In progress: widening (VADDL/W, VSUBL/W, VMULL, VMLAL/VMLSL, VMOVL/VSHLL)
+      and narrowing (VQMOVN/VQMOVUN, VSHRN and its rounding/saturating forms).
+      Left: VLDn/VSTn single-lane and all-lanes, the reciprocal estimates and
+      steps, VSHL by register, VABD/VABA, integer VMAX/VMIN/VCGT/VCGE, VCNT/VCLZ/
+      VCLS, VPADDL/VPADAL, VQDMULH/VQRDMULH, fixed-point VCVT. FPSCR.QC is not
+      modelled. How these tasks are run: `docs/DELEGATING.md`. Each new form is
+      checked against stock Vita3K by `tests/vita/neontest`
 - [ ] ARM (A32) operand decoding — a small minority of this corpus. The A32
       media space is also currently classed `A_UNDEF`, which is wrong: `op == 3`
       with bit 4 set is media, not an undefined encoding

@@ -365,3 +365,24 @@ Two discovery rules came out of the same runs:
   (after an epilogue, from a thunk, or onto a prologue) has a function as its
   target. It must not be absorbed into the caller's flow: the walk marks what
   it decodes as seen, so the target's own walk would later find nothing.
+
+## A unit test checks your reading, not the instruction
+
+Every NEON helper had unit tests with hand-computed answers, and every one
+passed. But the person who wrote the helper also computed the answers, from the
+same reading of the manual. A misread lane order or rounding rule would have
+been wrong in both places and still passed. Five instruction families landed that way.
+
+`tests/vita/neontest` closes that gap. It is a Vita program that runs each
+NEON form on known bytes and prints the registers. `run.sh` runs it under stock
+Vita3K and recompiled, and fails if any line differs. Dynarmic was written by
+other people from the same manual, so agreement with it is evidence that
+our tests cannot provide on their own. Breaking VZIP's Q form in `neon.h` makes
+it fail on exactly the two VZIP lines.
+
+The same review found a quieter trap: the Vita3K build compiles the generated
+C against the main checkout's `include/`, even when the harness is run from a
+worktree. A new helper that existed only in a worktree failed to build there.
+Had it been an existing helper with changed behaviour, the old one would have
+been compiled in silently, and the run would have passed while checking the
+wrong code.
