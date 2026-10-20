@@ -154,6 +154,13 @@ typedef enum {
     OP_NEON_URECPE, OP_NEON_URSQRTE, /* 8-bit estimates of 1/x and 1/sqrt(x),
                                     U32 fixed-point lanes                      */
     OP_NEON_FRECPE, OP_NEON_FRSQRTE, /* the same for F32 lanes                 */
+    OP_NEON_FPADD,              /* VPADD.F32, D only: pair sums, n's then m's */
+    OP_NEON_FABD,               /* VABD.F32: |n - m|, sign cleared after the subtract */
+    OP_NEON_FACGE, OP_NEON_FACGT, /* VACGE, VACGT: |n| >= |m| and |n| > |m|, all ones where true */
+    OP_NEON_FPMAX, OP_NEON_FPMIN, /* VPMAX.F32, VPMIN.F32, D only: pairwise max and min */
+    OP_NEON_FRECPS, OP_NEON_FRSQRTS, /* step functions: 2 - n*m, and (3 - n*m) / 2 */
+    OP_NEON_FCVT_TO_F16,        /* VCVT.F16.F32: four F32 lanes of Qm to Dd, IEEE half */
+    OP_NEON_FCVT_FROM_F16,      /* VCVT.F32.F16: four F16 lanes of Dm to Qd, exact    */
     OP_NEON_CMPZ, OP_NEON_FCMPZ, /* compare with zero: imm is the condition, 0 GT,
                                     1 GE, 2 EQ, 3 LE, 4 LT; FCMPZ is F32 lanes  */
     OP_NEON_ABS, OP_NEON_NEG,   /* integer absolute value and negate, wrapping */

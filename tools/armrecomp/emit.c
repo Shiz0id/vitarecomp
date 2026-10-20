@@ -1349,6 +1349,55 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             break;
         }
 
+        /* The float forms of the rest of the group. VPADD, VPMAX and VPMIN are
+         * D only, and each is one D word, read whole before the store, so
+         * vpadd.f32 d0, d0, d1 is safe. VABD, VACGE, VACGT and the step
+         * functions work on each D half, reading that half of Vn and Vm and
+         * writing the same half of Vd, as the other float forms do. */
+        case OP_NEON_FPADD:
+            fprintf(f, "    neon_setd(%d, neon_fpadd(neon_getd(%d), neon_getd(%d)));\n",
+                    in->vd, in->vn, in->vm);
+            break;
+
+        case OP_NEON_FPMAX: case OP_NEON_FPMIN:
+            fprintf(f, "    neon_setd(%d, neon_fpminmax(neon_getd(%d), neon_getd(%d), %d));\n",
+                    in->vd, in->vn, in->vm, in->op == OP_NEON_FPMAX);
+            break;
+
+        case OP_NEON_FABD: case OP_NEON_FRECPS: case OP_NEON_FRSQRTS: {
+            int regs = in->neon_q ? 2 : 1;
+            const char *fn = in->op == OP_NEON_FABD ? "fabd"
+                           : in->op == OP_NEON_FRECPS ? "frecps" : "frsqrts";
+            for (int k = 0; k < regs; k++)
+                fprintf(f, "    neon_setd(%d, neon_%s(neon_getd(%d), neon_getd(%d)));\n",
+                        in->vd + k, fn, in->vn + k, in->vm + k);
+            break;
+        }
+
+        case OP_NEON_FACGE: case OP_NEON_FACGT: {
+            int regs = in->neon_q ? 2 : 1;
+            for (int k = 0; k < regs; k++)
+                fprintf(f, "    neon_setd(%d, neon_facmp(neon_getd(%d), neon_getd(%d), %d));\n",
+                        in->vd + k, in->vn + k, in->vm + k, in->op == OP_NEON_FACGT);
+            break;
+        }
+
+        /* The half-precision conversions (neon.h). VCVT.F16.F32 reads all four
+         * F32 lanes of Qm, which is two D words, into one argument list, so
+         * Dd may be one of them. VCVT.F32.F16 builds its two result D words in
+         * a local before either is stored, because Dm may be one of the
+         * destination's D words. */
+        case OP_NEON_FCVT_TO_F16:
+            fprintf(f, "    neon_setd(%d, neon_cvt_to_f16(neon_getd(%d), neon_getd(%d)));\n",
+                    in->vd, in->vm, in->vm + 1);
+            break;
+
+        case OP_NEON_FCVT_FROM_F16:
+            fprintf(f, "    { uint64_t _r[2]; neon_cvt_from_f16(_r, neon_getd(%d));"
+                       " neon_setd(%d, _r[0]); neon_setd(%d, _r[1]); }\n",
+                    in->vm, in->vd, in->vd + 1);
+            break;
+
         case OP_NEON_FABS: case OP_NEON_FNEG: {
             int regs = in->neon_q ? 2 : 1;
             for (int k = 0; k < regs; k++)

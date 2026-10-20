@@ -231,6 +231,38 @@ int main(void) {
     T("vceq.f32 #0 zero q",  "vmov.i32 q2, #0\n vceq.f32 q0, q2, #0");
     T("vcle.f32 #0 d",       "vcle.f32 d4, d5, #0");
     T("vclt.f32 #0 q",       "vclt.f32 q2, q3, #0");
+    /* The float forms of the rest of the same-length group, and the F16/F32
+     * conversions. Special values are built inside the op string: +Inf is
+     * 0xff000000 shifted right one, NaN is +Inf with 0x00400000 set. */
+    T("vpadd.f32 d",         "vpadd.f32 d0, d1, d2");
+    T("vpadd.f32 d=n",       "vpadd.f32 d0, d0, d1");
+    T("vpadd.f32 inf 0",     "vmov.i32 d1, #0xff000000\n vshr.u32 d1, d1, #1\n vmov.i32 d2, #0\n vpadd.f32 d0, d1, d2");
+    T("vpmax.f32 d",         "vpmax.f32 d0, d1, d2");
+    T("vpmax.f32 d=n",       "vpmax.f32 d0, d0, d1");
+    T("vpmin.f32 d",         "vpmin.f32 d3, d4, d5");
+    T("vpmin.f32 -0 +0",     "vmov.i32 d4, #0x80000000\n vmov.i32 d5, #0\n vpmin.f32 d3, d4, d5");
+    T("vabd.f32 d",          "vabd.f32 d0, d1, d2");
+    T("vabd.f32 q",          "vabd.f32 q0, q1, q2");
+    T("vabd.f32 inf d",      "vmov.i32 d1, #0xff000000\n vshr.u32 d1, d1, #1\n vabd.f32 d0, d1, d2");
+    T("vacge.f32 d",         "vacge.f32 d0, d1, d2");
+    T("vacgt.f32 q",         "vacgt.f32 q0, q1, q2");
+    T("vacge.f32 -0 +0",     "vmov.i32 d1, #0x80000000\n vmov.i32 d2, #0\n vacge.f32 d0, d1, d2");
+    T("vacgt.f32 nan",       "vmov.i32 d1, #0xff000000\n vshr.u32 d1, d1, #1\n vmov.i32 d2, #0xff000000\n vshr.u32 d2, d2, #1\n vorr.i32 d2, #0x00400000\n vacgt.f32 d0, d1, d2");
+    T("vrecps.f32 d",        "vrecps.f32 d0, d1, d2");
+    T("vrecps.f32 q",        "vrecps.f32 q0, q1, q2");
+    T("vrecps inf*0",        "vmov.i32 d1, #0xff000000\n vshr.u32 d1, d1, #1\n vmov.i32 d2, #0\n vrecps.f32 d0, d1, d2");
+    T("vrsqrts.f32 d",       "vrsqrts.f32 d0, d1, d2");
+    T("vrsqrts.f32 q",       "vrsqrts.f32 q0, q1, q2");
+    T("vrsqrts inf*0",       "vmov.i32 d1, #0xff000000\n vshr.u32 d1, d1, #1\n vmov.i32 d2, #0\n vrsqrts.f32 d0, d1, d2");
+    T("vrsqrts 1*1",         "vmov.f32 d1, #1.0\n vmov.f32 d2, #1.0\n vrsqrts.f32 d0, d1, d2");
+    T("vcvt.f16.f32 d2,q1",  "vcvt.f16.f32 d2, q1");
+    T("vcvt.f16.f32 d0,q1",  "vcvt.f16.f32 d0, q1");
+    T("vcvt.f16.f32 1.0",    "vmov.f32 q1, #1.0\n vcvt.f16.f32 d0, q1");
+    T("vcvt.f16.f32 inf q",  "vmov.i32 q2, #0xff000000\n vshr.u32 q2, q2, #1\n vcvt.f16.f32 d0, q2");
+    T("vcvt.f32.f16 q0,d1",  "vcvt.f32.f16 q0, d1");
+    T("vcvt.f32.f16 q1,d0",  "vcvt.f32.f16 q1, d0");
+    T("vcvt.f32.f16 denorm", "vmov.i16 d1, #1\n vcvt.f32.f16 q0, d1");
+    T("vcvt.f32.f16 inf",    "vmov.i16 d1, #0x7c00\n vcvt.f32.f16 q0, d1");
     T("vabs.s8 q",           "vabs.s8 q0, q2");
     T("vabs.s8 min d",       "vmov.i8 d2, #0x80\n vabs.s8 d0, d2");
     T("vabs.s16 d",          "vabs.s16 d0, d1");

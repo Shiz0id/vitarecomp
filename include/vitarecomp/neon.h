@@ -245,6 +245,173 @@ static inline uint32_t neon_f32_cmp(uint32_t a, uint32_t b, int rel) {
     return t ? 0xFFFFFFFFu : 0;
 }
 
+/* VABD on one lane: |n - m|. The subtraction is the flushed, rounded one that
+ * neon_f32_sub gives, and a NaN comes back as the positive default NaN already.
+ * Clearing the sign then gives +0 for any zero difference, whatever the sign of
+ * the operands. */
+static inline uint32_t neon_f32_abd(uint32_t a, uint32_t b) {
+    return neon_f32_sub(a, b) & 0x7FFFFFFFu;
+}
+
+/* VACGE (gt = 0) and VACGT (gt = 1) on one lane: |n| >= |m| or |n| > |m|, as
+ * all ones or zero. The inputs are flushed before their magnitudes are taken,
+ * so a denormal competes as +0, and -0 equals +0. A NaN compares false, as the
+ * C operators already make it. */
+static inline uint32_t neon_f32_acmp(uint32_t a, uint32_t b, int gt) {
+    float fa = neon_f32_in(a & 0x7FFFFFFFu), fb = neon_f32_in(b & 0x7FFFFFFFu);
+    int t = gt ? (fa > fb) : (fa >= fb);
+    return t ? 0xFFFFFFFFu : 0;
+}
+
+/* The two step functions of the reciprocal and reciprocal square root
+ * estimates, one lane each. Both start with the NaN and the infinity-times-zero
+ * cases, which the architecture defines outside the product. Otherwise the
+ * product is formed as neon_f32_mla forms it: rounded and flushed, and stored
+ * through a volatile so no later operation can fuse with it. */
+
+/* VRECPS, FPRecipStep: 2 - n*m. Infinity times zero, in either order, is 2.0
+ * exactly, the value the architecture gives where the product would be a NaN. */
+static inline uint32_t neon_f32_recps(uint32_t a, uint32_t b) {
+    float fa = neon_f32_in(a), fb = neon_f32_in(b);
+    if (fa != fa || fb != fb) return 0x7FC00000u;
+    int inf_a = (a & 0x7FFFFFFFu) == 0x7F800000u, inf_b = (b & 0x7FFFFFFFu) == 0x7F800000u;
+    if ((inf_a && fb == 0.0f) || (fa == 0.0f && inf_b)) return 0x40000000u;   /* 2.0 */
+    volatile uint32_t p = neon_f32_mul(a, b);
+    return neon_f32_sub(0x40000000u, p);
+}
+
+/* VRSQRTS, FPRSqrtStep: (3 - n*m) / 2. Infinity times zero, in either order, is
+ * 1.5. The architecture describes one rounding, of the exact (3 - p) / 2, and
+ * this gives those bits. The float 3 - p is rounded first, and halving a float
+ * in the normal range is exact and commutes with that rounding: the float grid
+ * at half the magnitude is the same grid scaled by 1/2. A halving that lands in
+ * the denormal range is not exact, and neon_f32_out flushes it to a signed zero,
+ * as it flushes every denormal result. That case cannot in fact arise: 3 - p is
+ * zero or at least 2^-22 in magnitude for every float p, so the flush is kept
+ * for the rule, not for a reachable result. */
+static inline uint32_t neon_f32_rsqrts(uint32_t a, uint32_t b) {
+    float fa = neon_f32_in(a), fb = neon_f32_in(b);
+    if (fa != fa || fb != fb) return 0x7FC00000u;
+    int inf_a = (a & 0x7FFFFFFFu) == 0x7F800000u, inf_b = (b & 0x7FFFFFFFu) == 0x7F800000u;
+    if ((inf_a && fb == 0.0f) || (fa == 0.0f && inf_b)) return 0x3FC00000u;   /* 1.5 */
+    volatile uint32_t p = neon_f32_mul(a, b);
+    float h = neon_f32_in(neon_f32_sub(0x40400000u, p)) * 0.5f;               /* 3.0 */
+    return neon_f32_out(h);
+}
+
+/* The D word forms. VPADD takes the sum of each pair: lane 0 from n's two
+ * lanes, lane 1 from m's, as neon_padd lays them out. Both pairs are read
+ * before the result is stored, so vpadd.f32 d0, d0, d1 is safe. */
+static inline uint64_t neon_fpadd(uint64_t n, uint64_t m) {
+    return neon_pack32(neon_f32_add(neon_lo32(n), neon_hi32(n)),
+                       neon_f32_add(neon_lo32(m), neon_hi32(m)));
+}
+
+/* VPMAX (is_max = 1) and VPMIN (is_max = 0): each pair reduced by
+ * neon_f32_minmax, which already gives the VMAX and VMIN answers for NaN and
+ * for the two zeros. */
+static inline uint64_t neon_fpminmax(uint64_t n, uint64_t m, int is_max) {
+    return neon_pack32(neon_f32_minmax(neon_lo32(n), neon_hi32(n), is_max),
+                       neon_f32_minmax(neon_lo32(m), neon_hi32(m), is_max));
+}
+
+static inline uint64_t neon_fabd(uint64_t n, uint64_t m) {
+    return neon_pack32(neon_f32_abd(neon_lo32(n), neon_lo32(m)),
+                       neon_f32_abd(neon_hi32(n), neon_hi32(m)));
+}
+
+static inline uint64_t neon_facmp(uint64_t n, uint64_t m, int gt) {
+    return neon_pack32(neon_f32_acmp(neon_lo32(n), neon_lo32(m), gt),
+                       neon_f32_acmp(neon_hi32(n), neon_hi32(m), gt));
+}
+
+static inline uint64_t neon_frecps(uint64_t n, uint64_t m) {
+    return neon_pack32(neon_f32_recps(neon_lo32(n), neon_lo32(m)),
+                       neon_f32_recps(neon_hi32(n), neon_hi32(m)));
+}
+
+static inline uint64_t neon_frsqrts(uint64_t n, uint64_t m) {
+    return neon_pack32(neon_f32_rsqrts(neon_lo32(n), neon_lo32(m)),
+                       neon_f32_rsqrts(neon_hi32(n), neon_hi32(m)));
+}
+
+/* --- Half precision: VCVT between F16 and F32 ------------------------------
+ *
+ * Advanced SIMD uses the IEEE half format (FPSCR.AHP is 0), round to nearest
+ * even, with the standard FPSCR's flush and default NaN in F32. The conversions
+ * are written on the bits, not with the host's _Float16, which not every host
+ * has. Half denormals are results of this conversion and are kept: only F32
+ * denormal inputs are flushed, and the half output is not. */
+
+/* F32 to F16, one lane. An F32 denormal is read as a signed zero. A NaN is the
+ * default half NaN, 0x7E00. A value rounds to the nearest half, with ties to
+ * even, and a result of 65520 or more becomes an infinity. A half denormal is
+ * counted in units of 2^-24, and a carry out of the top of that range gives
+ * 0x0400, which is already the bit pattern of the smallest normal. */
+static inline uint16_t neon_f32_to_f16(uint32_t bits) {
+    if ((bits & 0x7F800000u) == 0) bits &= 0x80000000u;   /* F32 denormal: signed zero */
+    uint32_t sign = (bits >> 16) & 0x8000u, mag = bits & 0x7FFFFFFFu;
+    if (mag > 0x7F800000u) return 0x7E00;                  /* NaN: default */
+    if (mag == 0x7F800000u) return (uint16_t)(sign | 0x7C00u);
+    if (mag == 0) return (uint16_t)sign;
+    int E = (int)(mag >> 23) - 127;                        /* -126 .. 127: mag is normal */
+    uint32_t M = (mag & 0x7FFFFFu) | 0x800000u;            /* 2^23 is 1.0 */
+    uint32_t h;
+    if (E >= -14) {
+        /* A half normal keeps 11 bits of M, the implicit one and ten fraction
+         * bits, and rounds away the low 13. A carry out of the eleven bits goes
+         * into the exponent through the sum below. */
+        uint32_t keep = M >> 13, rem = M & 0x1FFFu;
+        if (rem > 0x1000u || (rem == 0x1000u && (keep & 1))) keep++;
+        h = ((uint32_t)(E + 14) << 10) + keep;
+    } else {
+        /* A half denormal is M * 2^(E+1) in units of 2^-24, so M is shifted
+         * right by s = -(E+1), which is at least 14 here. From 25 on, M is below
+         * half a unit and rounds to zero. */
+        int s = -E - 1;
+        if (s > 24) return (uint16_t)sign;
+        uint32_t keep = M >> s, rem = M & ((1u << s) - 1), half = 1u << (s - 1);
+        if (rem > half || (rem == half && (keep & 1))) keep++;
+        h = keep;
+    }
+    if (h >= 0x7C00u) return (uint16_t)(sign | 0x7C00u);   /* overflow, or the carry into Inf */
+    return (uint16_t)(sign | h);
+}
+
+/* F16 to F32, one lane. Every half value is exact in F32, so there is no
+ * rounding. A half denormal is an ordinary F32 normal here, not a flushed zero:
+ * f * 2^-24 with the top set bit p of f becoming the exponent p - 24. A NaN is
+ * the default F32 NaN. */
+static inline uint32_t neon_f16_to_f32(uint16_t x) {
+    uint32_t sign = ((uint32_t)x & 0x8000u) << 16, e = (x >> 10) & 0x1Fu, f = x & 0x3FFu;
+    if (e == 0x1Fu) return f ? 0x7FC00000u : (sign | 0x7F800000u);
+    if (e == 0) {
+        if (f == 0) return sign;
+        int p = 9;
+        while (!((f >> p) & 1)) p--;                       /* f is nonzero */
+        return sign | ((uint32_t)(p + 103) << 23) | ((f << (23 - p)) & 0x7FFFFFu);
+    }
+    return sign | ((e + 112u) << 23) | (f << 13);
+}
+
+/* VCVT.F16.F32 Dd, Qm: the four F32 lanes of Qm (lo, then hi, lane 0 lowest)
+ * become the four F16 lanes of one D word. The caller passes both halves of
+ * Qm, so Dd may be one of them. */
+static inline uint64_t neon_cvt_to_f16(uint64_t lo, uint64_t hi) {
+    return (uint64_t)neon_f32_to_f16(neon_lo32(lo))
+         | ((uint64_t)neon_f32_to_f16(neon_hi32(lo)) << 16)
+         | ((uint64_t)neon_f32_to_f16(neon_lo32(hi)) << 32)
+         | ((uint64_t)neon_f32_to_f16(neon_hi32(hi)) << 48);
+}
+
+/* VCVT.F32.F16 Qd, Dm: the four F16 lanes of x become the four F32 lanes of
+ * r, r[0] holding lanes 0 and 1 and r[1] lanes 2 and 3. x is a value, so Dm may
+ * be one of the D words of Qd. */
+static inline void neon_cvt_from_f16(uint64_t r[2], uint64_t x) {
+    r[0] = neon_pack32(neon_f16_to_f32((uint16_t)x), neon_f16_to_f32((uint16_t)(x >> 16)));
+    r[1] = neon_pack32(neon_f16_to_f32((uint16_t)(x >> 32)), neon_f16_to_f32((uint16_t)(x >> 48)));
+}
+
 static inline uint64_t neon_fmax(uint64_t a, uint64_t b) {
     return neon_pack32(neon_f32_minmax(neon_lo32(a), neon_lo32(b), 1),
                        neon_f32_minmax(neon_hi32(a), neon_hi32(b), 1));

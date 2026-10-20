@@ -974,7 +974,8 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
              *   U=0 B=0  VADD / VSUB     (bit 21 clear / set)
              *   U=0 B=1  VMLA / VMLS     (bit 21 clear / set)
              *   U=1 B=1  VMUL            (bit 21 clear)
-             * The other combinations are VABD and friends, not claimed. */
+             *   U=1 B=0  VPADD / VABD    (bit 21 clear / set), claimed below
+             * U=1 B=1 with bit 21 set is UNDEFINED and is not claimed. */
             int sub = size >> 1;
             o->neon_size = 2;                              /* 32-bit lanes */
             if (B == 0 && U == 0) {
@@ -998,7 +999,8 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
          *   opc 1111 U=0  VMAX / VMIN   (bit 21 clear / set)
          *   opc 1110 U=0  VCEQ          (bit 21 clear)
          *   opc 1110 U=1  VCGE / VCGT   (bit 21 clear / set)
-         * opc 1111 with U=1 is VPMAX and the others are not claimed. */
+         * opc 1111 with U=1 is VPMAX and VPMIN, and with B set the absolute
+         * compares and the step functions, all in the block after this one. */
         if (B == 0 && !(size & 1)) {
             int bit21 = size >> 1;
             o->neon_size = 2;
@@ -1015,6 +1017,49 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
             if (opc == 0xE && U == 1) {
                 o->op = bit21 ? OP_NEON_FCGT : OP_NEON_FCGE;
                 set(o, A_SIMD, bit21 ? "vcgt.f32" : "vcge.f32");
+                return 1;
+            }
+        }
+        /* The remaining F32 forms of this group, with sz (size bit 0) clear:
+         *   U=1 B=0 opc 1101  VPADD (bit 21 clear), VABD (set); VPADD is D only
+         *   U=1 B=0 opc 1111  VPMAX (bit 21 clear), VPMIN (set); D only
+         *   U=1 B=1 opc 1110  VACGE (bit 21 clear), VACGT (set)
+         *   U=0 B=1 opc 1111  VRECPS (bit 21 clear), VRSQRTS (set)
+         * No earlier block takes these: opc 1101 and 1111 with B=0 are claimed
+         * above only for U=0 (VADD and VMAX), and opc 1110 and 1111 with B=1 are
+         * not claimed before this point at all. Q with an odd register was
+         * refused for the whole group already; the D-only forms refuse Q here. */
+        if (!(size & 1)) {
+            int bit21 = size >> 1;
+            if (opc == 0xD && U == 1 && B == 0) {
+                if (!bit21) {
+                    if (Q) return 0;
+                    o->op = OP_NEON_FPADD;
+                    set(o, A_SIMD, "vpadd.f32");
+                } else {
+                    o->op = OP_NEON_FABD;
+                    set(o, A_SIMD, "vabd.f32");
+                }
+                o->neon_size = 2;
+                return 1;
+            }
+            if (opc == 0xE && U == 1 && B == 1) {
+                o->op = bit21 ? OP_NEON_FACGT : OP_NEON_FACGE;
+                set(o, A_SIMD, bit21 ? "vacgt.f32" : "vacge.f32");
+                o->neon_size = 2;
+                return 1;
+            }
+            if (opc == 0xF && U == 1 && B == 0) {
+                if (Q) return 0;
+                o->op = bit21 ? OP_NEON_FPMIN : OP_NEON_FPMAX;
+                set(o, A_SIMD, bit21 ? "vpmin.f32" : "vpmax.f32");
+                o->neon_size = 2;
+                return 1;
+            }
+            if (opc == 0xF && U == 0 && B == 1) {
+                o->op = bit21 ? OP_NEON_FRSQRTS : OP_NEON_FRECPS;
+                set(o, A_SIMD, bit21 ? "vrsqrts.f32" : "vrecps.f32");
+                o->neon_size = 2;
                 return 1;
             }
         }
@@ -1384,9 +1429,10 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
         return 1;
     }
 
-    /* Two registers, miscellaneous: h1 1111 1111 1D11 ss10. Only VMOVN
-     * (h2 dddd 0010 00M0 mmmm), which narrows a Q register's lanes to half
-     * width into a D register. */
+    /* Two registers, miscellaneous: h1 1111 1111 1D11 ss10. VMOVN (h2
+     * dddd 0010 00M0 mmmm) is the first form here, narrowing a Q register's
+     * lanes to half width into a D register. The forms after it are the
+     * F16/F32 conversions (ss = 01, below) and the VQMOVN family. */
     if ((h1 & 0xFFB3) == 0xFFB2 && (h2 & 0x0FD0) == 0x0200) {
         int size = (h1 >> 2) & 3;
         if (size == 3 || (m & 1)) return 0;
@@ -1395,6 +1441,25 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
         o->vm = (int8_t)m;
         o->neon_size = (uint8_t)size;                      /* of the result */
         set(o, A_SIMD, "vmovn");
+        return 1;
+    }
+
+    /* VCVT between half and single precision: the same group with ss = 01
+     * (h1 1111 1111 1D11 0110), and h2 dddd 011o 00M0 mmmm. o = 0 is
+     * VCVT.F16.F32, which narrows the four F32 lanes of Qm into Dd, so m must be
+     * even. o = 1 is VCVT.F32.F16, which widens the four F16 lanes of Dm into
+     * Qd, so d must be even. Bits 7:6 and 4 of h2 are clear, which keeps it off
+     * VMOVN and the VQMOVN family (opc 0010). neon_size is 1, the half-precision
+     * lane, for both directions. */
+    if ((h1 & 0xFFBF) == 0xFFB6 && (h2 & 0x0ED0) == 0x0600) {
+        int op = (h2 >> 8) & 1;
+        if (op == 0 ? (m & 1) : (d & 1)) return 0;
+        o->op = op ? OP_NEON_FCVT_FROM_F16 : OP_NEON_FCVT_TO_F16;
+        o->vd = (int8_t)d;
+        o->vm = (int8_t)m;
+        o->neon_q = 0;
+        o->neon_size = 1;
+        set(o, A_SIMD, op ? "vcvt.f32.f16" : "vcvt.f16.f32");
         return 1;
     }
 

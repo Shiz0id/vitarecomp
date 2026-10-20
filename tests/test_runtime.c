@@ -2211,6 +2211,139 @@ static void test_neon_misc_c(void) {
     printf("ok   neon misc A=00: vcls, vclz, vcnt, vmvn, vqabs and vqneg saturation, vpaddl signed and unsigned, vpadal wrap\n");
 }
 
+/* The float forms outside the same-length arithmetic: VPADD, VPMAX and VPMIN on
+ * pairs, VABD, VACGE and VACGT, the two step functions, and the half-precision
+ * conversions. Lane 0 is the low word of a D register, and f32_pair takes the
+ * high lane first. The expected values are worked from the definitions, with
+ * the standard FPSCR: a denormal input is a zero, a NaN is 0x7FC00000, and a
+ * half denormal is kept. */
+static void test_neon_float_rest_c(void) {
+    const uint32_t NaN = 0x7FC00000u, SNaN = 0x7F800001u, INF = 0x7F800000u, NINF = 0xFF800000u;
+
+    /* VPADD: lane 0 is n's pair, lane 1 is m's. */
+    assert(neon_fpadd(f32_pair(f32_bits(2.0f), f32_bits(1.0f)),
+                      f32_pair(f32_bits(20.0f), f32_bits(10.0f)))
+           == f32_pair(f32_bits(30.0f), f32_bits(3.0f)));
+    /* A NaN in n's pair only: that lane is the default NaN, m's is still a sum. */
+    assert(neon_fpadd(f32_pair(SNaN, f32_bits(1.0f)), f32_pair(f32_bits(4.0f), f32_bits(3.0f)))
+           == f32_pair(f32_bits(7.0f), NaN));
+
+    /* VPMAX and VPMIN: n's pair in lane 0, m's in lane 1. */
+    assert(neon_fpminmax(f32_pair(f32_bits(2.0f), f32_bits(1.0f)),
+                         f32_pair(f32_bits(-5.0f), f32_bits(-7.0f)), 1)
+           == f32_pair(f32_bits(-5.0f), f32_bits(2.0f)));
+    assert(neon_fpminmax(f32_pair(f32_bits(2.0f), f32_bits(1.0f)),
+                         f32_pair(f32_bits(-5.0f), f32_bits(-7.0f)), 0)
+           == f32_pair(f32_bits(-7.0f), f32_bits(1.0f)));
+    /* A NaN in one pair only, and the zero pair: max(+0, -0) is +0 as VMAX. */
+    assert(neon_fpminmax(f32_pair(f32_bits(2.0f), SNaN), f32_pair(f32_bits(4.0f), f32_bits(3.0f)), 1)
+           == f32_pair(f32_bits(4.0f), NaN));
+    assert(neon_fpminmax(f32_pair(0x80000000u, 0x00000000u), f32_pair(0, 0), 1)
+           == f32_pair(0, 0x00000000u));
+    assert(neon_fpminmax(f32_pair(0x00000000u, 0x80000000u), f32_pair(0, 0), 0)
+           == f32_pair(0x00000000u, 0x80000000u));                    /* min(-0, +0) is -0 */
+
+    /* VABD: |n - m| with the flushed subtraction, sign cleared after it. */
+    assert(neon_fabd(f32_pair(0x80400000u, 0x00400000u), f32_pair(f32_bits(1.0f), f32_bits(1.0f)))
+           == f32_pair(f32_bits(1.0f), f32_bits(1.0f)));              /* denormals read as zeros */
+    assert(neon_fabd(f32_pair(0x80400000u, 0x00000001u), f32_pair(0x00000000u, 0x80000000u))
+           == f32_pair(0, 0));                                        /* -0 - 0 and 0 - (-0): +0 */
+    assert(neon_fabd(f32_pair(f32_bits(3.0f), f32_bits(1.0f)), f32_pair(f32_bits(1.0f), f32_bits(3.0f)))
+           == f32_pair(f32_bits(2.0f), f32_bits(2.0f)));              /* negative difference */
+    assert(neon_fabd(f32_pair(f32_bits(1.0f), SNaN), f32_pair(f32_bits(1.0f), f32_bits(2.0f)))
+           == f32_pair(0, NaN));                                      /* NaN, and 1 - 1 */
+
+    /* VACGE (gt = 0) and VACGT (gt = 1): all ones where the magnitudes compare. */
+    assert(neon_facmp(f32_pair(f32_bits(-2.0f), f32_bits(2.0f)), f32_pair(f32_bits(2.0f), f32_bits(-2.0f)), 0)
+           == f32_pair(0xFFFFFFFFu, 0xFFFFFFFFu));                    /* equal magnitudes */
+    assert(neon_facmp(f32_pair(f32_bits(-2.0f), f32_bits(2.0f)), f32_pair(f32_bits(2.0f), f32_bits(-2.0f)), 1) == 0);
+    assert(neon_facmp(f32_pair(0x80000000u, 0x80000000u), 0, 0) == f32_pair(0xFFFFFFFFu, 0xFFFFFFFFu));   /* -0 vs +0 */
+    assert(neon_facmp(f32_pair(0x80000000u, 0x80000000u), 0, 1) == 0);
+    assert(neon_facmp(f32_pair(0x00000001u, 0x00000001u), 0, 0) == f32_pair(0xFFFFFFFFu, 0xFFFFFFFFu)); /* denormal is 0 */
+    assert(neon_facmp(f32_pair(0x00000001u, 0x00000001u), 0, 1) == 0);
+    /* Inf against a finite value, and Inf against Inf of the other sign. */
+    assert(neon_facmp(f32_pair(f32_bits(1.0f), NINF), f32_pair(INF, f32_bits(1.0f)), 0)
+           == f32_pair(0, 0xFFFFFFFFu));
+    assert(neon_facmp(f32_pair(f32_bits(1.0f), NINF), f32_pair(INF, f32_bits(1.0f)), 1)
+           == f32_pair(0, 0xFFFFFFFFu));
+    assert(neon_facmp(f32_pair(INF, NINF), f32_pair(NINF, INF), 0) == f32_pair(0xFFFFFFFFu, 0xFFFFFFFFu));
+    assert(neon_facmp(f32_pair(INF, NINF), f32_pair(NINF, INF), 1) == 0);
+    /* A NaN compares false on either side. */
+    assert(neon_facmp(f32_pair(f32_bits(1.0f), SNaN), f32_pair(f32_bits(1.0f), f32_bits(1.0f)), 0)
+           == f32_pair(0xFFFFFFFFu, 0));
+    assert(neon_facmp(f32_pair(f32_bits(1.0f), f32_bits(1.0f)), f32_pair(f32_bits(1.0f), SNaN), 1) == 0);
+
+    /* VRECPS: 2 - n*m. Inf times zero, either way round, is 2.0. */
+    assert(neon_frecps(f32_pair(0, 0), f32_pair(INF, INF)) == f32_pair(0x40000000u, 0x40000000u));
+    assert(neon_frecps(f32_pair(INF, INF), f32_pair(0x80000000u, 0x00000000u)) == f32_pair(0x40000000u, 0x40000000u));
+    assert(neon_frecps(f32_pair(f32_bits(1.0f), f32_bits(1.0f)), f32_pair(f32_bits(2.0f), f32_bits(2.0f)))
+           == f32_pair(0, 0));                                        /* 2 - 2 is +0 */
+    assert(neon_frecps(f32_pair(f32_bits(1.0f), SNaN), f32_pair(f32_bits(1.0f), f32_bits(1.0f)))
+           == f32_pair(f32_bits(1.0f), NaN));
+    assert(neon_frecps(f32_pair(INF, INF), f32_pair(f32_bits(2.0f), f32_bits(2.0f)))
+           == f32_pair(NINF, NINF));                                  /* 2 - Inf */
+    /* The product rounds before the subtraction. (1 + 2^-12)^2 is 1 + 2^-11 + 2^-24,
+     * exactly halfway between 1 + 2^-11 (0x3F801000) and the next float up. Ties
+     * to even gives 1 + 2^-11, so the result is 1 - 2^-11 (0x3F7FE000). Fusing the
+     * product would give 1 - 2^-11 - 2^-24 (0x3F7FDFFF). */
+    assert(neon_frecps(f32_pair(0x3F800800u, 0x3F800800u), f32_pair(0x3F800800u, 0x3F800800u))
+           == f32_pair(0x3F7FE000u, 0x3F7FE000u));
+
+    /* VRSQRTS: (3 - n*m) / 2. Inf times zero, either way round, is 1.5. */
+    assert(neon_frsqrts(f32_pair(0, 0), f32_pair(INF, INF)) == f32_pair(0x3FC00000u, 0x3FC00000u));
+    assert(neon_frsqrts(f32_pair(INF, INF), f32_pair(0x80000000u, 0x00000000u)) == f32_pair(0x3FC00000u, 0x3FC00000u));
+    assert(neon_frsqrts(f32_pair(f32_bits(1.0f), f32_bits(1.0f)), f32_pair(f32_bits(1.0f), f32_bits(1.0f)))
+           == f32_pair(f32_bits(1.0f), f32_bits(1.0f)));              /* (3 - 1) / 2 */
+    assert(neon_frsqrts(f32_pair(f32_bits(0.5f), f32_bits(0.5f)), f32_pair(f32_bits(0.5f), f32_bits(0.5f)))
+           == f32_pair(f32_bits(1.375f), f32_bits(1.375f)));          /* (3 - 0.25) / 2 */
+    /* A product that flushes: 2^-100 squared is below the denormal range, so
+     * it is +0 and the result is 3 / 2. (A denormal result of the halving cannot
+     * arise: 3 - p is zero or at least 2^-22 in magnitude for every float p.) */
+    assert(neon_frsqrts(f32_pair(0x0D800000u, 0x0D800000u), f32_pair(0x0D800000u, 0x0D800000u))
+           == f32_pair(0x3FC00000u, 0x3FC00000u));
+    assert(neon_frsqrts(f32_pair(INF, INF), f32_pair(f32_bits(1.0f), f32_bits(1.0f)))
+           == f32_pair(NINF, NINF));                                  /* (3 - Inf) / 2 */
+    assert(neon_frsqrts(f32_pair(f32_bits(1.0f), SNaN), f32_pair(f32_bits(1.0f), f32_bits(1.0f)))
+           == f32_pair(f32_bits(1.0f), NaN));
+
+    /* F32 to F16, one lane at a time through the packed D word. */
+    assert(neon_f32_to_f16(f32_bits(1.0f)) == 0x3C00);
+    assert(neon_f32_to_f16(f32_bits(65504.0f)) == 0x7BFF);       /* the largest finite half */
+    assert(neon_f32_to_f16(f32_bits(65519.0f)) == 0x7BFF);       /* rounds down */
+    assert(neon_f32_to_f16(f32_bits(65520.0f)) == 0x7C00);       /* tie: rounds to even, Inf */
+    assert(neon_f32_to_f16(0x33800000u) == 0x0001);              /* 2^-24, the smallest half denormal */
+    assert(neon_f32_to_f16(0x33000000u) == 0x0000);              /* 2^-25: a tie with zero, to even */
+    assert(neon_f32_to_f16(0x33400000u) == 0x0001);              /* 3 * 2^-26: above the tie */
+    assert(neon_f32_to_f16(0x00400000u) == 0x0000);              /* an F32 denormal: +0 */
+    assert(neon_f32_to_f16(0x80400000u) == 0x8000);              /* and -0 */
+    assert(neon_f32_to_f16(0x80000000u) == 0x8000);              /* -0 */
+    assert(neon_f32_to_f16(0x7F800001u) == 0x7E00);              /* sNaN: default half NaN */
+    assert(neon_f32_to_f16(0xFFC00000u) == 0x7E00);              /* negative qNaN: default too */
+    assert(neon_f32_to_f16(0xFF800000u) == 0xFC00);
+    assert(neon_f32_to_f16(f32_bits(1.00048828125f)) == 0x3C00); /* 1 + 2^-11: tie, even */
+    assert(neon_f32_to_f16(f32_bits(1.00146484375f)) == 0x3C02); /* 1 + 3 * 2^-11: tie, even */
+
+    /* F16 to F32: every half value is exact, and a half denormal is a normal F32. */
+    assert(neon_f16_to_f32(0x3C00) == f32_bits(1.0f));
+    assert(neon_f16_to_f32(0x0001) == 0x33800000u);              /* 2^-24 */
+    assert(neon_f16_to_f32(0x03FF) == f32_bits(1023.0f / 16777216.0f));   /* 1023 * 2^-24 */
+    assert(neon_f16_to_f32(0x7C00) == 0x7F800000u);
+    assert(neon_f16_to_f32(0xFC00) == 0xFF800000u);
+    assert(neon_f16_to_f32(0x7E01) == 0x7FC00000u);              /* NaN: default */
+    assert(neon_f16_to_f32(0x8000) == 0x80000000u);              /* -0 */
+
+    /* The D word forms of the conversions. */
+    /* Lanes 0 to 3 of the result are 1.0, 2.0, -0 and Inf, lowest first. */
+    assert(neon_cvt_to_f16(f32_pair(f32_bits(2.0f), f32_bits(1.0f)),
+                           f32_pair(0x7F800000u, 0x80000000u)) == 0x7C00800040003C00ull);
+    uint64_t r[2];
+    neon_cvt_from_f16(r, 0x3C00ull | (0xC000ull << 16) | (0x0001ull << 32) | (0x7E01ull << 48));
+    assert(r[0] == f32_pair(f32_bits(-2.0f), f32_bits(1.0f)));
+    assert(r[1] == f32_pair(NaN, 0x33800000u));
+
+    printf("ok   neon float rest: vpadd, vpmax/vpmin, vabd, vacge/vacgt, vrecps, vrsqrts, f32<->f16 conversions\n");
+}
+
 static void test_neon_shuffle(void) {
     /* A holds bytes 0x00..0x07 and B bytes 0x08..0x0F, so byte j of the pair
      * is j. X and Y continue the count at 0x10 and 0x18. Every expected value
@@ -2589,6 +2722,7 @@ int main(void) {
     test_neon_narrow();
     test_neon_cmpz_c();
     test_neon_misc_c();
+    test_neon_float_rest_c();
     test_bit_ops();
     test_parallel_and_lanes();
     test_vfp_d32();

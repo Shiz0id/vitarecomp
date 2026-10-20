@@ -3408,6 +3408,97 @@ static void test_neon_recip_forms(void) {
     printf("ok   neon vrecpe/vrsqrte, u32 and f32, and their rejects\n");
 }
 
+/* Put the halfwords down, decode, and check the op, the registers, the Q flag,
+ * the lane size and the mnemonic. */
+static void expect_neon(uint16_t h1, uint16_t h2, arm_op op, const char *mn,
+                        int vd, int vn, int vm, int q, int size) {
+    put16(0, h1); put16(2, h2);
+    arm_insn in = dec(ARM_T32, BASE);
+    assert(in.op == op && in.vd == vd && in.vn == vn && in.vm == vm);
+    assert(in.neon_q == q && in.neon_size == size);
+    assert(strcmp(in.mnemonic, mn) == 0);
+}
+
+/* A decode that must be refused: OP_NONE, which traps. */
+static void expect_reject(uint16_t h1, uint16_t h2) {
+    put16(0, h1); put16(2, h2);
+    arm_insn in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+}
+
+/* The float forms of the same-length group that are not VADD, VMUL, VMAX or
+ * VCGE (those keep their ops, checked at the end), and the half-precision
+ * VCVT in the two-registers-miscellaneous group. Each encoding was taken from
+ * arm-vita-eabi-as and checked with objdump under .fpu neon-fp16. The rejects
+ * are worked from the layout: VPADD and VPMAX or VPMIN with Q set (the
+ * assembler refuses those forms, so they are not in its listing), a float with
+ * sz = 1, a VCVT with an odd Qm or Qd, ss = 10 (not VCVT, and not VMOVN or
+ * VQMOVN either), h2 bit 6 set, and the U and B combinations that are UNDEFINED
+ * in the same-length group. */
+static void test_neon_float_rest_forms(void) {
+    /* VPADD: the pairs of n in the low lane, of m in the high. */
+    expect_neon(0xFF01, 0x0D02, OP_NEON_FPADD, "vpadd.f32", 0, 1, 2, 0, 2);
+    expect_neon(0xFF41, 0x0DA2, OP_NEON_FPADD, "vpadd.f32", 16, 17, 18, 0, 2);
+    expect_neon(0xFF00, 0x0D01, OP_NEON_FPADD, "vpadd.f32", 0, 0, 1, 0, 2);   /* vpadd.f32 d0, d0, d1 */
+    /* VABD: opc 1101, U=1, B=0, bit 21 set. */
+    expect_neon(0xFF21, 0x0D02, OP_NEON_FABD, "vabd.f32", 0, 1, 2, 0, 2);
+    expect_neon(0xFF62, 0x0DE4, OP_NEON_FABD, "vabd.f32", 16, 18, 20, 1, 2);
+    /* VACGE and VACGT: opc 1110, U=1, B=1, bit 21 clear and set. */
+    expect_neon(0xFF01, 0x0E12, OP_NEON_FACGE, "vacge.f32", 0, 1, 2, 0, 2);
+    expect_neon(0xFF02, 0x0E54, OP_NEON_FACGE, "vacge.f32", 0, 2, 4, 1, 2);
+    expect_neon(0xFF24, 0x3E15, OP_NEON_FACGT, "vacgt.f32", 3, 4, 5, 0, 2);
+    expect_neon(0xFF62, 0x0EF4, OP_NEON_FACGT, "vacgt.f32", 16, 18, 20, 1, 2);
+    /* VPMAX and VPMIN: opc 1111, U=1, B=0. */
+    expect_neon(0xFF01, 0x0F02, OP_NEON_FPMAX, "vpmax.f32", 0, 1, 2, 0, 2);
+    expect_neon(0xFF41, 0x0FA2, OP_NEON_FPMAX, "vpmax.f32", 16, 17, 18, 0, 2);
+    expect_neon(0xFF21, 0x0F02, OP_NEON_FPMIN, "vpmin.f32", 0, 1, 2, 0, 2);
+    expect_neon(0xFF24, 0x3F05, OP_NEON_FPMIN, "vpmin.f32", 3, 4, 5, 0, 2);
+    /* VRECPS and VRSQRTS: opc 1111, U=0, B=1, bit 21 clear and set. */
+    expect_neon(0xEF01, 0x0F12, OP_NEON_FRECPS, "vrecps.f32", 0, 1, 2, 0, 2);
+    expect_neon(0xEF42, 0x0FF4, OP_NEON_FRECPS, "vrecps.f32", 16, 18, 20, 1, 2);
+    expect_neon(0xEF21, 0x0F12, OP_NEON_FRSQRTS, "vrsqrts.f32", 0, 1, 2, 0, 2);
+    expect_neon(0xEF22, 0x0F54, OP_NEON_FRSQRTS, "vrsqrts.f32", 0, 2, 4, 1, 2);
+    /* VCVT.F16.F32 Dd, Qm narrows, and VCVT.F32.F16 Qd, Dm widens. Neither
+     * sets vn, which stays -1 as it does for VMOVN, so that is what is checked. */
+    expect_neon(0xFFB6, 0x0602, OP_NEON_FCVT_TO_F16, "vcvt.f16.f32", 0, -1, 2, 0, 1);
+    expect_neon(0xFFF6, 0x1622, OP_NEON_FCVT_TO_F16, "vcvt.f16.f32", 17, -1, 18, 0, 1);
+    expect_neon(0xFFB6, 0x0701, OP_NEON_FCVT_FROM_F16, "vcvt.f32.f16", 0, -1, 1, 0, 1);
+    expect_neon(0xFFF6, 0x0723, OP_NEON_FCVT_FROM_F16, "vcvt.f32.f16", 16, -1, 19, 0, 1);
+
+    /* Neighbours that keep their ops: VADD, VMUL, VMAX and VCGE on the same
+     * same-length paths, and VMOVN and VQMOVN in the two-register group the
+     * conversion sits between. */
+    expect_neon(0xEF01, 0x0D02, OP_NEON_FADD, "vadd.f32", 0, 1, 2, 0, 2);
+    expect_neon(0xFF01, 0x0D12, OP_NEON_FMUL, "vmul.f32", 0, 1, 2, 0, 2);
+    expect_neon(0xEF01, 0x0F02, OP_NEON_FMAX, "vmax.f32", 0, 1, 2, 0, 2);
+    expect_neon(0xFF01, 0x0E02, OP_NEON_FCGE, "vcge.f32", 0, 1, 2, 0, 2);
+    expect_neon(0xFFB6, 0x0202, OP_NEON_MOVN, "vmovn", 0, -1, 2, 0, 1);
+    expect_neon(0xFFB6, 0x0282, OP_NEON_NARROW_QSHR, "vqmovn.s32", 0, -1, 2, 0, 1);
+
+    /* Rejects. VPADD and VPMAX with Q set are UNDEFINED. */
+    expect_reject(0xFF02, 0x0D44);                       /* vpadd.f32 with Q */
+    expect_reject(0xFF02, 0x0F44);                       /* vpmax.f32 with Q */
+    /* Q with an odd register, in the group's own check: vacge q1 and vrecps
+     * with an odd Vm (q-register pairs are even). */
+    expect_reject(0xFF02, 0x1E54);                       /* vacge.f32 with Vd = 1, Q */
+    expect_reject(0xEF42, 0x0FF5);                       /* vrecps.f32 with Vm = 5, Q */
+    /* A float with sz = 1 is not F32: the float rows above are all sz = 0. */
+    expect_reject(0xFF11, 0x0D02);                       /* vpadd sz = 1 */
+    expect_reject(0xEF11, 0x0F12);                       /* vrecps sz = 1 */
+    /* U=1 B=1 with bit 21 set, and opc 1110 or 1111 with the wrong U or B. */
+    expect_reject(0xFF21, 0x0D12);
+    expect_reject(0xFF01, 0x0F12);
+    expect_reject(0xEF21, 0x0E12);
+    /* VCVT: Qm must be even for F16.F32, Qd for F32.F16, ss = 10 is not a
+     * conversion, and h2 bit 6 is clear in the form. */
+    expect_reject(0xFFB6, 0x0603);                       /* vcvt.f16.f32, Qm = q1 odd */
+    expect_reject(0xFFB6, 0x1701);                       /* vcvt.f32.f16, Qd = q8 odd */
+    expect_reject(0xFFBA, 0x0602);                       /* ss = 10 */
+    expect_reject(0xFFB6, 0x0642);                       /* h2 bit 6 set */
+
+    printf("ok   neon float: vpadd, vabd, vacge/vacgt, vpmax/vpmin, vrecps/vrsqrts, vcvt f16/f32, neighbours, and their rejects\n");
+}
+
 int main(void) {
     printf("decode:\n");
     test_thumb_width();
@@ -3431,6 +3522,7 @@ int main(void) {
     test_homebrew_forms();
     test_neon_cmpz_forms();
     test_neon_misc_forms();
+    test_neon_float_rest_forms();
     test_neon_widen_forms();
     test_neon_shuffle_forms();
     test_neon_shift_imm_forms();
