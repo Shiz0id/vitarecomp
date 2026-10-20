@@ -78,6 +78,7 @@ while read -r name src velf tid secs expect <&3; do
     # A vitarecomp trap, or the host process dying under the recompiled code.
     # (Stock is not judged: a stock binary built before the framebuffer-free
     # fix in VITA3K_BRIDGE.md can crash on exit through no fault of ours.)
+    for t in stock recomp; do grep -o 'NT .*' "$out/$t.log" > "$out/$t.nt"; done
     trap_line=$(grep -m1 -E '^vitarecomp: |Unhandled (SIG|access)' "$out/recomp.log")
     diff=$(python3 - "$out" <<'PY'
 import sys
@@ -92,6 +93,9 @@ PY
 )
     if [ -n "$trap_line" ]; then
         echo "FAIL  $name ($pct): $trap_line"; fails=$((fails+1))
+    elif [ "$expect" = log ] && { [ ! -s "$out/stock.nt" ] || ! cmp -s "$out/stock.nt" "$out/recomp.nt"; }; then
+        echo "FAIL  $name ($pct): NT lines differ from stock (diff $out/stock.nt $out/recomp.nt)"
+        fails=$((fails+1))
     elif [ "$expect" = same ] && [ "$diff" != same ]; then
         echo "FAIL  $name ($pct): screen $diff from stock (compare $out/stock.png and recomp.png)"
         fails=$((fails+1))

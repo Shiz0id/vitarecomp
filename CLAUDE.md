@@ -49,6 +49,9 @@ them; diffing against stock (dynarmic) did. So:
 
 - Every decoder or emitter change needs `ctest` and `tests/homebrew/run.sh`
   green before it is pushed.
+- Every new NEON form gets a `T()` line in `tests/vita/neontest/main.c`. That
+  sample prints register contents, and the harness fails if they differ from
+  stock, so it checks semantics against dynarmic and not against our own reading.
 - Every decode fix gets a test in `tests/test_decode.c`. Take the encoding from
   `arm-vita-eabi-as` + `objdump`, never from memory.
 - A test failure means debug it. Never weaken or skip the test.
@@ -67,6 +70,10 @@ them; diffing against stock (dynarmic) did. So:
   Seeds past it are data.
 - **A32 is classified but not decoded**, and discovery refuses ARM seeds.
   A32 exclusives wait on that.
+- The Vita3K build compiles the generated C against the **main checkout's**
+  `include/`, even when run.sh runs from a worktree. A worktree that adds
+  runtime helpers fails to build there ("undeclared function neon_...") until
+  its headers reach the main checkout.
 - Run Vita3K from its `bin/` directory, or it cannot find its shaders.
 - `armrecomp emit x.velf /dev/null` gives statistics only (no imports dir).
   The import defaults go to `<out minus .c>_imports/`.
