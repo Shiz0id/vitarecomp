@@ -136,9 +136,11 @@ obstacle on this platform.
       (VEXT, VREV, VSWP/VTRN/VUZP/VZIP, VDUP lane, VTBL/VTBX), VLD2-4/VST2-4,
       widening (VADDL/W, VSUBL/W, VMULL, VMLAL/VMLSL, VMOVL/VSHLL) and
       narrowing (VQMOVN/VQMOVUN, VSHRN and its rounding/saturating forms),
-      integer VCGT/VCGE, VMAX/VMIN and VABD/VABA.
+      integer VCGT/VCGE, VMAX/VMIN and VABD/VABA, VSHL/VQSHL/VRSHL/VQRSHL by
+      register, the compares with zero and integer VABS/VNEG. VQRSHL is
+      checked by unit tests only: dynarmic does not implement it.
       Left: VLDn/VSTn single-lane and all-lanes, the reciprocal estimates and
-      steps, VSHL by register, the compare-with-zero forms, VCNT/VCLZ/VCLS, VPADDL/VPADAL, VQDMULH/VQRDMULH, fixed-point VCVT. FPSCR.QC is not
+      steps, VQABS/VQNEG, VHADD/VHSUB, VPMAX/VPMIN, VCNT/VCLZ/VCLS, VPADDL/VPADAL, VQDMULH/VQRDMULH, fixed-point VCVT. FPSCR.QC is not
       modelled. How these tasks are run: `docs/DELEGATING.md`. Each new form is
       checked against stock Vita3K by `tests/vita/neontest`
 - [ ] ARM (A32) operand decoding — a small minority of this corpus. The A32

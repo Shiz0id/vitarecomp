@@ -3,11 +3,12 @@
 Much of the remaining work is the same shape again and again: one family of
 instructions → decode, a runtime helper, an emitter case and tests. That work
 is handed to a smaller, cheaper model as a tightly scoped task, and a reviewer
-checks it before anything reaches the branch. Eight NEON tasks have landed
+checks it before anything reaches the branch. Ten NEON tasks have landed
 this way: F32 arithmetic in two parts, the integer multiply/saturate/shift set,
 the shuffles, VLD2–4/VST2–4, the widening and narrowing forms, which
-were the first pair run in parallel, and the integer compares, max/min and
-absolute difference. With disjoint insertion points that pair
+were the first pair run in parallel, the integer compares, max/min and
+absolute difference, and a second parallel pair: shifts by register and the
+compares with zero. With disjoint insertion points that pair
 rebased onto each other with no conflicts. Each task cost well under a dollar, and the
 reviewer rejected none outright. Review did catch errors in the reviewer's own briefs. It also
 caught one gap the agent could not have seen, which is how `neontest` came about.
@@ -110,6 +111,12 @@ Do these in order, and stop at the first failure.
    including `neontest`, whose printed registers must match stock Vita3K
    (dynarmic). That run is the check against the instruction itself, and not
    against anyone's reading of the manual.
+
+   Stock is only a reference for what dynarmic implements. It lacks VQRSHL:
+   stock logs "Undefined instruction", skips it and prints the registers
+   unchanged, and `run.sh` fails the sample saying so. Check a new form's
+   dynarmic decoder line (`external/dynarmic/src/dynarmic/frontend/A32/
+   decoder/asimd.inc`) before giving it a `T()` line.
 
    The Vita3K build compiles the generated C against the **main checkout's**
    `include/`. A worktree that adds helpers needs its headers in the main

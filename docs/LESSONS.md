@@ -380,6 +380,12 @@ other people from the same manual, so agreement with it is evidence that
 our tests cannot provide on their own. Breaking VZIP's Q form in `neon.h` makes
 it fail on exactly the two VZIP lines.
 
+The reference has gaps of its own. The first VQRSHL lines "failed": stock
+printed the input registers unchanged, because dynarmic does not implement
+VQRSHL and Vita3K logs it as undefined and moves on. A hand calculation sided
+with the recompiled output. A difference from stock is a lead, not a verdict,
+and `run.sh` now says when stock could not run the instruction at all.
+
 The same review found a quieter trap: the Vita3K build compiles the generated
 C against the main checkout's `include/`, even when the harness is run from a
 worktree. A new helper that existed only in a worktree failed to build there.
