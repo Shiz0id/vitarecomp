@@ -73,6 +73,31 @@ static int arm_seed_ok(const vm_module *mod, uint32_t target) {
     return vm_find_stub(mod, target) != NULL;
 }
 
+/* Do the bytes at `t` begin like ARM code? For a BLX-immediate met by the
+ * descent, which only follows real code: in a VitaSDK program that is newlib's
+ * ARM-mode memcpy, called from hundreds of sites.
+ *
+ * The ARM decoder names nearly every word, so the test is strict where data
+ * differs from code. The first instruction must be unconditional (flags are
+ * undefined on entry, so no compiler opens with a condition), and nothing up
+ * to the first unconditional transfer may be unknown, undefined or a system
+ * instruction. */
+static int arm_entry_plausible(const vm_image *img, uint32_t code_end, uint32_t t) {
+    const uint8_t *text = img->data + img->seg_file;
+    const uint32_t base = img->seg_vaddr;
+    if ((t & 3) || t < base || t + 4 > code_end) return 0;
+    for (int i = 0; i < 16; i++) {
+        arm_insn in;
+        uint32_t a = t + 4u * (uint32_t)i;
+        if (a + 4 > code_end || arm_decode(text, base, img->seg_len, a, ARM_A32, &in) == 0) return 0;
+        if (i == 0 && in.conditional) return 0;
+        if (in.cls == A_UNKNOWN || in.cls == A_UNDEF || in.cls == A_SYS) return 0;
+        if (!in.conditional && (in.cls == A_RETURN || in.cls == A_INDIRECT ||
+                                in.cls == A_BRANCH)) return 1;
+    }
+    return 1;
+}
+
 /* Inside an import stub but not at its start: data decoded as a branch into
  * the loader's table, never a function. */
 static int in_stub_body(const vm_module *mod, uint32_t a) {
@@ -245,14 +270,16 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
                                 ? (s.mode == ARM_T32 ? ARM_A32 : ARM_T32)
                                 : s.mode;
                     /* A mode-switching call is only followed into ARM when the
-                     * target is a known import stub.
+                     * target is a known import stub, or when it begins like
+                     * ARM code (arm_entry_plausible; the harvest below does
+                     * not get that exception, since it decodes data too).
                      *
                      * The stubs are the module's ARM code — placeholder bodies
                      * the loader patches — and a BLX to one is the ordinary way
                      * a Thumb module calls firmware. A BLX-immediate pointing
-                     * anywhere else is, on this corpus, a misdecode: the tail of
-                     * .text is read-only data, and data decoded as Thumb
-                     * produces plausible BLX encodings.
+                     * anywhere else was, on the first corpus, always a
+                     * misdecode: the tail of .text is read-only data, and data
+                     * decoded as Thumb produces plausible BLX encodings.
                      *
                      * Refusing matters more here than for any other seed
                      * because of an asymmetry between the decoders. The Thumb
@@ -263,7 +290,8 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
                      * instructions of confident nonsense — 152,919 of them
                      * before this check existed. */
                     if (cm == ARM_A32 && s.mode == ARM_T32 &&
-                        !arm_seed_ok(mod, in.target)) {
+                        !arm_seed_ok(mod, in.target) &&
+                        !arm_entry_plausible(img, r->code_end, in.target)) {
                         r->seeds_arm_refused++;
                     } else {
                         sq_push(q, in.target, cm, 0);

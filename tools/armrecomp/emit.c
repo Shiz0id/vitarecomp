@@ -155,9 +155,28 @@ static int fs_has(const funcset *s, uint32_t addr) {
     return 0;
 }
 
-static void collect(const vm_image *img, const vf_func *fn, fbody *b) {
+/* Whether a branch to `t` stays inside this body: inside its bound, or past
+ * it at an address that is not a function of its own.
+ *
+ * `bound` comes from discovery's extent, and discovery's `seen` map is shared,
+ * so an extent can stop short of the code the function really owns. An -O0
+ * function of 13 KB in Zelda Navis Quest was registered as dozens of fragments
+ * (each backward branch seeds one), and every fragment ends `b.w` to the one
+ * shared epilogue past its own bound. That epilogue is not a function, so all
+ * 2,000-odd of those branches trapped. Code that is not a function entry can
+ * only be reached as part of the function that branches there, so it is
+ * followed, and duplicated into each fragment that reaches it. */
+static int in_body(const vf_func *fn, uint32_t bound, const funcset *fs,
+                   uint32_t base, uint32_t code_end, uint32_t t) {
+    if (t >= fn->addr && t < bound) return 1;
+    return t >= base && t < code_end && !fs_has(fs, t);
+}
+
+static void collect(const vm_image *img, const vf_func *fn, const funcset *fs,
+                    uint32_t code_end, fbody *b) {
     const uint8_t *text = img->data + img->seg_file;
     const uint32_t base = img->seg_vaddr;
+    if (code_end <= base || code_end > base + img->seg_len) code_end = base + img->seg_len;
 
     visited seen;
     memset(&seen, 0, sizeof(seen));
@@ -176,10 +195,14 @@ static void collect(const vm_image *img, const vf_func *fn, fbody *b) {
     while (sp_ > 0 && b->n < MAX_INSNS_PER_FUNC) {
         uint32_t a = stack[--sp_];
         uint8_t itstate = 0;
+        int jump_run = 0;
 
         for (;;) {
             if (a < base || a >= base + img->seg_len) break;
-            if (a >= bound) break;                   /* extent as a bound */
+            /* Past the extent, a run goes on until it meets another
+             * function's entry; the emitter turns that into a tail call. */
+            if (a >= code_end) break;
+            if ((a < fn->addr || a >= bound) && fs_has(fs, a)) break;
             if (!visit_mark(&seen, a)) break;        /* already emitted */
 
             arm_insn in;
@@ -188,13 +211,24 @@ static void collect(const vm_image *img, const vf_func *fn, fbody *b) {
             arm_it_step(&itstate, &in);
             fb_push(b, &in);
 
+            if (jump_run) fb_label(b, a);
+            if (jump_run && !falls_through(&in)) jump_run = 0;
+            if (in.op == OP_ADD_PC) {
+                /* `add pc, pc, rm` lands somewhere in the code that follows,
+                 * so that code is walked on and every instruction of it up to
+                 * the first that does not fall through becomes a target. */
+                jump_run = 1;
+                a += (uint32_t)n;
+                continue;
+            }
+
             if ((in.cls == A_RETURN || in.cls == A_UNDEF) && !in.conditional) break;
             if (in.cls == A_INDIRECT && !in.conditional && !in.table_n) break;
 
             if (in.table_n) {                        /* switch: every case */
                 for (uint32_t i = 0; i < in.table_n; i++) {
                     uint32_t t = arm_table_target(text, base, &in, i);
-                    if (t < fn->addr || t >= bound) continue;
+                    if (!in_body(fn, bound, fs, base, code_end, t)) continue;
                     fb_label(b, t);
                     if (sp_ < (int)(sizeof(stack) / sizeof(stack[0])))
                         stack[sp_++] = t;
@@ -218,7 +252,7 @@ static void collect(const vm_image *img, const vf_func *fn, fbody *b) {
              * intra-function branch that had already been translated correctly
              * a few lines above. */
             if (in.has_target && in.cls == A_BRANCH &&
-                in.target >= fn->addr && in.target < bound) {
+                in_body(fn, bound, fs, base, code_end, in.target)) {
                 fb_label(b, in.target);
                 if (sp_ < (int)(sizeof(stack) / sizeof(stack[0])))
                     stack[sp_++] = in.target;
@@ -307,12 +341,20 @@ static void collect(const vm_image *img, const vf_func *fn, fbody *b) {
  *
  * A recompiled program has no PC, so `pc` is not a variable and emitting it
  * produces C that does not compile â€” which is the good failure. The value is
- * known at translation time: reading PC in Thumb yields the instruction's own
- * address plus 4. The high-register ADD/MOV/CMP forms are where this actually
+ * known at translation time: reading PC yields the instruction's own address
+ * plus 4 in Thumb, plus 8 in ARM (pc_read). The high-register ADD/MOV/CMP forms are where this actually
  * shows up, and they are common enough (position-independent address
  * computation) that leaving them to a trap would cost real coverage. */
+/* What reading the PC gives: the instruction's address plus 4 in Thumb, plus
+ * 8 in ARM. Literal and ADR bases align it down to a word, which ARM's
+ * already is. */
+static uint32_t pc_read(const arm_insn *in) {
+    return in->addr + (in->mode == ARM_A32 ? 8u : 4u);
+}
+static uint32_t pc_align(const arm_insn *in) { return pc_read(in) & ~3u; }
+
 static void reg_operand(char *dst, size_t cap, int r, const arm_insn *in) {
-    if (r == 15) snprintf(dst, cap, "0x%08Xu", in->addr + 4);
+    if (r == 15) snprintf(dst, cap, "0x%08Xu", pc_read(in));
     else         snprintf(dst, cap, "%s", reg_name(r));
 }
 
@@ -322,7 +364,7 @@ static void reg_operand(char *dst, size_t cap, int r, const arm_insn *in) {
  * The division this enforces is the one that kept getting lost: a DESTINATION
  * of r15 is a branch and is trapped by the guard in emit_insn, while a SOURCE
  * of r15 is a CONSTANT this pass knows — the instruction's own address plus
- * four, which is how the architecture defines reading the PC. Naming it "pc"
+ * four (eight in ARM), which is how the architecture defines reading the PC. Naming it "pc"
  * is never right in either case, and reg_name() is now left naming only
  * destinations.
  *
@@ -333,7 +375,7 @@ static const char *src_name(const arm_insn *in, int r) {
     static unsigned next;
     if (r != 15) return reg_name(r);
     char *b = buf[next++ & 3];
-    snprintf(b, sizeof(buf[0]), "0x%08Xu", in->addr + 4);
+    snprintf(b, sizeof(buf[0]), "0x%08Xu", pc_read(in));
     return b;
 }
 
@@ -385,15 +427,14 @@ static int address(char *dst, size_t cap, const arm_insn *in) {
 
     if (in->rn == 15) {
         /* PC-relative. A recompiled program has no PC, so it is resolved here:
-         * for Thumb the base is the instruction address plus 4, aligned down to
-         * a word. This is what turns a literal-pool load into a constant.
+         * the base is the PC value aligned down to a word (pc_align). This is what turns a literal-pool load into a constant.
          *
          * Every caller must come through here rather than formatting `rn`
          * itself: `reg_name(15)` is "pc", and cpu.h deliberately has no such
          * variable, so a caller that builds its own address expression emits C
          * that does not compile. That is the good failure — the bad one is a
          * `pc` that exists and holds something plausible. */
-        uint32_t pc = (in->addr + 4) & ~3u;
+        uint32_t pc = pc_align(in);
         snprintf(dst, cap, "0x%08X", in->mem_add ? pc + in->imm : pc - in->imm);
         return 1;
     }
@@ -570,7 +611,7 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
     int writes_pc = (in->rd == 15)
                  || ((in->cls == A_LOAD || in->cls == A_STORE)
                      && (in->rt == 15 || in->rt2 == 15));
-    if (in->op != OP_NONE && writes_pc) {
+    if (in->op != OP_NONE && in->op != OP_ADD_PC && writes_pc) {
         trap(f, in, "writes pc");
         note_trap(st, "writes pc");
         return 0;
@@ -722,7 +763,7 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
 
         case OP_ADR:
             fprintf(f, "    %s = 0x%08X;\n", reg_name(in->rd),
-                    ((in->addr + 4) & ~3u) + in->imm);
+                    pc_align(in) + in->imm);
             break;
 
         case OP_LDR: case OP_LDRB: case OP_LDRH: case OP_LDRSB: case OP_LDRSH: {
@@ -733,8 +774,10 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
              * access. This is also what stops the pool from being mistaken for
              * code later. */
             if (in->rn == 15) {
-                uint32_t pc = (in->addr + 4) & ~3u;
-                const uint8_t *p = vm_va(img, pc + in->imm, 4);
+                /* By the U bit, as address() reads it: `ldr rt, [pc, #-n]`
+                 * once folded the word n bytes the wrong side of the PC. */
+                uint32_t pc = pc_align(in);
+                const uint8_t *p = vm_va(img, in->mem_add ? pc + in->imm : pc - in->imm, 4);
                 if (p) {
                     uint32_t v = (uint32_t)p[0] | ((uint32_t)p[1] << 8)
                                | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
@@ -1052,7 +1095,7 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
              * constant exactly as the integer path does — same reason, too:
              * it keeps the pool from being read back as code later. */
             if (in->rn == 15) {
-                uint32_t pc = (in->addr + 4) & ~3u;
+                uint32_t pc = pc_align(in);
                 uint32_t at = in->mem_add ? pc + in->imm : pc - in->imm;
                 const uint8_t *p = vm_va(img, at, in->vfp_dp ? 8 : 4);
                 if (p && in->op == OP_VLDR) {
@@ -2128,6 +2171,23 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             fprintf(f, "    /* nop */\n");
             break;
 
+        case OP_ADD_PC: {
+            /* A jump into the run of code after this instruction: collect()
+             * labelled every instruction of it, so each is a case. Any other
+             * value is a target the translation does not have. */
+            operand2(o2, sizeof(o2), in);
+            fprintf(f, "    { uint32_t t_ = 0x%08Xu + (uint32_t)(%s);\n", pc_read(in), o2);
+            fprintf(f, "      switch (t_) {\n");
+            for (const arm_insn *x = in + 1;
+                 x < b->v + b->n && x->addr == x[-1].addr + x[-1].width && fb_has_label(b, x->addr);
+                 x++) {
+                fprintf(f, "      case 0x%08Xu: goto L_%08X;\n", x->addr, x->addr);
+                if (!falls_through(x)) break;
+            }
+            fprintf(f, "      default: vita_trap_indirect(0x%08X, t_); return;\n      } }\n", in->addr);
+            break;
+        }
+
         case OP_IT:
             /* The IT instruction itself emits nothing; its effect is that the
              * following instructions carry a condition, which the decoder has
@@ -2148,7 +2208,10 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             fprintf(f, "    vita_func_%08X();\n", in->target);
             ok = 1;
         } else if (in->cls == A_CALL && in->has_target) {
+            /* Counted, or the table hides it: in Zelda Navis Quest this is
+             * every call to newlib's memcpy, an ARM-mode routine. */
             fprintf(f, "    vita_trap_indirect(0x%08X, 0x%08X);\n", in->addr, in->target);
+            note_trap(st, in->switches_mode ? "call: into ARM code" : "call: target not a function");
         } else if (in->cls == A_RETURN) {
             fprintf(f, "    return;\n");
             ok = 1;
@@ -2231,7 +2294,7 @@ int em_emit(const vm_image *img, const vm_module *mod, const nid_db *db,
         const vf_func *fn = &disc->funcs[i];
         fbody b;
         memset(&b, 0, sizeof(b));
-        collect(img, fn, &b);
+        collect(img, fn, &fs, disc->code_end, &b);
 
         fprintf(f, "/* ---------------------------------------------------------------\n");
         fprintf(f, " * vita_func_%08X  --  %u instructions, %u bytes%s\n",

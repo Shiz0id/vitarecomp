@@ -2550,19 +2550,233 @@ static void decode_t32(uint16_t h1, uint16_t h2, arm_insn *o) {
 
 /* --- ARM -------------------------------------------------------------------- */
 
+/* ARM (A32) shares its operation set with Thumb-2, so it decodes into the same
+ * fields and the emitter translates it with the same code. Two shortcuts keep
+ * the two decoders from drifting apart where the encodings agree:
+ *
+ *   - VFP and other coprocessor instructions are the T32 encoding with a
+ *     condition where T32 has 1110. They are rewritten to T32 and decoded by
+ *     decode_t32, then given the condition.
+ *   - Advanced SIMD data processing (1111 001U) and element/structure loads
+ *     (1111 0100 xxx0) are T32's 111U 1111 and 1111 1001 with the same low 24
+ *     bits, and are rewritten the same way.
+ *
+ * Everything else is read directly. A form the emitter cannot express stays
+ * OP_NONE and traps by name, as in T32.
+ *
+ * Every VitaSDK program carries some of this: newlib's memcpy for ARMv7-A is an
+ * ARM-mode routine, so until it was decoded every call to memcpy trapped. */
+static void a32_from_t32(uint32_t t, arm_insn *o) {
+    const uint32_t raw = o->raw;
+    decode_t32((uint16_t)(t >> 16), (uint16_t)t, o);
+    o->raw = raw;
+}
+
+static void a32_imm_shift(uint32_t w, arm_insn *o) {
+    o->rm = w & 0xF;
+    o->shift_type = (w >> 5) & 3;
+    o->shift_amt  = (w >> 7) & 0x1F;
+    /* DecodeImmShift, as in T32: 0 means 32 for LSR/ASR and RRX for ROR. */
+    if (o->shift_amt == 0 && o->shift_type == SH_ROR) {
+        o->shift_type = SH_RRX;
+        o->shift_amt  = 1;
+    } else if (o->shift_amt == 0 && o->shift_type != SH_LSL) {
+        o->shift_amt = 32;
+    }
+}
+
+static void a32_dp(uint32_t w, arm_insn *o) {
+    static const arm_op dp[16] = {
+        OP_AND, OP_EOR, OP_SUB, OP_RSB, OP_ADD, OP_ADC, OP_SBC, OP_NONE /* rsc */,
+        OP_TST, OP_TEQ, OP_CMP, OP_CMN, OP_ORR, OP_MOV, OP_BIC, OP_MVN
+    };
+    const int opc = (w >> 21) & 0xF;
+    const int is_imm = (w >> 25) & 1;
+    o->op = dp[opc];
+    o->sets_flags = (w >> 20) & 1;
+    o->rn = (w >> 16) & 0xF;
+    o->rd = (w >> 12) & 0xF;
+    if (opc == 0xD || opc == 0xF) o->rn = ARM_NO_REG;        /* MOV, MVN */
+    if (opc >= 0x8 && opc <= 0xB) o->rd = ARM_NO_REG;        /* compares */
+
+    if (is_imm) {
+        /* ARMExpandImm: imm8 rotated right by twice the 4-bit field. A
+         * rotation, unlike T32's replicated patterns, always has a carry-out
+         * when it is not zero. */
+        uint32_t rot = ((w >> 8) & 0xF) * 2, v = w & 0xFF;
+        o->imm = rot ? (v >> rot) | (v << (32 - rot)) : v;
+        o->imm_carry = rot != 0;
+        o->has_imm = 1;
+    } else if (!(w & 0x10)) {
+        a32_imm_shift(w, o);
+    } else {
+        /* Register-shifted register. T32 has it only as the shifts
+         * themselves, so a MOV becomes LSL/LSR/ASR/ROR rd, rm, rs; any other
+         * operation shifted by a register traps. */
+        static const arm_op sh[4] = { OP_LSL, OP_LSR, OP_ASR, OP_ROR };
+        if (opc == 0xD) {
+            o->op = sh[(w >> 5) & 3];
+            o->rn = w & 0xF;
+            o->rm = (w >> 8) & 0xF;
+            if (o->rn == 15 || o->rm == 15 || o->rd == 15) o->op = OP_NONE;
+            set(o, A_ALU, "shift reg");
+            return;
+        }
+        o->op = OP_NONE;
+        set(o, A_ALU, "alu rsr");
+        return;
+    }
+
+    if (o->rd == 15) {
+        /* A write to the PC is a branch. `mov pc, lr` returns; `add pc, pc,
+         * rm` jumps into the code that follows it, which newlib's memcpy uses
+         * to enter an unrolled copy part way through. With S set it is an
+         * exception return, not something user code does. */
+        if (o->sets_flags) { o->op = OP_NONE; set(o, A_SYS, "alu rd=pc, s"); return; }
+        if (opc == 0xD && !is_imm && o->rm == 14 && o->shift_amt == 0) {
+            o->op = OP_NONE; set(o, A_RETURN, "mov pc,lr"); return;
+        }
+        if (opc == 0x4 && !is_imm && o->rn == 15 && o->rm != 15) {
+            o->op = OP_ADD_PC; set(o, A_INDIRECT, "add pc,pc,rm"); return;
+        }
+        o->op = OP_NONE;
+        set(o, A_INDIRECT, "alu rd=pc");
+        return;
+    }
+    if (o->op == OP_NONE) { set(o, A_ALU, "rsc"); return; }
+    set(o, A_ALU, "alu");
+}
+
+/* LDRH/STRH/LDRSB/LDRSH/LDRD/STRD: bits 7 and 4 set, bits 6:5 not 00. */
+static void a32_extra_ls(uint32_t w, arm_insn *o) {
+    const int P = (w >> 24) & 1, U = (w >> 23) & 1, I = (w >> 22) & 1;
+    const int W = (w >> 21) & 1, L = (w >> 20) & 1, op2 = (w >> 5) & 3;
+    o->rn = (w >> 16) & 0xF;
+    o->rt = (w >> 12) & 0xF;
+    o->mem_add = (uint8_t)U;
+    int load = L, dual = 0;
+    if (op2 == 1)      o->op = L ? OP_LDRH : OP_STRH;
+    else if (!L)     { o->op = op2 == 2 ? OP_LDRD : OP_STRD; dual = 1; load = op2 == 2; }
+    else               o->op = op2 == 2 ? OP_LDRSB : OP_LDRSH;
+    if (dual) {
+        /* The pair is rt, rt+1; an odd rt is UNPREDICTABLE. */
+        if (o->rt & 1 || o->rt == 14) o->op = OP_NONE;
+        o->rt2 = (int8_t)(o->rt + 1);
+    }
+    if (I) {
+        o->imm = ((w >> 4) & 0xF0) | (w & 0xF);
+        o->has_imm = 1;
+    } else {
+        /* [rn, +rm] only: the emitter's register forms neither subtract nor
+         * write back. */
+        o->rm = w & 0xF;
+        if (!U || !P || W || (w & 0xF00)) o->op = OP_NONE;
+    }
+    if (!P && W) o->op = OP_NONE;                 /* LDRHT and friends */
+    if (!P || W) { o->writeback = 1; o->postindex = (uint8_t)!P; }
+    if (o->rt == 15) o->op = OP_NONE;
+    set(o, load ? A_LOAD : A_STORE, dual ? (load ? "ldrd" : "strd") : "ldrh/strh");
+}
+
+/* LDR/STR/LDRB/STRB, immediate (010) or register (011) offset. */
+static void a32_ls(uint32_t w, arm_insn *o) {
+    const int P = (w >> 24) & 1, U = (w >> 23) & 1, B = (w >> 22) & 1;
+    const int W = (w >> 21) & 1, L = (w >> 20) & 1, R = (w >> 25) & 1;
+    o->rn = (w >> 16) & 0xF;
+    o->rt = (w >> 12) & 0xF;
+    o->mem_add = (uint8_t)U;
+    o->op = L ? (B ? OP_LDRB : OP_LDR) : (B ? OP_STRB : OP_STR);
+    if (R) {
+        a32_imm_shift(w, o);
+        if (!U || !P || W || o->shift_type != SH_LSL) o->op = OP_NONE;
+    } else {
+        o->imm = w & 0xFFF;
+        o->has_imm = 1;
+    }
+    if (!P && W) o->op = OP_NONE;                 /* LDRT/STRT */
+    if (!P || W) { o->writeback = 1; o->postindex = (uint8_t)!P; }
+
+    if (o->rt == 15) {
+        if (L && !B && o->rn == 13 && !R && !P && U && o->imm == 4) {
+            o->op = OP_POP;                        /* ldr pc, [sp], #4 */
+            o->reglist = 0x8000;
+            o->rt = ARM_NO_REG;
+            o->imm = 0; o->has_imm = 0; o->postindex = 0;
+            set(o, A_RETURN, "pop {pc}");
+            return;
+        }
+        o->op = OP_NONE;
+        set(o, L ? A_INDIRECT : A_STORE, L ? "ldr pc" : "str pc");
+        return;
+    }
+    set(o, L ? A_LOAD : A_STORE, "ldr/str");
+}
+
+/* Media instructions: 011 with bit 4 set. */
+static void a32_media(uint32_t w, arm_insn *o) {
+    const int rd = (w >> 12) & 0xF, rn = w & 0xF;
+    if ((w & 0x0FF000F0) == 0x07F000F0) { set(o, A_UNDEF, "udf"); return; }
+    if ((w & 0x0FE00070) == 0x07C00010) {         /* bfc / bfi */
+        uint32_t msb = (w >> 16) & 0x1F, lsb = (w >> 7) & 0x1F;
+        int clear = rn == 15;
+        o->rd = rd; o->rn = clear ? ARM_NO_REG : rn; o->bf_lsb = (uint8_t)lsb;
+        if (msb >= lsb) { o->op = clear ? OP_BFC : OP_BFI; o->bf_width = (uint8_t)(msb - lsb + 1); }
+        set(o, A_ALU, clear ? "bfc" : "bfi");
+        return;
+    }
+    if ((w & 0x0FA00070) == 0x07A00050) {         /* sbfx / ubfx */
+        uint32_t width = ((w >> 16) & 0x1F) + 1, lsb = (w >> 7) & 0x1F;
+        int u = (w >> 22) & 1;
+        o->rd = rd; o->rn = rn; o->bf_lsb = (uint8_t)lsb;
+        if (lsb + width <= 32) { o->op = u ? OP_UBFX : OP_SBFX; o->bf_width = (uint8_t)width; }
+        set(o, A_ALU, u ? "ubfx" : "sbfx");
+        return;
+    }
+    if ((w & 0x0F8003F0) == 0x06800070) {         /* sxt / uxt, with add */
+        static const arm_op ex[8] = { OP_SXTB16, OP_NONE, OP_SXTB, OP_SXTH,
+                                      OP_UXTB16, OP_NONE, OP_UXTB, OP_UXTH };
+        static const char *const nm[8] = { "sxtb16", "?", "sxtb", "sxth",
+                                           "uxtb16", "?", "uxtb", "uxth" };
+        int k = (w >> 20) & 7, n = (w >> 16) & 0xF;
+        o->op = ex[k];
+        o->rd = rd; o->rm = rn;
+        o->rn = n == 15 ? ARM_NO_REG : (int8_t)n;
+        o->shift_type = SH_ROR;
+        o->shift_amt = (uint8_t)(((w >> 10) & 3) * 8);
+        set(o, A_ALU, nm[k]);
+        return;
+    }
+    if ((w & 0x0FBF0F70) == 0x06BF0F30) {         /* rev, rev16, rbit, revsh */
+        static const arm_op rv[4] = { OP_REV, OP_REV16, OP_RBIT, OP_REVSH };
+        static const char *const nm[4] = { "rev", "rev16", "rbit", "revsh" };
+        int k = (((w >> 22) & 1) << 1) | ((w >> 7) & 1);
+        o->op = rv[k]; o->rd = rd; o->rm = rn;
+        set(o, A_ALU, nm[k]);
+        return;
+    }
+    if ((w & 0x0FF00FF0) == 0x06800FB0) {         /* sel */
+        o->op = OP_SEL; o->rd = rd; o->rn = (w >> 16) & 0xF; o->rm = rn;
+        set(o, A_ALU, "sel");
+        return;
+    }
+    if ((w & 0x0FF00F10) == 0x06500F10) {         /* unsigned parallel add/sub */
+        static const arm_op pop[8] = { OP_UADD16, OP_NONE, OP_NONE, OP_USUB16,
+                                       OP_UADD8,  OP_NONE, OP_NONE, OP_USUB8 };
+        o->op = pop[(w >> 5) & 7];
+        o->rd = rd; o->rn = (w >> 16) & 0xF; o->rm = rn;
+        set(o, A_ALU, "parallel add/sub");
+        return;
+    }
+    set(o, A_ALU, "media");
+}
+
 static void decode_a32(uint32_t w, arm_insn *o) {
     o->raw = w;
+    const uint32_t cond = w >> 28;
 
-    uint32_t cond = w >> 28;
-    uint32_t op   = (w >> 25) & 0x7;
-
-    if (cond != 0xF && cond != 0xE) o->conditional = 1;
-
-    /* The unconditional encoding space (cond == 1111) holds BLX immediate,
-     * advanced SIMD, and the memory barriers. It is not "condition never" —
-     * reading it as a normal conditional instruction misdecodes all of it. */
+    /* The unconditional space (cond == 1111) holds BLX immediate, Advanced
+     * SIMD, the hints and the barriers. It is not "condition never". */
     if (cond == 0xF) {
-        o->conditional = 0;
         if ((w & 0xFE000000) == 0xFA000000) {
             set(o, A_CALL, "blx imm");
             o->switches_mode = 1;
@@ -2571,75 +2785,177 @@ static void decode_a32(uint32_t w, arm_insn *o) {
                       + (((w >> 24) & 1) << 1);
             return;
         }
-        if ((w & 0x0F000000) == 0x0D000000 || (w & 0x0E000000) == 0x0C000000
-            || (w & 0x0F000000) == 0x0E000000) {
-            set(o, A_SIMD, "simd/vfp");
+        if ((w & 0xFE000000) == 0xF2000000) {
+            a32_from_t32(((w >> 24) & 1 ? 0xFF000000u : 0xEF000000u) | (w & 0x00FFFFFF), o);
             return;
+        }
+        if ((w & 0xFF100000) == 0xF4000000) {
+            a32_from_t32(0xF9000000u | (w & 0x00FFFFFF), o);
+            return;
+        }
+        if ((w & 0x0C30F000) == 0x0410F000) {     /* pld, pldw, pli */
+            o->op = OP_NOP; set(o, A_NOP, "pld/pli"); return;
+        }
+        if ((w & 0xFFFFFFF0) == 0xF57FF010) { o->op = OP_CLREX; set(o, A_SYS, "clrex"); return; }
+        if ((w & 0xFFFFFF00) == 0xF57FF000 &&
+            ((w >> 4) & 0xF) >= 4 && ((w >> 4) & 0xF) <= 6) {
+            o->op = OP_DMB; set(o, A_SYS, "dmb/dsb/isb"); return;
         }
         set(o, A_SYS, "sys");
         return;
     }
 
-    /* BX / BLX register, which live inside the data-processing space and would
-     * otherwise decode as a nonsensical MSR. */
-    if ((w & 0x0FFFFFF0) == 0x012FFF10) {
-        int rm = w & 0xF;
-        if (rm == 14) set(o, A_RETURN, "bx lr");
-        else        { set(o, A_INDIRECT, "bx"); o->switches_mode = 1; }
+    if (cond != 0xE) { o->cond = (uint8_t)cond; o->conditional = 1; }
+
+    const uint32_t op1 = (w >> 25) & 7;
+    switch (op1) {
+    case 0: case 1: {
+        if ((w & 0x0FFFFFF0) == 0x012FFF10) {     /* bx */
+            int rm = w & 0xF;
+            o->rm = rm;
+            if (rm == 14) set(o, A_RETURN, "bx lr");
+            else        { set(o, A_INDIRECT, "bx"); o->switches_mode = 1; }
+            return;
+        }
+        if ((w & 0x0FFFFFF0) == 0x012FFF30) {     /* blx reg */
+            o->rm = w & 0xF;
+            set(o, A_CALL, "blx reg");
+            o->switches_mode = 1;
+            return;
+        }
+        if (op1 == 1) {
+            if ((w & 0x0FB00000) == 0x03000000) {     /* movw, movt */
+                o->op = (w & 0x00400000) ? OP_MOVT : OP_MOV;
+                o->rd = (w >> 12) & 0xF;
+                o->imm = ((w >> 4) & 0xF000) | (w & 0xFFF);
+                o->has_imm = 1;
+                if (o->rd == 15) o->op = OP_NONE;
+                set(o, A_ALU, (w & 0x00400000) ? "movt" : "movw");
+                return;
+            }
+            if ((w & 0x0FB00000) == 0x03200000) {     /* msr imm, hints */
+                if ((w & 0x0FFFFF00) == 0x0320F000 && (w & 0xFF) <= 4) {
+                    o->op = OP_NOP; set(o, A_NOP, "nop"); return;
+                }
+                set(o, A_SYS, "msr"); return;
+            }
+            a32_dp(w, o);
+            return;
+        }
+        const uint32_t hi = (w >> 20) & 0x1F, lo = (w >> 4) & 0xF;
+        if (lo == 0x9) {
+            if (hi < 0x10) {                          /* multiply */
+                static const arm_op mm[8] = { OP_MUL, OP_MLA, OP_NONE, OP_MLS,
+                                              OP_UMULL, OP_UMLAL, OP_SMULL, OP_SMLAL };
+                const int k = (w >> 21) & 7;
+                o->op = mm[k];
+                o->sets_flags = (w >> 20) & 1;
+                o->rn = w & 0xF;
+                o->rm = (w >> 8) & 0xF;
+                if (k < 4) {
+                    o->rd = (w >> 16) & 0xF;
+                    o->rt = k == 0 ? ARM_NO_REG : (int8_t)((w >> 12) & 0xF);
+                } else {
+                    o->rt  = (w >> 12) & 0xF;         /* RdLo */
+                    o->rt2 = (w >> 16) & 0xF;         /* RdHi */
+                }
+                /* Only MULS has a flag-setting translation. */
+                if (o->sets_flags && k != 0) o->op = OP_NONE;
+                if (o->rd == 15 || o->rt == 15 || o->rt2 == 15) o->op = OP_NONE;
+                set(o, A_ALU, "mul");
+                return;
+            }
+            if ((w & 0x0F800F00) == 0x01800F00 || (w & 0x0F900FF0) == 0x01900F90) {
+                /* ldrex/strex and their d, b, h forms: bits 22:21 the size. */
+                static const uint8_t sz[4] = { 4, 8, 1, 2 };
+                const int L = (w >> 20) & 1;
+                o->xsize = sz[(w >> 21) & 3];
+                o->rn = (w >> 16) & 0xF;
+                o->op = L ? OP_LDREX : OP_STREX;
+                if (L) o->rt = (w >> 12) & 0xF;
+                else { o->rd = (w >> 12) & 0xF; o->rt = w & 0xF; }
+                if (o->xsize == 8) {
+                    if (o->rt & 1 || o->rt == 14) o->op = OP_NONE;
+                    o->rt2 = (int8_t)(o->rt + 1);
+                }
+                o->imm = 0; o->has_imm = 1;
+                set(o, L ? A_LOAD : A_STORE, L ? "ldrex" : "strex");
+                return;
+            }
+            set(o, A_SYS, "swp");
+            return;
+        }
+        if ((lo & 0x9) == 0x9) { a32_extra_ls(w, o); return; }
+        if ((hi & 0x19) == 0x10) {                    /* misc: 10xx0 */
+            if ((w & 0x0FFF0FF0) == 0x016F0F10) {
+                o->op = OP_CLZ; o->rd = (w >> 12) & 0xF; o->rm = w & 0xF;
+                if (o->rd == 15 || o->rm == 15) o->op = OP_NONE;
+                set(o, A_ALU, "clz");
+                return;
+            }
+            if ((lo & 0x9) == 0x8) {                  /* halfword multiplies */
+                const int k = (w >> 21) & 3;
+                o->rd = (w >> 16) & 0xF;
+                o->rn = w & 0xF;
+                o->rm = (w >> 8) & 0xF;
+                o->half_sel = (uint8_t)((((w >> 5) & 1) << 1) | ((w >> 6) & 1));
+                if (k == 3)      { o->op = OP_SMULXY; set(o, A_ALU, "smulxy"); }
+                else if (k == 0) { o->op = OP_SMLAXY; o->rt = (w >> 12) & 0xF; set(o, A_ALU, "smlaxy"); }
+                else             set(o, A_ALU, "smlaw/smlal");
+                return;
+            }
+            if (lo == 0x7) { set(o, A_UNDEF, "bkpt"); return; }
+            set(o, A_SYS, (lo == 0x5) ? "sat" : "mrs/msr");
+            return;
+        }
+        a32_dp(w, o);
         return;
     }
-    if ((w & 0x0FFFFFF0) == 0x012FFF30) {
-        set(o, A_CALL, "blx reg");
-        o->switches_mode = 1;
+    case 2:
+        a32_ls(w, o);
+        return;
+    case 3:
+        if (w & 0x10) a32_media(w, o);
+        else          a32_ls(w, o);
+        return;
+    case 4: {                                       /* ldm / stm */
+        const int P = (w >> 24) & 1, U = (w >> 23) & 1, S = (w >> 22) & 1;
+        const int L = (w >> 20) & 1;
+        o->rn = (w >> 16) & 0xF;
+        o->reglist = (uint16_t)w;
+        o->writeback = (w >> 21) & 1;
+        o->decrement = P && !U;
+        if (S) { set(o, A_SYS, "ldm/stm ^"); return; }
+        if (P == U || o->rn == 15 || !o->reglist) {
+            /* DA and IB have no T32 form and no translation. */
+            set(o, L ? A_LOADM : A_STOREM, "ldm/stm da/ib");
+            if (L && (w & 0x8000)) set(o, A_INDIRECT, "ldm da/ib {..,pc}");
+            return;
+        }
+        if (o->rn == 13 && o->writeback && L && !o->decrement)      o->op = OP_POP;
+        else if (o->rn == 13 && o->writeback && !L && o->decrement) o->op = OP_PUSH;
+        else                                                        o->op = L ? OP_LDM : OP_STM;
+        if (!L && (w & 0x8000)) o->op = OP_NONE;    /* storing the PC */
+        if (L && (w & 0x8000)) { set(o, A_RETURN, "ldm {..,pc}"); return; }
+        set(o, L ? A_LOADM : A_STOREM, "ldm/stm");
         return;
     }
-
-    switch (op) {
-        case 0: case 1:                             /* data processing        */
-            /* MOV pc, lr is a return written as an ALU operation. */
-            if (((w >> 12) & 0xF) == 15 && ((w >> 21) & 0xF) == 0xD) {
-                set(o, A_RETURN, "mov pc,lr");
-                return;
-            }
-            set(o, A_ALU, "alu");
+    case 5:                                         /* b / bl */
+        o->has_target = 1;
+        o->target = o->addr + 8 + sign_extend(w & 0x00FFFFFF, 24) * 4;
+        if (w & 0x01000000) { set(o, A_CALL, "bl"); return; }
+        o->op = OP_B;
+        set(o, A_BRANCH, "b");
+        return;
+    default:                                        /* 6, 7: coprocessor, svc */
+        if ((w & 0x0F000000) == 0x0F000000) {
+            o->op = OP_SVC; o->imm = w & 0x00FFFFFF; o->has_imm = 1;
+            set(o, A_SYS, "svc");
             return;
-
-        case 2: case 3:                             /* load / store           */
-            if (op == 3 && (w & 0x00000010)) { set(o, A_UNDEF, "undef"); return; }
-            if ((w & 0x00100000) && ((w >> 12) & 0xF) == 15) {
-                set(o, A_RETURN, "ldr pc");
-                return;
-            }
-            set(o, (w & 0x00100000) ? A_LOAD : A_STORE, "ldr/str");
-            return;
-
-        case 4:                                     /* ldm / stm              */
-            if ((w & 0x00100000) && (w & 0x00008000)) {
-                set(o, A_RETURN, "ldm {..,pc}");
-                return;
-            }
-            set(o, (w & 0x00100000) ? A_LOADM : A_STOREM, "ldm/stm");
-            return;
-
-        case 5:                                     /* b / bl                 */
-            set(o, (w & 0x01000000) ? A_CALL : A_BRANCH,
-                   (w & 0x01000000) ? "bl" : "b");
-            o->has_target = 1;
-            o->target = o->addr + 8 + sign_extend(w & 0x00FFFFFF, 24) * 4;
-            return;
-
-        case 6:                                     /* coprocessor / SIMD     */
-            set(o, A_SIMD, "simd/vfp");
-            return;
-
-        case 7:
-            if (w & 0x01000000) { set(o, A_SYS, "svc"); return; }
-            set(o, A_SIMD, "cdp/mcr");
-            return;
-
-        default:
-            set(o, A_UNKNOWN, "?");
-            return;
+        }
+        a32_from_t32(0xE0000000u | (w & 0x0FFFFFFF), o);
+        if (cond != 0xE) { o->cond = (uint8_t)cond; o->conditional = 1; }
+        return;
     }
 }
 

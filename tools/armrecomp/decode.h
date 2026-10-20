@@ -232,6 +232,9 @@ typedef enum {
     OP_SXTB16, OP_UXTB16,       /* the extends: rotate by shift_amt first,
                                    then add rn when it is a register         */
     OP_SMULXY, OP_SMLAXY,       /* 16x16 multiply, halves by half_sel; rt = Ra */
+    OP_ADD_PC,                  /* A32 `add pc, pc, rm{, shift}`: a jump to the
+                                   PC value plus operand 2, which lands in the
+                                   code that follows (newlib's memcpy) */
 } arm_op;
 
 typedef enum {
