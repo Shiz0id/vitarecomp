@@ -54,6 +54,10 @@ while read -r name src velf tid secs expect <&3; do
     out=$WORK/out/$name; bld=$WORK/build/$name; mkdir -p "$out" "$bld"
 
     case "$src" in repo:*) srcdir=$ROOT/${src#repo:} ;; *) srcdir=$WORK/samples/$src ;; esac
+    # A WORK shared between checkouts (a worktree, say) holds a cache made
+    # from another source dir, and CMake refuses to reuse it.
+    grep -qxF "CMAKE_HOME_DIRECTORY:INTERNAL=$srcdir" "$bld/CMakeCache.txt" 2>/dev/null ||
+        { rm -rf "$bld"; mkdir -p "$bld"; }
     if ! { cmake -S "$srcdir" -B "$bld" -DCMAKE_TOOLCHAIN_FILE="$VITASDK/share/vita.toolchain.cmake" \
            && cmake --build "$bld" -j8; } > "$out/sample-build.log" 2>&1; then
         echo "FAIL  $name: sample does not build ($out/sample-build.log)"; fails=$((fails+1)); continue
