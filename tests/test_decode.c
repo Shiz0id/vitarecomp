@@ -894,6 +894,89 @@ static void test_bringup_forms(void) {
     printf("  bring-up forms (ldm/stm, clz, long mul, vmov imm, vnm*)  ok\n");
 }
 
+/* Shift amounts of zero that do not mean zero, the immediate carry-out, and
+ * load/store indexing. Each of these decoded to a plausible instruction that
+ * did something else. */
+static void test_shifts_and_indexing(void) {
+    memset(code, 0, sizeof(code));
+    arm_insn in;
+
+    put16(0, 0x0808);                                    /* lsrs r0, r1, #32 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LSR && in.has_imm && in.imm == 32);
+    put16(0, 0x1008);                                    /* asrs r0, r1, #32 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_ASR && in.imm == 32);
+    put16(0, 0x0008);                                    /* movs r0, r1      */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LSL && in.imm == 0);
+
+    put16(0, 0xEA4F); put16(2, 0x0011);                  /* mov.w r0, r1, lsr #32 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_MOV && in.shift_type == SH_LSR && in.shift_amt == 32);
+    put16(0, 0xEA4F); put16(2, 0x0031);                  /* mov.w r0, r1, rrx */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_MOV && in.shift_type == SH_RRX && in.shift_amt == 1);
+    put16(0, 0xEA4F); put16(2, 0x0001);                  /* mov.w r0, r1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.shift_type == SH_LSL && in.shift_amt == 0);
+
+    put16(0, 0xF011); put16(2, 0x407F);                  /* ands r0, r1, #0xFF000000 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_AND && in.sets_flags && in.imm == 0xFF000000u && in.imm_carry);
+    put16(0, 0xF011); put16(2, 0x00FF);                  /* ands r0, r1, #0xFF */
+    in = dec(ARM_T32, BASE);
+    assert(in.imm == 0xFF && !in.imm_carry);
+
+    put16(0, 0xF84D); put16(2, 0x0D04);                  /* str r0, [sp, #-4]! */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_STR && in.rn == 13 && in.imm == 4 && !in.mem_add
+           && in.writeback && !in.postindex);
+    put16(0, 0xF851); put16(2, 0x0B04);                  /* ldr r0, [r1], #4 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDR && in.imm == 4 && in.mem_add && in.writeback && in.postindex);
+    put16(0, 0xF851); put16(2, 0x0C08);                  /* ldr r0, [r1, #-8] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDR && in.imm == 8 && !in.mem_add && !in.writeback);
+    put16(0, 0xF851); put16(2, 0x0022);                  /* ldr r0, [r1, r2, lsl #2] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDR && in.rm == 2 && in.shift_amt == 2 && !in.has_imm);
+    put16(0, 0xF85F); put16(2, 0x0008);                  /* ldr r0, [pc, #-8] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDR && in.rn == 15 && in.imm == 8 && !in.mem_add);
+
+    put16(0, 0xF941); put16(2, 0x078F);                  /* vst1.32 {d16}, [r1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.cls == A_SIMD && in.op == OP_NONE);
+    put16(0, 0xF961); put16(2, 0x078F);                  /* vld1.32 {d16}, [r1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.cls == A_SIMD && in.op == OP_NONE);
+    put16(0, 0xF911); put16(2, 0x0004);                  /* ldrsb.w r0, [r1, r4] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDRSB);
+    put16(0, 0xF891); put16(2, 0xF040);                  /* pld [r1, #64] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NOP && in.cls == A_NOP);
+    put16(0, 0xF85D); put16(2, 0xFB04);                  /* ldr pc, [sp], #4 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_POP && in.cls == A_RETURN && in.reglist == 0x8000);
+
+    put16(0, 0xE96D); put16(2, 0x4502);                  /* strd r4, r5, [sp, #-8]! */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_STRD && in.imm == 8 && !in.mem_add && in.writeback && !in.postindex);
+    put16(0, 0xE8FD); put16(2, 0x4502);                  /* ldrd r4, r5, [sp], #8 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDRD && in.imm == 8 && in.mem_add && in.writeback && in.postindex);
+    put16(0, 0xE9D0); put16(2, 0x0100);                  /* ldrd r0, r1, [r0] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDRD && !in.writeback && !in.postindex);
+
+    put16(0, 0xFA21); put16(2, 0xF002);                  /* lsr.w r0, r1, r2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LSR && in.rd == 0 && in.rn == 1 && in.rm == 2 && !in.has_imm);
+    printf("  shift-by-0 meanings, immediate carry, indexing, hints: ok\n");
+}
+
 int main(void) {
     printf("decode:\n");
     test_thumb_width();
@@ -913,6 +996,7 @@ int main(void) {
     test_it_block();
     test_bounds();
     test_bringup_forms();
+    test_shifts_and_indexing();
     test_tables_hints_exclusives();
     printf("all decode tests passed\n");
     return 0;

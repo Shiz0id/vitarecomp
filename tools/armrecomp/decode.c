@@ -96,6 +96,9 @@ static void decode_t16(uint16_t h, arm_insn *o) {
         o->rd = h & 7;
         o->rm = (h >> 3) & 7;
         o->imm = (h >> 6) & 0x1F;
+        /* LSR/ASR encode a shift by 32 as 0. LSL #0 is a real zero: it is
+         * MOVS, which sets N and Z and leaves C. */
+        if (o->imm == 0 && o->op != OP_LSL) o->imm = 32;
         o->has_imm = 1;
         o->sets_flags = 1;
         set(o, A_ALU, "shift");
@@ -938,6 +941,11 @@ static void decode_t32(uint16_t h1, uint16_t h2, arm_insn *o) {
         o->imm = (uint32_t)(h2 & 0xFF) * 4u;   /* scaled by 4 */
         o->has_imm = 1;
         o->mem_add = (h1 & 0x0080) != 0;       /* U bit */
+        /* P (bit 8) and W (bit 5): `strd r4, r5, [sp, #-8]!` and
+         * `ldrd r4, r5, [sp], #8` move the base. The entry test above
+         * guarantees P or W is set. */
+        o->writeback = (h1 & 0x0020) != 0;
+        o->postindex = (h1 & 0x0100) == 0;
         set(o, load ? A_LOAD : A_STORE, load ? "ldrd" : "strd");
         return;
     }
@@ -1040,11 +1048,20 @@ static void decode_t32(uint16_t h1, uint16_t h2, arm_insn *o) {
                            | (uint32_t)(((h2 >> 12) & 7) << 8)
                            | (uint32_t)(h2 & 0xFF);
             o->imm = thumb_expand_imm(imm12);
+            o->imm_carry = (imm12 & 0xC00) != 0;
             o->has_imm = 1;
         } else {
             o->rm = h2 & 0xF;
             o->shift_type = (h2 >> 4) & 3;
             o->shift_amt  = (uint8_t)((((h2 >> 12) & 7) << 2) | ((h2 >> 6) & 3));
+            /* DecodeImmShift: an amount of 0 means 32 for LSR/ASR and RRX for
+             * ROR. Read literally, `lsr r0, r1, #32` becomes a no-op move. */
+            if (o->shift_amt == 0 && o->shift_type == SH_ROR) {
+                o->shift_type = SH_RRX;
+                o->shift_amt  = 1;
+            } else if (o->shift_amt == 0 && o->shift_type != SH_LSL) {
+                o->shift_amt = 32;
+            }
         }
         set(o, A_ALU, "alu.w");
         return;
@@ -1140,12 +1157,36 @@ static void decode_t32(uint16_t h1, uint16_t h2, arm_insn *o) {
 
     /* Single load/store, immediate and register offset. A load into the PC is
      * a return. */
+    /* 1111 1001 xxx0: Advanced SIMD element and structure loads and stores
+     * (VLD1-4/VST1-4). They sit inside the single load/store space below, and
+     * read as one of its forms a `vst1.32 {d16}, [r1]` became an integer
+     * store of r0 — no trap, wrong memory. */
+    if ((h1 & 0xFF10) == 0xF900) { set(o, A_SIMD, "vld/vst"); return; }
+
     if ((h1 & 0xFE00) == 0xF800) {
         int load = (h1 & 0x0010) != 0;
-        if (load && ((h2 >> 12) & 0xF) == 0xF) { set(o, A_RETURN, "ldr pc"); return; }
-
         int size = (h1 >> 5) & 3;                 /* 0 byte, 1 half, 2 word */
         int sign = (h1 & 0x0100) != 0;
+
+        if (load && ((h2 >> 12) & 0xF) == 0xF) {
+            /* A byte or halfword "load" into the PC is a hint: PLD, PLI, or
+             * an unallocated hint that executes as a NOP. Classing it as a
+             * return made every `pld [r1, #64]` in newlib's memcpy a
+             * `return;` halfway through the copy. */
+            if (size != 2) { o->op = OP_NOP; set(o, A_NOP, "pld/pli"); return; }
+            /* ldr pc, [sp], #4 is POP {pc}, and must still move SP. */
+            if ((h1 & 0x000F) == 13 && (h2 & 0x0FFF) == 0x0B04) {
+                o->op = OP_POP;
+                o->rn = 13;
+                o->reglist = 0x8000;
+                o->writeback = 1;
+                set(o, A_RETURN, "pop {pc}");
+                return;
+            }
+            set(o, A_RETURN, "ldr pc");
+            return;
+        }
+
         o->rt = (h2 >> 12) & 0xF;
         o->rn = h1 & 0xF;
         o->mem_add = 1;
@@ -1153,20 +1194,36 @@ static void decode_t32(uint16_t h1, uint16_t h2, arm_insn *o) {
         if (load) o->op = size == 0 ? (sign ? OP_LDRSB : OP_LDRB)
                         : size == 1 ? (sign ? OP_LDRSH : OP_LDRH) : OP_LDR;
         else      o->op = size == 0 ? OP_STRB : size == 1 ? OP_STRH : OP_STR;
+        if (size == 3 || (!load && sign)) o->op = OP_NONE;   /* UNDEFINED */
 
-        if (h1 & 0x0080) {                        /* 12-bit unsigned offset */
+        if (o->rn == 15) {                        /* literal: U is bit 7    */
             o->imm = h2 & 0xFFF;
             o->has_imm = 1;
-        } else if ((h2 & 0x0F00) == 0x0C00) {     /* 8-bit, negative */
-            o->imm = h2 & 0xFF;
+            o->mem_add = (h1 & 0x0080) != 0;
+        } else if (h1 & 0x0080) {                 /* 12-bit unsigned offset */
+            o->imm = h2 & 0xFFF;
             o->has_imm = 1;
-            o->mem_add = 0;
         } else if ((h2 & 0x0FC0) == 0x0000) {     /* register offset */
             o->rm = h2 & 0xF;
+            o->shift_type = SH_LSL;
             o->shift_amt = (uint8_t)((h2 >> 4) & 3);
-        } else {
+        } else if ((h2 & 0x0800) == 0x0800) {
+            /* 1PUW imm8. 1100 is a negative offset and 1110 the unprivileged
+             * LDRT/STRT (the same access in user mode); the other four index
+             * and write the base back. Reading all of them as [rn, #+imm8]
+             * turned `str r0, [sp, #-4]!` into a store ABOVE the stack
+             * pointer that never moved it. */
+            int P = (h2 >> 10) & 1, U = (h2 >> 9) & 1, W = (h2 >> 8) & 1;
             o->imm = h2 & 0xFF;
             o->has_imm = 1;
+            o->mem_add = (uint8_t)U;
+            if (!(P && !W)) {
+                if (!P && !W) o->op = OP_NONE;    /* 1000/1010: UNDEFINED   */
+                o->writeback = 1;
+                o->postindex = (uint8_t)!P;
+            }
+        } else {
+            o->op = OP_NONE;                      /* UNDEFINED              */
         }
         set(o, load ? A_LOAD : A_STORE, "ldr/str.w");
         return;

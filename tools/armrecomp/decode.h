@@ -105,8 +105,11 @@ typedef enum {
     NL_MOV, NL_MVN,             /* immediate forms only */
 } arm_neon_logic;
 
-/* Shift types, in the architecture's encoding order. */
-typedef enum { SH_LSL = 0, SH_LSR = 1, SH_ASR = 2, SH_ROR = 3 } arm_shift;
+/* Shift types, in the architecture's encoding order. SH_RRX is not an encoding
+ * of its own: it is ROR with an amount of zero, which the decoder rewrites so
+ * nothing downstream has to remember that a rotate by 0 is a rotate by 1
+ * through carry. LSR/ASR #0 likewise arrive as shift_amt 32, their meaning. */
+typedef enum { SH_LSL = 0, SH_LSR = 1, SH_ASR = 2, SH_ROR = 3, SH_RRX = 4 } arm_shift;
 
 #define ARM_COND_AL 0xE
 #define ARM_NO_REG  (-1)
@@ -137,13 +140,18 @@ typedef struct {
     uint8_t    vfp_unsigned;    /* VCVT: unsigned integer form            */
     uint32_t   imm;
     uint8_t    has_imm;
+    /* The immediate came from a rotation, and so has a shifter carry-out: a
+     * flag-setting logical op sets C to its bit 31. A replicated or plain
+     * immediate leaves C alone. */
+    uint8_t    imm_carry;
     uint8_t    sets_flags;      /* writes NZCV                           */
     uint8_t    shift_type;      /* arm_shift                             */
     uint8_t    shift_amt;
     uint8_t    shift_is_reg;
     uint16_t   reglist;         /* PUSH/POP/LDM/STM                      */
     uint8_t    cond;            /* ARM_COND_AL when unconditional        */
-    uint8_t    writeback;
+    uint8_t    writeback;       /* LDR/STR/LDRD/STRD: rn is updated by imm */
+    uint8_t    postindex;       /* ...after the access, which uses rn alone */
     uint8_t    decrement;       /* LDM/STM: DB (decrement before) vs IA   */
     uint8_t    neon_q;          /* NEON: quadword (two D registers)       */
     uint8_t    neon_size;       /* NEON: lane size, 0..3 = 8..64 bits      */

@@ -54,6 +54,54 @@ static inline uint32_t vita_ror(uint32_t v, uint32_t n) {
     return n ? ((v >> n) | (v << (32 - n))) : v;
 }
 
+/* RRX: a rotate right by one THROUGH the carry flag. It is what ROR #0 means
+ * in an immediate shift, not a rotate by zero. */
+static inline uint32_t vita_rrx(uint32_t v) {
+    return (v >> 1) | ((uint32_t)flag_c << 31);
+}
+
+/* --- shifts that set the carry flag -------------------------------------------
+ *
+ * A flag-setting LOGICAL operation (ANDS, MOVS, TST, LSLS...) has no carry of
+ * its own, so C becomes the last bit shifted out of operand 2. Arithmetic
+ * ignores it; that is why these are separate from the plain shifts. An
+ * amount of zero shifts nothing out and leaves C as it was, which is the case
+ * for a shift-by-register whose low byte happens to be zero.
+ */
+
+static inline uint32_t vita_lsl_c(uint32_t v, uint32_t n) {
+    if (n == 0) return v;
+    flag_c = n <= 32 ? (int)((v >> (32 - n)) & 1) : 0;
+    return vita_lsl(v, n);
+}
+
+static inline uint32_t vita_lsr_c(uint32_t v, uint32_t n) {
+    if (n == 0) return v;
+    flag_c = n <= 32 ? (int)((v >> (n - 1)) & 1) : 0;
+    return vita_lsr(v, n);
+}
+
+static inline uint32_t vita_asr_c(uint32_t v, uint32_t n) {
+    if (n == 0) return v;
+    flag_c = (int)((n >= 32 ? v >> 31 : v >> (n - 1)) & 1);
+    return vita_asr(v, n);
+}
+
+/* A rotate by a nonzero multiple of 32 leaves the value but still sets C to
+ * its top bit, so the test is on n, not on n & 31. */
+static inline uint32_t vita_ror_c(uint32_t v, uint32_t n) {
+    if (n == 0) return v;
+    uint32_t r = vita_ror(v, n);
+    flag_c = (int)(r >> 31);
+    return r;
+}
+
+static inline uint32_t vita_rrx_c(uint32_t v) {
+    uint32_t r = vita_rrx(v);
+    flag_c = (int)(v & 1);
+    return r;
+}
+
 /* --- flags -----------------------------------------------------------------
  *
  * N and Z are mechanical. C and V are not, and they are the reason this file

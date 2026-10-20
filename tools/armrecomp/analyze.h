@@ -59,6 +59,10 @@ typedef struct {
      * different — the value is constructed by an instruction, not found in a
      * stored word. */
     uint32_t seeds_movw;
+    /* Thumb code pointers named by SCE relocations (ET_SCE_RELEXEC only).
+     * Exact, not heuristic: the loader's own list of words it patches. */
+    uint32_t seeds_reloc;
+    uint8_t  reloc_malformed;
     /* Mode-switching calls whose target is not a known import stub, and so
      * were not followed into ARM. Counted rather than hidden: if a module has
      * genuine ARM code outside its stub table, this is the number that says

@@ -38,6 +38,8 @@ typedef struct {
     uint32_t  n, cap;
     uint32_t *labels;
     uint32_t  nlabels, lcap;
+    uint8_t  *in_it;        /* per v[]: covered by an IT before it          */
+    uint32_t  into_it;      /* labels dropped for landing inside an IT block */
 } fbody;
 
 static void fb_push(fbody *b, const arm_insn *in) {
@@ -208,6 +210,30 @@ static void collect(const vm_image *img, const vf_func *fn, fbody *b) {
      * reads alongside a disassembly. */
     if (b->n > 1) qsort(b->v, b->n, sizeof(arm_insn), cmp_addr);
 
+    /* IT state is a property of the straight-line run, so it is decided again
+     * here, in address order, rather than trusted from the walk.
+     *
+     * The walk visits blocks depth-first and marks each instruction once. If
+     * a block starting INSIDE an IT block was walked before the run through
+     * the IT, the covered instructions were decoded with no ITSTATE, and the
+     * fall-through walk then stopped at them as already seen: they would be
+     * emitted unconditional. Re-decoding every contiguous run with one
+     * ITSTATE makes the result independent of visiting order. */
+    b->in_it = (uint8_t *)calloc(b->n ? b->n : 1, 1);
+    if (fn->mode == ARM_T32) {
+        uint8_t itstate = 0;
+        for (uint32_t k = 0; k < b->n; k++) {
+            if (k == 0 || b->v[k - 1].addr + b->v[k - 1].width != b->v[k].addr)
+                itstate = 0;
+            b->in_it[k] = (itstate & 0xF) != 0;
+            arm_insn in;
+            if (arm_decode(text, base, img->seg_len, b->v[k].addr, fn->mode, &in) == 0)
+                continue;
+            arm_it_step(&itstate, &in);
+            b->v[k] = in;
+        }
+    }
+
     /* Drop labels for blocks that were never collected.
      *
      * A label is recorded the moment a branch target is seen inside the
@@ -231,7 +257,16 @@ static void collect(const vm_image *img, const vf_func *fn, fbody *b) {
         uint32_t lo = 0, hi = b->n;
         while (lo < hi) {                      /* body is sorted by address */
             uint32_t mid = lo + (hi - lo) / 2;
-            if (b->v[mid].addr == b->labels[i]) { placed = 1; break; }
+            if (b->v[mid].addr == b->labels[i]) {
+                /* A branch into the middle of an IT block is UNPREDICTABLE;
+                 * on hardware ITSTATE is cleared, so a `goto` to a label
+                 * guarded by the block's condition would not be the same
+                 * program. Compilers never emit one, so finding one means
+                 * data decoded as a branch. Route it to the trap. */
+                if (b->in_it[mid]) { b->into_it++; break; }
+                placed = 1;
+                break;
+            }
             if (b->v[mid].addr <  b->labels[i]) lo = mid + 1; else hi = mid;
         }
         if (placed) b->labels[kept++] = b->labels[i];
@@ -276,8 +311,13 @@ static const char *src_name(const arm_insn *in, int r) {
 }
 
 /* The second operand of a data-processing instruction: an immediate, a plain
- * register, or a shifted register. */
-static void operand2(char *dst, size_t cap, const arm_insn *in) {
+ * register, or a shifted register.
+ *
+ * `carry` selects the shifts that also set C to the last bit shifted out,
+ * which is what a flag-setting logical op does with its operand 2. An
+ * immediate's carry is not an expression, so callers emit it themselves
+ * (shifter_carry_imm). */
+static void operand2_ex(char *dst, size_t cap, const arm_insn *in, int carry) {
     if (in->has_imm) {
         snprintf(dst, cap, "0x%X", in->imm);
         return;
@@ -288,9 +328,28 @@ static void operand2(char *dst, size_t cap, const arm_insn *in) {
         return;
     }
     if (in->rm == 15) { reg_operand(dst, cap, 15, in); return; }
-    static const char *fn[4] = { "vita_lsl", "vita_lsr", "vita_asr", "vita_ror" };
-    snprintf(dst, cap, "%s(%s, %u)", fn[in->shift_type & 3],
+    if (in->shift_type == SH_RRX) {
+        snprintf(dst, cap, "%s(%s)", carry ? "vita_rrx_c" : "vita_rrx",
+                 src_name(in, in->rm));
+        return;
+    }
+    static const char *fn[2][4] = {
+        { "vita_lsl",   "vita_lsr",   "vita_asr",   "vita_ror"   },
+        { "vita_lsl_c", "vita_lsr_c", "vita_asr_c", "vita_ror_c" },
+    };
+    snprintf(dst, cap, "%s(%s, %u)", fn[carry != 0][in->shift_type & 3],
              src_name(in, in->rm), in->shift_amt);
+}
+
+static void operand2(char *dst, size_t cap, const arm_insn *in) {
+    operand2_ex(dst, cap, in, 0);
+}
+
+/* A flag-setting logical op with a rotated immediate sets C to the
+ * immediate's top bit. Constant, so it is decided here. */
+static void shifter_carry_imm(FILE *f, const arm_insn *in) {
+    if (in->sets_flags && in->has_imm && in->imm_carry)
+        fprintf(f, "    flag_c = %d;\n", (int)(in->imm >> 31));
 }
 
 /* The address expression for a load or store. */
@@ -314,14 +373,32 @@ static int address(char *dst, size_t cap, const arm_insn *in) {
     /* The U bit is not decoration: the T32 8-bit form encodes [rN, #-imm]
      * with the same fields as the positive one, so ignoring it reads from the
      * wrong side of the base register. */
-    if (in->has_imm && in->imm)
+    /* A post-indexed access uses the base alone; the offset only moves it
+     * afterwards (writeback()). */
+    if (in->postindex)
+        snprintf(dst, cap, "%s", src_name(in, in->rn));
+    else if (in->has_imm && in->imm)
         snprintf(dst, cap, "%s %c 0x%X", src_name(in, in->rn),
                  in->mem_add ? '+' : '-', in->imm);
+    else if (in->rm != ARM_NO_REG && in->shift_amt)
+        /* [rn, rm, lsl #n]: array indexing. Dropping the shift indexed
+         * every word array by bytes. */
+        snprintf(dst, cap, "%s + (%s << %u)", src_name(in, in->rn),
+                 src_name(in, in->rm), in->shift_amt);
     else if (in->rm != ARM_NO_REG)
         snprintf(dst, cap, "%s + %s", src_name(in, in->rn), src_name(in, in->rm));
     else
         snprintf(dst, cap, "%s", src_name(in, in->rn));
     return 1;
+}
+
+/* The base update of a pre- or post-indexed load or store, emitted after the
+ * access. For pre-indexing the access already used rn +/- imm, so both forms
+ * leave rn at the same place. */
+static void writeback(FILE *f, const arm_insn *in) {
+    if (in->writeback && in->imm)
+        fprintf(f, "    %s %c= 0x%X;\n", reg_name(in->rn),
+                in->mem_add ? '+' : '-', in->imm);
 }
 
 /* --- one instruction --------------------------------------------------------- */
@@ -471,7 +548,8 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
     int ok = 1;
     switch (in->op) {
         case OP_MOV:
-            operand2(o2, sizeof(o2), in);
+            operand2_ex(o2, sizeof(o2), in, in->sets_flags);
+            shifter_carry_imm(f, in);
             fprintf(f, "    %s = %s;\n", reg_name(in->rd), o2);
             if (in->sets_flags) fprintf(f, "    vita_flags_nz(%s);\n", reg_name(in->rd));
             break;
@@ -485,7 +563,8 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             break;
 
         case OP_MVN:
-            operand2(o2, sizeof(o2), in);
+            operand2_ex(o2, sizeof(o2), in, in->sets_flags);
+            shifter_carry_imm(f, in);
             fprintf(f, "    %s = ~(%s);\n", reg_name(in->rd), o2);
             if (in->sets_flags) fprintf(f, "    vita_flags_nz(%s);\n", reg_name(in->rd));
             break;
@@ -539,7 +618,8 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             break;
 
         case OP_AND: case OP_ORR: case OP_EOR: case OP_BIC: {
-            operand2(o2, sizeof(o2), in);
+            operand2_ex(o2, sizeof(o2), in, in->sets_flags);
+            shifter_carry_imm(f, in);
             const char *rn = rn_s;
             const char *ops = in->op == OP_AND ? "&" : in->op == OP_ORR ? "|" : "^";
             if (in->op == OP_BIC)
@@ -551,16 +631,24 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
         }
 
         case OP_LSL: case OP_LSR: case OP_ASR: case OP_ROR: {
-            static const char *fn2[4] = { "vita_lsl", "vita_lsr", "vita_asr", "vita_ror" };
+            static const char *fn2[2][4] = {
+                { "vita_lsl",   "vita_lsr",   "vita_asr",   "vita_ror"   },
+                { "vita_lsl_c", "vita_lsr_c", "vita_asr_c", "vita_ror_c" },
+            };
             int which = in->op == OP_LSL ? 0 : in->op == OP_LSR ? 1
                       : in->op == OP_ASR ? 2 : 3;
-            const char *src = src_name(in, in->rm == ARM_NO_REG ? in->rd : in->rm);
-            if (in->has_imm)
-                fprintf(f, "    %s = %s(%s, %u);\n", reg_name(in->rd),
-                        fn2[which], src, in->imm);
-            else
+            const char *fn_ = fn2[in->sets_flags != 0][which];
+            if (in->has_imm) {
+                const char *src = src_name(in, in->rm == ARM_NO_REG ? in->rd : in->rm);
+                fprintf(f, "    %s = %s(%s, %u);\n", reg_name(in->rd), fn_, src, in->imm);
+            } else {
+                /* Shift by register: the value is rn and the amount is rm.
+                 * The 16-bit form has rn == rd, which is how reading rd here
+                 * went unnoticed until lsl.w r0, r1, r2 shifted r0. */
+                int val = in->rn != ARM_NO_REG ? in->rn : in->rd;
                 fprintf(f, "    %s = %s(%s, %s & 0xFF);\n", reg_name(in->rd),
-                        fn2[which], reg_name(in->rd), src_name(in, in->rm));
+                        fn_, src_name(in, val), src_name(in, in->rm));
+            }
             if (in->sets_flags) fprintf(f, "    vita_flags_nz(%s);\n", reg_name(in->rd));
             break;
         }
@@ -584,7 +672,8 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             break;
 
         case OP_TST: case OP_TEQ:
-            operand2(o2, sizeof(o2), in);
+            operand2_ex(o2, sizeof(o2), in, 1);
+            shifter_carry_imm(f, in);
             fprintf(f, "    vita_flags_nz(%s %s %s);\n",
                     rn_s, in->op == OP_TEQ ? "^" : "&", o2);
             break;
@@ -595,6 +684,7 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             break;
 
         case OP_LDR: case OP_LDRB: case OP_LDRH: case OP_LDRSB: case OP_LDRSH: {
+            if (in->writeback && in->rn == 15) { ok = 0; break; }
             if (!address(addr, sizeof(addr), in)) { ok = 0; trap(f, in, "load addr"); break; }
             /* A literal-pool load has a fixed address, so the value is known at
              * translation time and becomes a constant rather than a memory
@@ -619,6 +709,7 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             fprintf(f, "    %s = ", reg_name(in->rt));
             fprintf(f, rd, addr);
             fprintf(f, ";\n");
+            writeback(f, in);
             break;
         }
 
@@ -638,13 +729,19 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             char base[64];
             if (!address(base, sizeof(base), in)) { ok = 0; trap(f, in, "ldrd/strd addr"); break; }
 
+            if (in->writeback && in->rn == 15) { ok = 0; break; }
+            /* The address is taken once: `ldrd r0, r1, [r0]` is legal, and
+             * re-reading the base for the second word read it after the
+             * first load had replaced it. */
+            fprintf(f, "    { uint32_t _ea = %s;\n", base);
             if (in->op == OP_LDRD) {
-                fprintf(f, "    %s = vita_read32(%s);\n", reg_name(in->rt), base);
-                fprintf(f, "    %s = vita_read32((%s) + 4);\n", reg_name(in->rt2), base);
+                fprintf(f, "      %s = vita_read32(_ea);\n", reg_name(in->rt));
+                fprintf(f, "      %s = vita_read32(_ea + 4); }\n", reg_name(in->rt2));
             } else {
-                fprintf(f, "    vita_write32(%s, %s);\n", base, reg_name(in->rt));
-                fprintf(f, "    vita_write32((%s) + 4, %s);\n", base, reg_name(in->rt2));
+                fprintf(f, "      vita_write32(_ea, %s);\n", reg_name(in->rt));
+                fprintf(f, "      vita_write32(_ea + 4, %s); }\n", reg_name(in->rt2));
             }
+            writeback(f, in);
             break;
         }
 
@@ -652,7 +749,9 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             if (!address(addr, sizeof(addr), in)) { ok = 0; trap(f, in, "store addr"); break; }
             const char *w = in->op == OP_STR ? "vita_write32"
                           : in->op == OP_STRB ? "vita_write8" : "vita_write16";
+            if (in->writeback && in->rn == 15) { ok = 0; break; }
             fprintf(f, "    %s(%s, %s);\n", w, addr, reg_name(in->rt));
+            writeback(f, in);
             break;
         }
 
@@ -1283,8 +1382,10 @@ int em_emit(const vm_image *img, const vm_module *mod, const nid_db *db,
         fprintf(f, "}\n\n");
         st->funcs++;
 
+        st->branches_into_it += b.into_it;
         free(b.v);
         free(b.labels);
+        free(b.in_it);
     }
 
     /* --- the HLE defaults ----------------------------------------------------

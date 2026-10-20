@@ -491,6 +491,32 @@ static void test_import_handler(void) {
     printf("  import handler services NIDs   ok\n");
 }
 
+/* The carry-out of a flag-setting logical op's operand 2. */
+static void test_shifter_carry(void) {
+    flag_c = 0;
+    assert(vita_lsl_c(0x80000001u, 1) == 2 && flag_c == 1);
+    assert(vita_lsl_c(0x1u, 32) == 0 && flag_c == 1);       /* bit 0 out last */
+    assert(vita_lsl_c(0x1u, 33) == 0 && flag_c == 0);
+    flag_c = 1;
+    assert(vita_lsl_c(0x5u, 0) == 5 && flag_c == 1);        /* untouched */
+    assert(vita_lsr_c(0x2u, 1) == 1 && flag_c == 0);
+    assert(vita_lsr_c(0x80000000u, 32) == 0 && flag_c == 1);
+    assert(vita_asr_c(0x80000000u, 32) == 0xFFFFFFFFu && flag_c == 1);
+    assert(vita_asr_c(0x80000000u, 40) == 0xFFFFFFFFu && flag_c == 1);
+    assert(vita_asr_c(0x40000000u, 31) == 0 && flag_c == 1);
+    assert(vita_ror_c(0x1u, 1) == 0x80000000u && flag_c == 1);
+    flag_c = 0;
+    assert(vita_ror_c(0x80000000u, 32) == 0x80000000u && flag_c == 1);
+
+    /* RRX rotates through carry: carry in at the top, bit 0 out. */
+    flag_c = 1;
+    assert(vita_rrx(0x2u) == 0x80000001u && flag_c == 1);
+    assert(vita_rrx_c(0x3u) == 0x80000001u && flag_c == 1);
+    flag_c = 0;
+    assert(vita_rrx_c(0x2u) == 0x1u && flag_c == 0);
+    printf("  shifter carry-out, rrx: ok\n");
+}
+
 int main(void) {
     printf("runtime:\n");
     test_shifts();
@@ -505,6 +531,7 @@ int main(void) {
     test_memory();
     test_clz();
     test_exclusive();
+    test_shifter_carry();
     test_parallel_and_lanes();
     test_vfp_d32();
     test_mem_attach();

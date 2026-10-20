@@ -7,6 +7,7 @@
  */
 
 #include "analyze.h"
+#include "reloc.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -398,6 +399,35 @@ static void shape_scan(const vm_image *img, vf_result *r, seedq *q) {
     }
 }
 
+/* --- relocation seeds ------------------------------------------------------- */
+
+typedef struct {
+    const vm_image *img;
+    vf_result      *r;
+    seedq          *q;
+} reloc_ctx;
+
+/* A relocated word or MOVW pointing into the executable segment with the
+ * Thumb bit set is a stored pointer to Thumb code — said by the loader's own
+ * table, not inferred. Targets with bit 0 clear are left alone: in this
+ * segment they are as likely to be .rodata as ARM code. */
+static void reloc_seed(void *vctx, uint32_t patch, uint32_t code, uint32_t target) {
+    reloc_ctx *c = (reloc_ctx *)vctx;
+    (void)patch;
+    if (code != VR_ABS32 && code != VR_TARGET1 && code != VR_THM_MOVW) return;
+    if (!(target & 1)) return;
+    uint32_t t = target & ~1u;
+    const vm_image *img = c->img;
+    if (t < img->seg_vaddr || t >= img->seg_vaddr + img->seg_len) return;
+
+    arm_insn in;
+    const uint8_t *text = img->data + img->seg_file;
+    if (arm_decode(text, img->seg_vaddr, img->seg_len, t, ARM_T32, &in) == 0) return;
+    if (in.cls == A_UNKNOWN || in.cls == A_UNDEF) return;
+    sq_push(c->q, t, ARM_T32, 0);
+    c->r->seeds_reloc++;
+}
+
 /* --- entry point ------------------------------------------------------------ */
 
 int vf_discover(const vm_image *img, const vm_module *mod, vf_result *out) {
@@ -445,6 +475,15 @@ int vf_discover(const vm_image *img, const vm_module *mod, vf_result *out) {
             }
             p += size;
         }
+    }
+
+    /* 2b. Relocations. On an ET_SCE_RELEXEC module these list every stored
+     *     code pointer exactly: .init_array, vtables, callbacks in .data. A
+     *     constructor with no prologue, which shape recovery must reject
+     *     outside a table, is found like any other. */
+    {
+        reloc_ctx c = { img, out, &q };
+        if (vr_walk(img, reloc_seed, &c) < 0) out->reloc_malformed = 1;
     }
 
     /* 3. Linear harvest of call targets. Recursive descent alone stalls almost

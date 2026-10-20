@@ -10,6 +10,7 @@
 #include "decode.h"
 #include "module.h"
 #include "analyze.h"
+#include "reloc.h"
 #include "emit.h"
 #include "nids.h"
 
@@ -35,6 +36,9 @@ static const char *USAGE =
     "  armrecomp extract <file> <out>    SELF -> plain ELF32\n"
     "  armrecomp cover   <file.elf>      decode-coverage report\n"
     "  armrecomp funcs   <file.elf> [niddb]  module info and the HLE work list\n"
+    "  armrecomp discover <file.elf>     function discovery report\n"
+    "  armrecomp relocs  <file.elf>      SCE relocations, by code and target\n"
+    "  armrecomp emit    <file.elf> <out.c> [limit] [niddb]  recompile to C\n"
     "\n"
     "Accepts a SELF (eboot.bin, *.suprx) or a plain ELF/velf. A PFS-encrypted\n"
     "NoNpDrm dump is reported as such rather than parsed as garbage.\n";
@@ -536,9 +540,23 @@ static int exec_image(const uint8_t *buf, size_t size, const vc_module *m,
     img->data           = buf;
     img->size           = size;
     img->data_seg_count = 0;
+    img->phdr_count     = 0;
+    img->rela_count     = 0;
 
     for (int i = 0; i < m->phdr_count; i++) {
+        if (i < 16) {
+            img->phdr_vaddr[i] = m->phdr[i].vaddr;
+            img->phdr_count = (uint32_t)i + 1;
+        }
         if (m->phdr[i].filesz == 0) continue;
+        if ((uint64_t)m->phdr[i].offset + m->phdr[i].filesz > size) continue;
+        if (m->phdr[i].type == VC_PT_SCE_RELA && img->rela_count < 4) {
+            vm_seg *r = &img->relas[img->rela_count++];
+            r->file  = m->phdr[i].offset;
+            r->vaddr = 0;
+            r->len   = m->phdr[i].filesz;
+            continue;
+        }
         if ((uint64_t)m->phdr[i].offset + m->phdr[i].filesz > size) continue;
         /* PT_LOAD only. The SCE_RELA and SCE_VERSION segments carry a vaddr of
          * zero and are not part of the address space. */
@@ -687,6 +705,9 @@ static int cmd_discover(const char *path) {
     printf("seeds:\n");
     printf("  module_start        %u\n", r.seeds_entry);
     printf("  exports             %u\n", r.seeds_export);
+    if (vc.elf.type != VC_ET_SCE_EXEC)
+        printf("  relocations         %u%s\n", r.seeds_reloc,
+               r.reloc_malformed ? "  (stream malformed; stopped early)" : "  (stored Thumb pointers)");
     printf("  call targets        %u\n", r.seeds_call);
     printf("  pointer shape       %u  (heuristic; %u candidates rejected)\n",
            r.seeds_shape, r.rejected_shape);
@@ -785,6 +806,9 @@ static int cmd_emit(const char *path, const char *outpath, uint32_t limit,
     if (st.stub_shadowed)
         printf("  stubs shadowed %u  discovered as functions, routed as imports\n",
                st.stub_shadowed);
+    if (st.branches_into_it)
+        printf("  into IT block %u  branch targets left unlabelled (UNPREDICTABLE)\n",
+               st.branches_into_it);
 
     if (st.trap_kinds) {
         /* Ranked, because the question is always which one to do next. */
@@ -832,6 +856,51 @@ static int cmd_emit(const char *path, const char *outpath, uint32_t limit,
     return 0;
 }
 
+/* --- relocs: what the loader would patch ------------------------------------ */
+
+typedef struct {
+    const vm_image *img;
+    uint32_t by_code[256];
+    uint32_t thumb_ptrs;
+    int      list;
+} relocs_ctx;
+
+static void relocs_one(void *vctx, uint32_t patch, uint32_t code, uint32_t target) {
+    relocs_ctx *c = (relocs_ctx *)vctx;
+    c->by_code[code & 0xFF]++;
+    int code_ptr = (code == VR_ABS32 || code == VR_TARGET1 || code == VR_THM_MOVW)
+                && (target & 1)
+                && (target & ~1u) >= c->img->seg_vaddr
+                && (target & ~1u) <  c->img->seg_vaddr + c->img->seg_len;
+    if (code_ptr) {
+        c->thumb_ptrs++;
+        if (c->list) printf("  0x%08X  code %-3u -> 0x%08X\n", patch, code, target);
+    }
+}
+
+static int cmd_relocs(const char *path) {
+    uint8_t *buf; size_t size;
+    vc_module vc; vm_image img; vm_module vm;
+    if (!load_module(path, &buf, &size, &vc, &img, &vm)) return 1;
+
+    relocs_ctx c;
+    memset(&c, 0, sizeof(c));
+    c.img = &img;
+    c.list = 1;
+    printf("stored Thumb code pointers:\n");
+    int n = vr_walk(&img, relocs_one, &c);
+    printf("\n%d entries in %u PT_SCE_RELA segment%s%s\n", n < 0 ? 0 : n,
+           img.rela_count, img.rela_count == 1 ? "" : "s",
+           n < 0 ? "  (malformed: walk stopped)" : "");
+    for (int i = 0; i < 256; i++)
+        if (c.by_code[i]) printf("  code %-3d  %u\n", i, c.by_code[i]);
+    printf("  Thumb code pointers  %u\n", c.thumb_ptrs);
+
+    vm_free(&vm);
+    free(buf);
+    return n < 0;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         fputs(USAGE, stderr);
@@ -840,6 +909,9 @@ int main(int argc, char **argv) {
 
     if (strcmp(argv[1], "funcs") == 0 && argc >= 3)
         return cmd_funcs(argv[2], argc >= 4 ? argv[3] : NULL);
+
+    if (strcmp(argv[1], "relocs") == 0 && argc >= 3)
+        return cmd_relocs(argv[2]);
 
     if (strcmp(argv[1], "discover") == 0 && argc >= 3)
         return cmd_discover(argv[2]);
