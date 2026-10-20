@@ -139,6 +139,10 @@ is fixed in the vendored tree:
   the freed block, under `display_info_mutex`.
 - Both renderers hold that mutex across the raw copy and re-check the base.
 
+To repeat the comparison, run `tests/homebrew/run.sh`. It builds each
+sample, recompiles it, runs stock and recompiled Vita3K, and reports PASS or
+FAIL per sample.
+
 ## Memory mapping and the GPU
 
 Vita3K's Vulkan renderer offers several ways to map guest memory, set in
@@ -217,7 +221,7 @@ aqt install-qt linux desktop 6.11.3 linux_gcc_64 -m qtmultimedia qtshadertools -
 # Vita3K's external/ submodules, at the commits pinned in third_party/VITA3K.md
 
 # 1. recompile the module (toolkit, MIT). Writes recomp_funcs.c and
-#    recomp_funcs.c_imports/; 0 = every function
+#    recomp_funcs_imports/; 0 = every function
 armrecomp emit eboot.velf gen/recomp_funcs.c 0 <nid db: vita-headers db/360 or nid_db_classic.yml>
 
 # 2. build Vita3K with the bridge (GPLv2)

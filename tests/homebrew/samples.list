@@ -1,0 +1,16 @@
+# Homebrew run both ways by run.sh: stock Vita3K (dynarmic) and recompiled.
+#
+# name             source                        velf                  title      secs  expect
+#
+# source: a directory of vitasdk/samples, or `repo:<path>` for one in this tree.
+# expect: same    - screenshots identical, no vitarecomp trap
+#         varies  - no vitarecomp trap; the screen shows a live value (a clock)
+#         skip    - known blocked; listed so the reason is recorded, not run
+hello_world        hello_world                   hello_world.velf      VSDK00007  12  same
+debug_print        debug_print                   debug_print.velf      VSDK00004  12  same
+hello_cpp_world    hello_cpp_world               hello_cpp_world.velf  VSDK00006  12  same
+ctrl               ctrl                          ctrl_sample.velf      VSDK00003  12  same
+rtc                rtc                           rtc_sample.velf       VSDK00016  12  varies
+bridgetest         repo:tests/vita/bridgetest    bridgetest.velf       VRBT00001  12  same
+# json: needs SceLibJson, which Vita3K does not implement; stock fails too.
+json               json                          json.elf.velf         VSDK00022  12  skip
