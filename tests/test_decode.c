@@ -2191,6 +2191,125 @@ static void test_neon_cmp_forms(void) {
     printf("ok   neon compares, max/min, absolute difference, vaba, and their rejects\n");
 }
 
+/* The compares with zero, integer VABS and VNEG, all in the two-registers-
+ * miscellaneous group with A = 01. Each encoding was taken from
+ * arm-vita-eabi-as and checked by objdump. F (h2 bit 10) with op (h2 bits
+ * 9:7) gives the form: 000 GT, 001 GE, 010 EQ, 011 LE, 100 LT, and 110/111
+ * VABS/VNEG for integers. F=1 with 110/111 is the float VABS and VNEG, which
+ * this block must leave to the block after it. The rejects are computed from
+ * the layout: integer size 3 (h1 bits 3:2 = 11), F32 at a size other than 2,
+ * op 101, and Q with an odd Vd or Vm. */
+static void test_neon_cmpz_forms(void) {
+    arm_insn in;
+
+    put16(0, 0xFFB1); put16(2, 0x0001);                  /* vcgt.s8 d0, d1, #0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_CMPZ && in.imm == 0 && in.vd == 0 && in.vm == 1 && !in.neon_q && in.neon_size == 0);
+    assert(strcmp(in.mnemonic, "vcgt.s") == 0);
+    put16(0, 0xFFB5); put16(2, 0x00C2);                  /* vcge.s16 q0, q1, #0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_CMPZ && in.imm == 1 && in.vd == 0 && in.vm == 2 && in.neon_q && in.neon_size == 1);
+    assert(strcmp(in.mnemonic, "vcge.s") == 0);
+    put16(0, 0xFFF9); put16(2, 0x0121);                  /* vceq.i32 d16, d17, #0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_CMPZ && in.imm == 2 && in.vd == 16 && in.vm == 17 && !in.neon_q && in.neon_size == 2);
+    assert(strcmp(in.mnemonic, "vceq.i") == 0);
+    put16(0, 0xFFF1); put16(2, 0x01E2);                  /* vcle.s8 q8, q9, #0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_CMPZ && in.imm == 3 && in.vd == 16 && in.vm == 18 && in.neon_q && in.neon_size == 0);
+    assert(strcmp(in.mnemonic, "vcle.s") == 0);
+    put16(0, 0xFFB9); put16(2, 0x0201);                  /* vclt.s32 d0, d1, #0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_CMPZ && in.imm == 4 && in.vd == 0 && in.vm == 1 && !in.neon_q && in.neon_size == 2);
+    assert(strcmp(in.mnemonic, "vclt.s") == 0);
+    put16(0, 0xFFB5); put16(2, 0x1201);                  /* vclt.s16 d1, d1, #0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_CMPZ && in.imm == 4 && in.vd == 1 && in.vm == 1 && in.neon_size == 1);
+
+    /* F32: the same five kinds, size 2, with the float mnemonics. */
+    put16(0, 0xFFB9); put16(2, 0x0401);                  /* vcgt.f32 d0, d1, #0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCMPZ && in.imm == 0 && in.vd == 0 && in.vm == 1 && !in.neon_q && in.neon_size == 2);
+    assert(strcmp(in.mnemonic, "vcgt.f32") == 0);
+    put16(0, 0xFFB9); put16(2, 0x04C2);                  /* vcge.f32 q0, q1, #0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCMPZ && in.imm == 1 && in.vd == 0 && in.vm == 2 && in.neon_q && in.neon_size == 2);
+    assert(strcmp(in.mnemonic, "vcge.f32") == 0);
+    put16(0, 0xFFF9); put16(2, 0x0521);                  /* vceq.f32 d16, d17, #0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCMPZ && in.imm == 2 && in.vd == 16 && in.vm == 17 && !in.neon_q);
+    assert(strcmp(in.mnemonic, "vceq.f32") == 0);
+    put16(0, 0xFFF9); put16(2, 0x05E2);                  /* vcle.f32 q8, q9, #0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCMPZ && in.imm == 3 && in.vd == 16 && in.vm == 18 && in.neon_q);
+    assert(strcmp(in.mnemonic, "vcle.f32") == 0);
+    put16(0, 0xFFB9); put16(2, 0x0601);                  /* vclt.f32 d0, d1, #0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCMPZ && in.imm == 4 && in.vd == 0 && in.vm == 1 && !in.neon_q);
+    assert(strcmp(in.mnemonic, "vclt.f32") == 0);
+
+    /* Integer VABS and VNEG, sizes 0-2, D and Q. */
+    put16(0, 0xFFB1); put16(2, 0x0301);                  /* vabs.s8 d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ABS && in.vd == 0 && in.vm == 1 && !in.neon_q && in.neon_size == 0);
+    assert(strcmp(in.mnemonic, "vabs.s") == 0);
+    put16(0, 0xFFB5); put16(2, 0x0342);                  /* vabs.s16 q0, q1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ABS && in.vd == 0 && in.vm == 2 && in.neon_q && in.neon_size == 1);
+    put16(0, 0xFFF9); put16(2, 0x0321);                  /* vabs.s32 d16, d17 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ABS && in.vd == 16 && in.vm == 17 && !in.neon_q && in.neon_size == 2);
+    put16(0, 0xFFF1); put16(2, 0x03E2);                  /* vneg.s8 q8, q9 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NEG && in.vd == 16 && in.vm == 18 && in.neon_q && in.neon_size == 0);
+    assert(strcmp(in.mnemonic, "vneg.s") == 0);
+    put16(0, 0xFFB5); put16(2, 0x0381);                  /* vneg.s16 d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NEG && in.vd == 0 && in.vm == 1 && !in.neon_q && in.neon_size == 1);
+    put16(0, 0xFFB9); put16(2, 0x03C2);                  /* vneg.s32 q0, q1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NEG && in.vd == 0 && in.vm == 2 && in.neon_q && in.neon_size == 2);
+
+    /* The float VABS and VNEG of the block after this one keep their ops: the
+     * F=1 op 110/111 encodings must not come out as the integer forms, and
+     * the F32 compares must not come out as VABS. */
+    put16(0, 0xFFB9); put16(2, 0x0701);                  /* vabs.f32 d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FABS && in.vd == 0 && in.vm == 1 && !in.neon_q && in.neon_size == 2);
+    assert(strcmp(in.mnemonic, "vabs.f32") == 0);
+    put16(0, 0xFFB9); put16(2, 0x07C2);                  /* vneg.f32 q0, q1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FNEG && in.vd == 0 && in.vm == 2 && in.neon_q && in.neon_size == 2);
+    put16(0, 0xFFBB); put16(2, 0x0701);                  /* vcvt.s32.f32 d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCVT_TO_INT && in.vd == 0 && in.vm == 1);
+
+    /* Rejects. Each decodes to OP_NONE, the trap. */
+    put16(0, 0xFFBD); put16(2, 0x0001);                  /* vcgt.s64 #0: size 3 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xFFB1); put16(2, 0x0401);                  /* vcgt.f32 with size 0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xFFB1); put16(2, 0x0281);                  /* op 101: UNDEFINED */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xFFB5); put16(2, 0x1342);                  /* vabs.s16 q1: odd Vd */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xFFBD); put16(2, 0x0701);                  /* vabs.f32 encoding with size 3: UNDEFINED */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+
+    /* Neighbour. The VCVT encodings have A = 11 (h1 bit 1 set), so the mask
+     * above never sees them, and vcvt.s32.f32 must keep its op. */
+    put16(0, 0xFFBB); put16(2, 0x0701);                  /* vcvt.s32.f32 d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCVT_TO_INT);
+
+    printf("ok   neon compares with zero, integer vabs/vneg, float vabs/vneg kept, and their rejects\n");
+}
+
 int main(void) {
     printf("decode:\n");
     test_thumb_width();
@@ -2212,6 +2331,7 @@ int main(void) {
     test_bringup_forms();
     test_shifts_and_indexing();
     test_homebrew_forms();
+    test_neon_cmpz_forms();
     test_neon_widen_forms();
     test_neon_shuffle_forms();
     test_neon_ldst_multi();

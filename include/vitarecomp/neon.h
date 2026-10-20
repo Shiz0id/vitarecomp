@@ -276,6 +276,19 @@ static inline uint64_t neon_fcgt(uint64_t a, uint64_t b) {
 static inline uint64_t neon_fabs(uint64_t x) { return x & 0x7FFFFFFF7FFFFFFFull; }
 static inline uint64_t neon_fneg(uint64_t x) { return x ^ 0x8000000080000000ull; }
 
+/* Integer VABS, wrapping: a negative lane is negated in place and abs(-2^(w-1))
+ * stays -2^(w-1), as the architecture has it. m is all ones in the lanes whose
+ * sign bit is set, else zero, so (x ^ m) - m negates exactly those lanes. The
+ * subtraction is neon_sub, which cannot borrow across a lane. This sits above
+ * neon_lmask and neon_lane_of, so it uses only neon_sub and neon_lane_tops and
+ * writes the lane mask out, as neon_lanes_zero does. */
+static inline uint64_t neon_abs(uint64_t x, int size) {
+    uint64_t h = neon_lane_tops(size);
+    uint64_t lane = size == 3 ? ~0ull : (1ull << (8u << size)) - 1;
+    uint64_t m = ((x & h) >> ((8u << size) - 1)) * lane;
+    return neon_sub(x ^ m, m, size);
+}
+
 /* F32 to S32 or U32, round toward zero. The float is checked against the
  * integer range before the cast: a cast of an out-of-range float is undefined
  * in C, and the architecture wants saturation there, not a host-dependent

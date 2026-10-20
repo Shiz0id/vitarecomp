@@ -1178,6 +1178,49 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
         return 1;
     }
 
+    /* Two registers, miscellaneous, A = 01 (h1 bits 1:0 = 01): the compares
+     * with zero and the integer VABS and VNEG. h2 is dddd F op(3) 0 Q M 0
+     * mmmm, with bits 11 and 4 clear, and F (bit 10) and op (bits 9:7) pick
+     * the form:
+     *   F=0 op 000-100  VCGT, VCGE, VCEQ, VCLE, VCLT #0, signed, sizes 0-2
+     *   F=0 op 110/111  VABS, VNEG, sizes 0-2
+     *   F=1 op 000-100  the same five on F32 lanes (size 2 only)
+     *   F=1 op 110/111  float VABS and VNEG: not taken here, they fall through
+     *                   to the block below, which has them
+     *   op 101          UNDEFINED
+     * Size 3 is UNDEFINED for the integer forms. The compares are always
+     * signed, since there is no unsigned compare with zero. */
+    if ((h1 & 0xFFB3) == 0xFFB1 && (h2 & 0x0810) == 0) {
+        int F = (h2 >> 10) & 1, op = (h2 >> 7) & 7, size = (h1 >> 2) & 3;
+        if (!F || op < 6) {
+            static const char *const inm[5] = { "vcgt.s", "vcge.s", "vceq.i", "vcle.s", "vclt.s" };
+            static const char *const fnm[5] = { "vcgt.f32", "vcge.f32", "vceq.f32", "vcle.f32", "vclt.f32" };
+            if (Q && ((d | m) & 1)) return 0;
+            if (op == 5) return 0;
+            if (op >= 6) {                                 /* integer VABS, VNEG */
+                if (size == 3) return 0;
+                o->op = op == 6 ? OP_NEON_ABS : OP_NEON_NEG;
+                set(o, A_SIMD, op == 6 ? "vabs.s" : "vneg.s");
+            } else if (F) {                                /* F32 compares */
+                if (size != 2) return 0;
+                o->op = OP_NEON_FCMPZ;
+                o->imm = (uint32_t)op;
+                set(o, A_SIMD, fnm[op]);
+                o->has_imm = 1;
+            } else {                                       /* integer compares */
+                if (size == 3) return 0;
+                o->op = OP_NEON_CMPZ;
+                o->imm = (uint32_t)op;
+                set(o, A_SIMD, inm[op]);
+                o->has_imm = 1;
+            }
+            o->vd = (int8_t)d; o->vm = (int8_t)m;
+            o->neon_q = (uint8_t)Q;
+            o->neon_size = (uint8_t)(F ? 2 : size);
+            return 1;
+        }
+    }
+
     /* Two registers, miscellaneous, 32-bit lanes (h1 bits 3:2 = 10). Bit 0 of
      * h1 is set; bit 1 separates VABS/VNEG (0) from the conversions (1). The
      * opc is h2 bits 10:7, with Q at bit 6 and bits 11 and 4 clear. That is

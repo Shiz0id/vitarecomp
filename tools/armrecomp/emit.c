@@ -1223,6 +1223,47 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             break;
         }
 
+        /* Compares with zero, and integer VABS and VNEG. Each D half reads only
+         * its own half of vm, so the result may overwrite vm (vclt.s16 d1, d1,
+         * #0). The compare kind is imm: 0 GT, 1 GE, 2 EQ, 3 LE, 4 LT. LE and LT
+         * put the zero on the left, so x <= 0 is 0 >= x. The F32 forms use the
+         * register compares with a zero operand, so a NaN is false and a
+         * denormal reads as zero, as in VCGT.F32 and friends. */
+        case OP_NEON_CMPZ: case OP_NEON_FCMPZ: {
+            static const char *const ifmt[5] = {
+                "neon_cmp(neon_getd(%d), 0, %d, 0, 0)", "neon_cmp(neon_getd(%d), 0, %d, 0, 1)",
+                "neon_ceq(neon_getd(%d), 0, %d)",
+                "neon_cmp(0, neon_getd(%d), %d, 0, 1)", "neon_cmp(0, neon_getd(%d), %d, 0, 0)",
+            };
+            static const char *const ffmt[5] = {
+                "neon_fcgt(neon_getd(%d), 0)", "neon_fcge(neon_getd(%d), 0)",
+                "neon_fceq(neon_getd(%d), 0)",
+                "neon_fcge(0, neon_getd(%d))", "neon_fcgt(0, neon_getd(%d))",
+            };
+            int regs = in->neon_q ? 2 : 1;
+            for (int k = 0; k < regs; k++) {
+                fprintf(f, "    neon_setd(%d, ", in->vd + k);
+                if (in->op == OP_NEON_FCMPZ)
+                    fprintf(f, ffmt[in->imm], in->vm + k);
+                else
+                    fprintf(f, ifmt[in->imm], in->vm + k, in->neon_size);
+                fprintf(f, ");\n");
+            }
+            break;
+        }
+        case OP_NEON_ABS: case OP_NEON_NEG: {
+            int regs = in->neon_q ? 2 : 1;
+            for (int k = 0; k < regs; k++) {
+                if (in->op == OP_NEON_ABS)
+                    fprintf(f, "    neon_setd(%d, neon_abs(neon_getd(%d), %d));\n",
+                            in->vd + k, in->vm + k, in->neon_size);
+                else
+                    fprintf(f, "    neon_setd(%d, neon_sub(0, neon_getd(%d), %d));\n",
+                            in->vd + k, in->vm + k, in->neon_size);
+            }
+            break;
+        }
+
         /* The integer signedness is the vfp_unsigned flag, as in the VFP forms. */
         case OP_NEON_FCVT_TO_INT: case OP_NEON_FCVT_FROM_INT: {
             int regs = in->neon_q ? 2 : 1;

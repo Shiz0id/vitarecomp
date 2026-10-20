@@ -1306,6 +1306,165 @@ static void test_neon_widen(void) {
     printf("ok   neon widening: vaddl/vsubl/vaddw/vsubw/vmull/vmlal/vmlsl at 8/16/32, vshll/vmovl\n");
 }
 
+/* The compares with zero and the integer VABS and VNEG, against values worked
+ * out by hand. The emitter prints the expressions these asserts call: GT, GE
+ * and EQ put the zero second (neon_cmp(x, 0, ...), neon_ceq(x, 0, ...)) and LE
+ * and LT put it first (neon_cmp(0, x, ...)), and the F32 forms use neon_fcgt,
+ * neon_fcge and neon_fceq the same way. The lanes are -1, 0, 1, the minimum and
+ * the maximum, and 0x80 and 0xFF read as negative or large, so the signed and
+ * unsigned answers differ and an unsigned compare fails here. */
+static void test_neon_cmpz_c(void) {
+    /* Integer compares, 8-bit lanes. Word A holds -1, 0, 1, min, max, -1, 0, 1. */
+    uint64_t na8[8] = { 0xFF, 0x00, 0x01, 0x80, 0x7F, 0xFF, 0x00, 0x01 };
+    uint64_t NA8 = pack_lanes(na8, 8, 8);
+    uint64_t gt_a8[8] = { 0x00, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0x00, 0xFF };
+    uint64_t ge_a8[8] = { 0x00, 0xFF, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0xFF };
+    uint64_t eq_a8[8] = { 0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00 };
+    uint64_t le_a8[8] = { 0xFF, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0xFF, 0x00 };
+    uint64_t lt_a8[8] = { 0xFF, 0x00, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0x00 };
+    assert(neon_cmp(NA8, 0, 0, 0, 0) == pack_lanes(gt_a8, 8, 8));
+    assert(neon_cmp(NA8, 0, 0, 0, 1) == pack_lanes(ge_a8, 8, 8));
+    assert(neon_ceq(NA8, 0, 0) == pack_lanes(eq_a8, 8, 8));
+    assert(neon_cmp(0, NA8, 0, 0, 1) == pack_lanes(le_a8, 8, 8));
+    assert(neon_cmp(0, NA8, 0, 0, 0) == pack_lanes(lt_a8, 8, 8));
+
+    /* Word B: -128, 127, 0, 1, -2, -127, 64, -64. */
+    uint64_t nb8[8] = { 0x80, 0x7F, 0x00, 0x01, 0xFE, 0x81, 0x40, 0xC0 };
+    uint64_t NB8 = pack_lanes(nb8, 8, 8);
+    uint64_t gt_b8[8] = { 0x00, 0xFF, 0x00, 0xFF, 0x00, 0x00, 0xFF, 0x00 };
+    uint64_t ge_b8[8] = { 0x00, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0xFF, 0x00 };
+    uint64_t eq_b8[8] = { 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    uint64_t le_b8[8] = { 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0xFF, 0x00, 0xFF };
+    uint64_t lt_b8[8] = { 0xFF, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0xFF };
+    assert(neon_cmp(NB8, 0, 0, 0, 0) == pack_lanes(gt_b8, 8, 8));
+    assert(neon_cmp(NB8, 0, 0, 0, 1) == pack_lanes(ge_b8, 8, 8));
+    assert(neon_ceq(NB8, 0, 0) == pack_lanes(eq_b8, 8, 8));
+    assert(neon_cmp(0, NB8, 0, 0, 1) == pack_lanes(le_b8, 8, 8));
+    assert(neon_cmp(0, NB8, 0, 0, 0) == pack_lanes(lt_b8, 8, 8));
+
+    /* 16-bit lanes: -1, 0, 1, min in word A; max, 0, -1, 1 in word B. */
+    uint64_t na16[4] = { 0xFFFF, 0x0000, 0x0001, 0x8000 };
+    uint64_t NA16 = pack_lanes(na16, 16, 4);
+    uint64_t gt_a16[4] = { 0x0000, 0x0000, 0xFFFF, 0x0000 };
+    uint64_t ge_a16[4] = { 0x0000, 0xFFFF, 0xFFFF, 0x0000 };
+    uint64_t eq_a16[4] = { 0x0000, 0xFFFF, 0x0000, 0x0000 };
+    uint64_t le_a16[4] = { 0xFFFF, 0xFFFF, 0x0000, 0xFFFF };
+    uint64_t lt_a16[4] = { 0xFFFF, 0x0000, 0x0000, 0xFFFF };
+    assert(neon_cmp(NA16, 0, 1, 0, 0) == pack_lanes(gt_a16, 16, 4));
+    assert(neon_cmp(NA16, 0, 1, 0, 1) == pack_lanes(ge_a16, 16, 4));
+    assert(neon_ceq(NA16, 0, 1) == pack_lanes(eq_a16, 16, 4));
+    assert(neon_cmp(0, NA16, 1, 0, 1) == pack_lanes(le_a16, 16, 4));
+    assert(neon_cmp(0, NA16, 1, 0, 0) == pack_lanes(lt_a16, 16, 4));
+
+    uint64_t nb16[4] = { 0x7FFF, 0x0000, 0xFFFF, 0x0001 };
+    uint64_t NB16 = pack_lanes(nb16, 16, 4);
+    uint64_t gt_b16[4] = { 0xFFFF, 0x0000, 0x0000, 0xFFFF };
+    uint64_t ge_b16[4] = { 0xFFFF, 0xFFFF, 0x0000, 0xFFFF };
+    uint64_t eq_b16[4] = { 0x0000, 0xFFFF, 0x0000, 0x0000 };
+    uint64_t le_b16[4] = { 0x0000, 0xFFFF, 0xFFFF, 0x0000 };
+    uint64_t lt_b16[4] = { 0x0000, 0x0000, 0xFFFF, 0x0000 };
+    assert(neon_cmp(NB16, 0, 1, 0, 0) == pack_lanes(gt_b16, 16, 4));
+    assert(neon_cmp(NB16, 0, 1, 0, 1) == pack_lanes(ge_b16, 16, 4));
+    assert(neon_ceq(NB16, 0, 1) == pack_lanes(eq_b16, 16, 4));
+    assert(neon_cmp(0, NB16, 1, 0, 1) == pack_lanes(le_b16, 16, 4));
+    assert(neon_cmp(0, NB16, 1, 0, 0) == pack_lanes(lt_b16, 16, 4));
+
+    /* 32-bit lanes: -1 and 0; min and max; 1 and 0. */
+    uint64_t na32[2] = { 0xFFFFFFFF, 0x00000000 };
+    uint64_t NA32 = pack_lanes(na32, 32, 2);
+    uint64_t gt_a32[2] = { 0x00000000, 0x00000000 };
+    uint64_t ge_a32[2] = { 0x00000000, 0xFFFFFFFF };
+    uint64_t eq_a32[2] = { 0x00000000, 0xFFFFFFFF };
+    uint64_t le_a32[2] = { 0xFFFFFFFF, 0xFFFFFFFF };
+    uint64_t lt_a32[2] = { 0xFFFFFFFF, 0x00000000 };
+    assert(neon_cmp(NA32, 0, 2, 0, 0) == pack_lanes(gt_a32, 32, 2));
+    assert(neon_cmp(NA32, 0, 2, 0, 1) == pack_lanes(ge_a32, 32, 2));
+    assert(neon_ceq(NA32, 0, 2) == pack_lanes(eq_a32, 32, 2));
+    assert(neon_cmp(0, NA32, 2, 0, 1) == pack_lanes(le_a32, 32, 2));
+    assert(neon_cmp(0, NA32, 2, 0, 0) == pack_lanes(lt_a32, 32, 2));
+
+    uint64_t nb32[2] = { 0x80000000, 0x7FFFFFFF };
+    uint64_t NB32 = pack_lanes(nb32, 32, 2);
+    uint64_t gt_b32[2] = { 0x00000000, 0xFFFFFFFF };
+    uint64_t ge_b32[2] = { 0x00000000, 0xFFFFFFFF };
+    uint64_t eq_b32[2] = { 0x00000000, 0x00000000 };
+    uint64_t le_b32[2] = { 0xFFFFFFFF, 0x00000000 };
+    uint64_t lt_b32[2] = { 0xFFFFFFFF, 0x00000000 };
+    assert(neon_cmp(NB32, 0, 2, 0, 0) == pack_lanes(gt_b32, 32, 2));
+    assert(neon_cmp(NB32, 0, 2, 0, 1) == pack_lanes(ge_b32, 32, 2));
+    assert(neon_ceq(NB32, 0, 2) == pack_lanes(eq_b32, 32, 2));
+    assert(neon_cmp(0, NB32, 2, 0, 1) == pack_lanes(le_b32, 32, 2));
+    assert(neon_cmp(0, NB32, 2, 0, 0) == pack_lanes(lt_b32, 32, 2));
+
+    /* Integer VABS, wrapping. The minimum stays, since -(-2^(w-1)) does not
+     * fit, and -1 becomes 1. */
+    assert(neon_abs(rep_lane(0x80, 0), 0) == rep_lane(0x80, 0));
+    assert(neon_abs(rep_lane(0x8000, 1), 1) == rep_lane(0x8000, 1));
+    assert(neon_abs(rep_lane(0x80000000, 2), 2) == rep_lane(0x80000000, 2));
+    assert(neon_abs(rep_lane(0xFF, 0), 0) == rep_lane(0x01, 0));
+    assert(neon_abs(rep_lane(0xFFFF, 1), 1) == rep_lane(0x0001, 1));
+    assert(neon_abs(rep_lane(0xFFFFFFFF, 2), 2) == rep_lane(0x00000001, 2));
+    assert(neon_abs(rep_lane(0x7F, 0), 0) == rep_lane(0x7F, 0));
+    assert(neon_abs(rep_lane(0x00, 0), 0) == 0);
+
+    /* Mixed lanes for VABS and VNEG, 8-bit: -1, 0, 1, min, max, -2, -127, -112. */
+    uint64_t va8[8] = { 0xFF, 0x00, 0x01, 0x80, 0x7F, 0xFE, 0x81, 0x90 };
+    uint64_t VA8 = pack_lanes(va8, 8, 8);
+    uint64_t abs8[8] = { 0x01, 0x00, 0x01, 0x80, 0x7F, 0x02, 0x7F, 0x70 };
+    uint64_t neg8[8] = { 0x01, 0x00, 0xFF, 0x80, 0x81, 0x02, 0x7F, 0x70 };
+    assert(neon_abs(VA8, 0) == pack_lanes(abs8, 8, 8));
+    assert(neon_sub(0, VA8, 0) == pack_lanes(neg8, 8, 8));
+
+    uint64_t va16[4] = { 0xFFFF, 0x0000, 0x0001, 0x8000 };
+    uint64_t VA16 = pack_lanes(va16, 16, 4);
+    uint64_t abs16[4] = { 0x0001, 0x0000, 0x0001, 0x8000 };
+    uint64_t neg16[4] = { 0x0001, 0x0000, 0xFFFF, 0x8000 };
+    assert(neon_abs(VA16, 1) == pack_lanes(abs16, 16, 4));
+    assert(neon_sub(0, VA16, 1) == pack_lanes(neg16, 16, 4));
+
+    uint64_t va32[2] = { 0x80000000, 0xFFFFFFFF };
+    uint64_t VA32 = pack_lanes(va32, 32, 2);
+    uint64_t abs32[2] = { 0x80000000, 0x00000001 };
+    uint64_t neg32[2] = { 0x80000000, 0x00000001 };
+    assert(neon_abs(VA32, 2) == pack_lanes(abs32, 32, 2));
+    assert(neon_sub(0, VA32, 2) == pack_lanes(neg32, 32, 2));
+
+    /* VNEG of 0 and of the minimum, at 8 bits: 0 stays and -128 stays. */
+    assert(neon_sub(0, rep_lane(0x00, 0), 0) == 0);
+    assert(neon_sub(0, rep_lane(0x80, 0), 0) == rep_lane(0x80, 0));
+
+    /* F32 compares against +0 and -0, with 1.5, -2, the infinities, a NaN of
+     * each sign, and a denormal of each sign. neon_f32_in flushes a denormal to
+     * its signed zero before the compare, so a positive denormal compares as
+     * +0 and a negative one as -0: equal to zero, neither above nor below. Every
+     * compare with a NaN is false. Ten values, each in both lanes of a word:
+     * +0, -0, 1.5, -2, qNaN, +inf, -inf, +denormal, -denormal, -qNaN. */
+    uint32_t fv[10] = { 0x00000000u, 0x80000000u, 0x3FC00000u, 0xC0000000u,
+                        0x7FC00000u, 0x7F800000u, 0xFF800000u,
+                        0x00000001u, 0x80000001u, 0xFFC00001u };
+    uint32_t fgt[10] = { 0, 0, 0xFFFFFFFFu, 0, 0, 0xFFFFFFFFu, 0, 0, 0, 0 };
+    uint32_t fge[10] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0, 0, 0xFFFFFFFFu, 0,
+                         0xFFFFFFFFu, 0xFFFFFFFFu, 0 };
+    uint32_t feq[10] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0, 0, 0, 0, 0,
+                         0xFFFFFFFFu, 0xFFFFFFFFu, 0 };
+    uint32_t fle[10] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0, 0xFFFFFFFFu, 0, 0, 0xFFFFFFFFu,
+                         0xFFFFFFFFu, 0xFFFFFFFFu, 0 };
+    uint32_t flt[10] = { 0, 0, 0, 0xFFFFFFFFu, 0, 0, 0xFFFFFFFFu, 0, 0, 0 };
+    for (int i = 0; i < 10; i++) {
+        uint64_t x = f32_pair(fv[i], fv[i]);
+        assert(neon_fcgt(x, 0) == f32_pair(fgt[i], fgt[i]));
+        assert(neon_fcge(x, 0) == f32_pair(fge[i], fge[i]));
+        assert(neon_fceq(x, 0) == f32_pair(feq[i], feq[i]));
+        assert(neon_fcge(0, x) == f32_pair(fle[i], fle[i]));
+        assert(neon_fcgt(0, x) == f32_pair(flt[i], flt[i]));
+    }
+    /* The lanes are independent: 1.5 above zero and -0 not, in one word. */
+    assert(neon_fcgt(f32_pair(0x3FC00000u, 0x80000000u), 0) == f32_pair(0xFFFFFFFFu, 0));
+    assert(neon_fcge(0, f32_pair(0x3FC00000u, 0x80000000u)) == f32_pair(0, 0xFFFFFFFFu));
+
+    printf("ok   neon cmpz: integer compares with zero at 8/16/32 bits, vabs/vneg wrap, f32 compares with zero\n");
+}
+
 static void test_neon_shuffle(void) {
     /* A holds bytes 0x00..0x07 and B bytes 0x08..0x0F, so byte j of the pair
      * is j. X and Y continue the count at 0x10 and 0x18. Every expected value
@@ -1592,6 +1751,7 @@ int main(void) {
     test_neon_shuffle();
     test_neon_ldst();
     test_neon_narrow();
+    test_neon_cmpz_c();
     test_bit_ops();
     test_parallel_and_lanes();
     test_vfp_d32();
