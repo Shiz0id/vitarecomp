@@ -447,6 +447,62 @@ static inline uint64_t neon_abd(uint64_t n, uint64_t m, int size, int is_unsigne
     return r;
 }
 
+/* One lane of VSHL, VQSHL, VRSHL and VQRSHL by register. x is the lane bits
+ * and sh the amount, the low byte of the shift lane read signed, so -128..127.
+ * sh >= 0 shifts left: the exact result, truncated to the lane unless sat, and
+ * then clamped. sh < 0 shifts right by R = -sh, rounding when round is set.
+ *
+ * A left shift fits the lane exactly when |x| <= edge >> sh, where edge is the
+ * lane's limit on x's side: mask for unsigned, 2^(w-1) for a negative x and
+ * 2^(w-1) - 1 for a positive one. Clamping goes to that same edge. A negative
+ * x has the magnitude 0 - x within the lane. Shifts by w or more never reach
+ * C's undefined range: a left shift of a nonzero x by w or more saturates, and
+ * a right shift by w or more is only the sign bits.
+ *
+ * A right shift is the floor of x / 2^R. For a negative x it is ~((~x) >> R),
+ * as in neon_shr. With rounding, floor(x / 2^R + 1/2) is that floor plus bit
+ * R-1 of x, the bit the shift drops, and the sum is taken mod 2^w. R = w gives
+ * the top bit alone for unsigned and 0 for signed, and R > w rounds to 0. */
+static inline uint64_t neon_shl_lane(uint64_t x, int sh, int w, int is_unsigned, int round, int sat) {
+    uint64_t mask = w == 64 ? ~0ull : (1ull << w) - 1;
+    uint64_t sbit = 1ull << (w - 1);
+    int neg = !is_unsigned && (x & sbit) != 0;
+    uint64_t edge = is_unsigned ? mask : neg ? sbit : sbit - 1;
+    if (sh >= 0) {
+        if (x == 0) return 0;
+        if (sh >= w) return sat ? edge : 0;
+        uint64_t y = (x << sh) & mask;
+        if (!sat) return y;
+        uint64_t mag = neg ? (0 - x) & mask : x;
+        return mag <= (edge >> sh) ? y : edge;
+    }
+    int R = -sh;
+    if (round && R > w) return 0;
+    uint64_t fl;
+    if (R >= w)   fl = neg ? mask : 0;
+    else if (neg) fl = mask & ~(((~x) & mask) >> R);
+    else          fl = x >> R;
+    if (!round) return fl;
+    uint64_t bit = (x >> (R - 1)) & 1;               /* R - 1 < 64: R <= w */
+    return (fl + bit) & mask;
+}
+
+/* VSHL, VQSHL, VRSHL and VQRSHL by register, lane by lane. m is the value
+ * (Vm) and n the amounts (Vn), in the order of the assembly, so vshl.s8 Dd, Dm,
+ * Dn is neon_shl_reg(Dm, Dn, ...). Each amount is the low byte of its lane,
+ * sign-extended, and the higher bits of a wider lane are ignored. round picks
+ * the rounding right shifts and sat the saturating left shifts. Size 3 is valid
+ * here: the one 64-bit lane is read whole. */
+static inline uint64_t neon_shl_reg(uint64_t m, uint64_t n, int size, int is_unsigned, int round, int sat) {
+    int w = 8 << size;
+    uint64_t r = 0;
+    for (int i = 0; i < 64 / w; i++) {
+        int sh = (int)neon_sext(neon_lane_of(n, size, i) & 0xFF, 8);
+        r |= neon_shl_lane(neon_lane_of(m, size, i), sh, w, is_unsigned, round, sat) << (i * w);
+    }
+    return r;
+}
+
 /* VSHL by immediate: each lane shifted left by amt, 0 <= amt < lane width.
  * Bits shifted out of a lane are masked off rather than carried upward. */
 static inline uint64_t neon_shl(uint64_t n, int amt, int size) {

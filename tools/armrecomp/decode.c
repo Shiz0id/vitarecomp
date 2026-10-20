@@ -903,6 +903,27 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
             set(o, A_SIMD, nm[k][B][U]);
             return 1;
         }
+        /* Shift by register: opc 0100 (VSHL, VQSHL) and 0101 (VRSHL, VQRSHL),
+         * B set for the saturating form, U picking the signedness. The shift
+         * amounts come from vn and the value from vm, the reverse of the
+         * register order in the mnemonic (vshl.s8 Dd, Dm, Dn). Every size is
+         * valid, 64-bit lanes included, so there is no size check. Nothing
+         * before this block claims opc 0100 or 0101 for any B or U. */
+        if (opc == 0x4 || opc == 0x5) {
+            static const arm_op ops[2][2] = {
+                { OP_NEON_SHL_REG, OP_NEON_QSHL_REG },
+                { OP_NEON_RSHL_REG, OP_NEON_QRSHL_REG },
+            };
+            static const char *const nm[2][2][2] = {
+                { { "vshl.s", "vshl.u" }, { "vqshl.s", "vqshl.u" } },
+                { { "vrshl.s", "vrshl.u" }, { "vqrshl.s", "vqrshl.u" } },
+            };
+            int k = opc == 0x4 ? 0 : 1;
+            o->op = ops[k][B];
+            o->vfp_unsigned = (uint8_t)U;
+            set(o, A_SIMD, nm[k][B][U]);
+            return 1;
+        }
         if (opc == 0xD && !(size & 1)) {                   /* float, .F32 only */
             /* For floats the size field is sz (bit 20, 0 for F32) and bit 21
              * (size>>1) is an operation bit, so the operation is picked by U,

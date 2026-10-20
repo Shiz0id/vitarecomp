@@ -1042,6 +1042,134 @@ static void test_neon_cmp_c(void) {
     printf("ok   neon cmp: vcgt/vcge, vmax/vmin, vabd/vaba at the lane edges, signed and unsigned\n");
 }
 
+/* The shifts by register, against values worked out by hand. The value is the
+ * first argument and the amounts the second, as in vshl Dd, Dm, Dn. The mixed
+ * words give each lane its own amount, so a lane read from the wrong place
+ * shows up, and the signed and unsigned results differ where the top bit is
+ * set. The rounding words set the bits a right shift drops. */
+static void test_neon_shl_reg_c(void) {
+    /* Operand order: the amount is the second argument. 1 << 3 and 3 << 1. */
+    assert(neon_shl_reg(rep_lane(1, 0), rep_lane(3, 0), 0, 0, 0, 0) == rep_lane(8, 0));
+    assert(neon_shl_reg(rep_lane(3, 0), rep_lane(1, 0), 0, 0, 0, 0) == rep_lane(6, 0));
+
+    /* Mixed lanes, 8-bit, VSHL. Amounts +1, -1, +2, -2, 0, +3, -3, +1. Lane 3
+     * (-128 or 128) and lane 6 (-16 or 240) differ signed and unsigned. */
+    uint64_t v8[8] = { 0x01, 0x02, 0x10, 0x80, 0xFF, 0x7F, 0xF0, 0x03 };
+    uint64_t s8[8] = { 0x01, 0xFF, 0x02, 0xFE, 0x00, 0x03, 0xFD, 0x01 };
+    uint64_t V8 = pack_lanes(v8, 8, 8), S8 = pack_lanes(s8, 8, 8);
+    uint64_t e_shl_s[8] = { 0x02, 0x01, 0x40, 0xE0, 0xFF, 0xF8, 0xFE, 0x06 };
+    uint64_t e_shl_u[8] = { 0x02, 0x01, 0x40, 0x20, 0xFF, 0xF8, 0x1E, 0x06 };
+    assert(neon_shl_reg(V8, S8, 0, 0, 0, 0) == pack_lanes(e_shl_s, 8, 8));
+    assert(neon_shl_reg(V8, S8, 0, 1, 0, 0) == pack_lanes(e_shl_u, 8, 8));
+
+    /* VRSHL on a second word, with the bits a right shift drops set, so the
+     * rounding shows. Amounts -1, -3, -4, -1, -2, -3, -1, 0. 3 by 1 is 2, and
+     * 0x81 (-127 or 129) by 1 is -63 or 65. 0xF5 (-11 or 245) by 3 is -1 or 31. */
+    uint64_t vr[8] = { 0x03, 0x07, 0x0F, 0x81, 0x7F, 0xF5, 0x05, 0xFF };
+    uint64_t sr[8] = { 0xFF, 0xFD, 0xFC, 0xFF, 0xFE, 0xFD, 0xFF, 0x00 };
+    uint64_t VR = pack_lanes(vr, 8, 8), SR = pack_lanes(sr, 8, 8);
+    uint64_t e_rs[8] = { 0x02, 0x01, 0x01, 0xC1, 0x20, 0xFF, 0x03, 0xFF };
+    uint64_t e_ru[8] = { 0x02, 0x01, 0x01, 0x41, 0x20, 0x1F, 0x03, 0xFF };
+    assert(neon_shl_reg(VR, SR, 0, 0, 1, 0) == pack_lanes(e_rs, 8, 8));
+    assert(neon_shl_reg(VR, SR, 0, 1, 1, 0) == pack_lanes(e_ru, 8, 8));
+
+    /* Only the low byte of the amount lane counts. 0x0301 is +1 and 0x01FF is -1
+     * in a 16-bit lane, and 0x0080 (-128) and 0x007F (+127) are the extremes. */
+    uint64_t v16[4] = { 0x0003, 0x0006, 0x8000, 0x0001 };
+    uint64_t s16[4] = { 0x0301, 0x01FF, 0x0080, 0x007F };
+    uint64_t V16 = pack_lanes(v16, 16, 4), S16 = pack_lanes(s16, 16, 4);
+    uint64_t e16_s[4] = { 0x0006, 0x0003, 0xFFFF, 0x0000 };
+    uint64_t e16_u[4] = { 0x0006, 0x0003, 0x0000, 0x0000 };
+    assert(neon_shl_reg(V16, S16, 1, 0, 0, 0) == pack_lanes(e16_s, 16, 4));
+    assert(neon_shl_reg(V16, S16, 1, 1, 0, 0) == pack_lanes(e16_u, 16, 4));
+    assert(neon_shl_reg(rep_lane(0x0003, 1), rep_lane(0x0301, 1), 1, 0, 0, 0) == rep_lane(0x0006, 1));
+    assert(neon_shl_reg(rep_lane(0x0010, 1), rep_lane(0x01FF, 1), 1, 0, 0, 0) == rep_lane(0x0008, 1));
+
+    /* Mixed lanes, 32-bit. The amounts have bits above the low byte set. */
+    uint64_t v32[2] = { 0x40000001, 0x80000010 };
+    uint64_t s32[2] = { 0x12345602, 0xABCDEFFD };
+    uint64_t V32 = pack_lanes(v32, 32, 2), S32 = pack_lanes(s32, 32, 2);
+    uint64_t e32_s[2] = { 0x00000004, 0xF0000002 };
+    uint64_t e32_u[2] = { 0x00000004, 0x10000002 };
+    assert(neon_shl_reg(V32, S32, 2, 0, 0, 0) == pack_lanes(e32_s, 32, 2));
+    assert(neon_shl_reg(V32, S32, 2, 1, 0, 0) == pack_lanes(e32_u, 32, 2));
+
+    /* 64-bit lanes, one per D register. Left 1 truncates to 64 bits. Right by 3
+     * is arithmetic for the signed lane and logical for the unsigned one. */
+    assert(neon_shl_reg(0x4000000000000001ull, 0x01, 3, 0, 0, 0) == 0x8000000000000002ull);
+    assert(neon_shl_reg(0x8000000000000010ull, 0xAABBCCDDEEFFFFFDull, 3, 0, 0, 0) == 0xF000000000000002ull);
+    assert(neon_shl_reg(0x8000000000000010ull, 0xAABBCCDDEEFFFFFDull, 3, 1, 0, 0) == 0x1000000000000002ull);
+
+    /* Amounts at and past the lane width, 8-bit, with -128 and 127. A left
+     * shift by 8 or more is 0 and a right shift by 8 or more is the sign. */
+    assert(neon_shl_reg(rep_lane(0x01, 0), rep_lane(0x08, 0), 0, 0, 0, 0) == 0);
+    assert(neon_shl_reg(rep_lane(0x81, 0), rep_lane(0x08, 0), 0, 0, 0, 0) == 0);
+    assert(neon_shl_reg(rep_lane(0xFF, 0), rep_lane(0x7F, 0), 0, 0, 0, 0) == 0);     /* -1 << 127 */
+    assert(neon_shl_reg(rep_lane(0x01, 0), rep_lane(0x7F, 0), 0, 1, 0, 0) == 0);
+    assert(neon_shl_reg(rep_lane(0x81, 0), rep_lane(0xF8, 0), 0, 0, 0, 0) == rep_lane(0xFF, 0));   /* -127 >> 8 */
+    assert(neon_shl_reg(rep_lane(0x81, 0), rep_lane(0xF8, 0), 0, 1, 0, 0) == 0);                   /* 129 >> 8 */
+    assert(neon_shl_reg(rep_lane(0x80, 0), rep_lane(0xF7, 0), 0, 0, 0, 0) == rep_lane(0xFF, 0));   /* -128 >> 9 */
+    assert(neon_shl_reg(rep_lane(0x80, 0), rep_lane(0xF7, 0), 0, 1, 0, 0) == 0);
+    assert(neon_shl_reg(rep_lane(0x80, 0), rep_lane(0x80, 0), 0, 0, 0, 0) == rep_lane(0xFF, 0));   /* -128 >> 128 */
+    assert(neon_shl_reg(rep_lane(0x7F, 0), rep_lane(0x80, 0), 0, 0, 0, 0) == 0);                   /* 127 >> 128 */
+    assert(neon_shl_reg(rep_lane(0x7F, 0), rep_lane(0xF8, 0), 0, 0, 0, 0) == 0);                   /* 127 >> 8 */
+
+    /* VRSHL at the width. A right shift by w rounds on the top bit alone: 0x80
+     * by 8 is 0.5, which rounds to 1 unsigned and to 0 signed (-0.5 rounds up).
+     * Past the width it is 0: 0x80 by 9 is 0.25 unsigned, which rounds to 0. */
+    assert(neon_shl_reg(rep_lane(0x80, 0), rep_lane(0xF8, 0), 0, 1, 1, 0) == rep_lane(0x01, 0));
+    assert(neon_shl_reg(rep_lane(0x80, 0), rep_lane(0xF8, 0), 0, 0, 1, 0) == 0);
+    assert(neon_shl_reg(rep_lane(0x7F, 0), rep_lane(0xF8, 0), 0, 0, 1, 0) == 0);
+    assert(neon_shl_reg(rep_lane(0x80, 0), rep_lane(0xF7, 0), 0, 1, 1, 0) == 0);
+
+    /* VRSHL rounding, the values the spec names. 0x7F by 1 is 0x40, and -1 by 1
+     * is 0 (signed). Unsigned 0xFF by 1 is 128, which x + 1 would wrap in 8 bits
+     * to 0 (0xFF + 1 = 0x100), so the rounding must not overflow the lane. */
+    assert(neon_shl_reg(rep_lane(0x7F, 0), rep_lane(0xFF, 0), 0, 0, 1, 0) == rep_lane(0x40, 0));
+    assert(neon_shl_reg(rep_lane(0xFF, 0), rep_lane(0xFF, 0), 0, 0, 1, 0) == 0);
+    assert(neon_shl_reg(rep_lane(0xFF, 0), rep_lane(0xFF, 0), 0, 1, 1, 0) == rep_lane(0x80, 0));
+    assert(neon_shl_reg(rep_lane(0x81, 0), rep_lane(0xFF, 0), 0, 0, 1, 0) == rep_lane(0xC1, 0));
+    assert(neon_shl_reg(rep_lane(0xFFFFFFFF, 2), rep_lane(0xFF, 2), 2, 1, 1, 0) == rep_lane(0x80000000, 2));
+    assert(neon_shl_reg(~0ull, 0xFF, 3, 1, 1, 0) == 0x8000000000000000ull);
+    assert(neon_shl_reg(~0ull, 0xFF, 3, 0, 1, 0) == 0);                    /* -1 rounded by 1 */
+    assert(neon_shl_reg(0x8000000000000001ull, 0xFF, 3, 1, 1, 0) == 0x4000000000000001ull);
+
+    /* Rounding by 64 on 64-bit lanes. Unsigned all-ones is 2^64 - 1, and
+     * (2^64 - 1 + 2^63) >> 64 is 1. The signed values here are -2^63 and
+     * 2^63 - 1, and both round to 0. */
+    assert(neon_shl_reg(~0ull, 0xC0, 3, 1, 1, 0) == 1);
+    assert(neon_shl_reg(0x8000000000000000ull, 0xC0, 3, 0, 1, 0) == 0);
+    assert(neon_shl_reg(0x7FFFFFFFFFFFFFFFull, 0xC0, 3, 0, 1, 0) == 0);
+
+    /* VQSHL, the saturation the spec names. 0x40 << 1 clamps to 0x7F, and 0xC0
+     * (-64) << 1 is exactly -128, which fits. 0xBF (-65) << 1 does not and
+     * clamps to 0x80, where the plain shift gives 0x7E. */
+    assert(neon_shl_reg(rep_lane(0x40, 0), rep_lane(0x01, 0), 0, 0, 0, 1) == rep_lane(0x7F, 0));
+    assert(neon_shl_reg(rep_lane(0xC0, 0), rep_lane(0x01, 0), 0, 0, 0, 1) == rep_lane(0x80, 0));
+    assert(neon_shl_reg(rep_lane(0xBF, 0), rep_lane(0x01, 0), 0, 0, 0, 1) == rep_lane(0x80, 0));
+    assert(neon_shl_reg(rep_lane(0xBF, 0), rep_lane(0x01, 0), 0, 0, 0, 0) == rep_lane(0x7E, 0));
+    /* Unsigned 0x80 << 1 is 256, clamped to 0xFF. */
+    assert(neon_shl_reg(rep_lane(0x80, 0), rep_lane(0x01, 0), 0, 1, 0, 1) == rep_lane(0xFF, 0));
+    /* Zero never saturates, however far it is shifted left. */
+    assert(neon_shl_reg(0, rep_lane(0x7F, 0), 0, 0, 0, 1) == 0);
+    assert(neon_shl_reg(0, rep_lane(0x7F, 0), 0, 1, 0, 1) == 0);
+    /* 1 << 64 on u64 is past the lane, so it clamps to all-ones. -1 << 63 is
+     * -2^63, which fits, and 1 << 63 is 2^63, which clamps to 2^63 - 1. */
+    assert(neon_shl_reg(1, 0x40, 3, 1, 0, 1) == ~0ull);
+    assert(neon_shl_reg(~0ull, 0x3F, 3, 0, 0, 1) == 0x8000000000000000ull);
+    assert(neon_shl_reg(1, 0x3F, 3, 0, 0, 1) == 0x7FFFFFFFFFFFFFFFull);
+    /* Wider lanes: 0x4000 << 1 clamps, and -2^30 << 1 is -2^31, which fits. */
+    assert(neon_shl_reg(rep_lane(0x4000, 1), rep_lane(0x01, 1), 1, 0, 0, 1) == rep_lane(0x7FFF, 1));
+    assert(neon_shl_reg(rep_lane(0xC0000000, 2), rep_lane(0x01, 2), 2, 0, 0, 1) == rep_lane(0x80000000, 2));
+
+    /* VQRSHL: a left shift that clamps, and a right shift that rounds. */
+    assert(neon_shl_reg(rep_lane(0x40, 0), rep_lane(0x01, 0), 0, 0, 1, 1) == rep_lane(0x7F, 0));
+    assert(neon_shl_reg(rep_lane(0x7F, 0), rep_lane(0xFF, 0), 0, 0, 1, 1) == rep_lane(0x40, 0));
+    assert(neon_shl_reg(rep_lane(0xFFFF, 1), rep_lane(0xFF, 1), 1, 1, 1, 1) == rep_lane(0x8000, 1));
+
+    printf("ok   neon shl reg: vshl, vqshl, vrshl, vqrshl by register, amounts, rounding and saturation\n");
+}
+
 /* The widening helpers, against values worked out by hand from the lanes.
  * Every source has a lane with its sign bit set, so each signed result differs
  * from the unsigned one. The 32-bit products 0x80000000 * 0x80000000 are 2^62
@@ -1459,6 +1587,7 @@ int main(void) {
     test_neon_f32_b();
     test_neon_int_c();
     test_neon_cmp_c();
+    test_neon_shl_reg_c();
     test_neon_widen();
     test_neon_shuffle();
     test_neon_ldst();

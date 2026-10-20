@@ -1440,6 +1440,104 @@ static void test_homebrew_forms(void) {
  * with arm-vita-eabi-as and objdump, except the rejects: vtbl with n=31 and
  * len=2 cannot be assembled, so its halfwords come from the layout in
  * decode.c (N=1 for n=31, len=2 in h2 bits 9:8). */
+/* The shifts by register: VSHL, VQSHL, VRSHL and VQRSHL, opc 0100 and 0101 with
+ * B picking the saturating form. Each encoding was taken from arm-vita-eabi-as
+ * and checked by objdump. The assembly is Dd, Dm, Dn: Dm is the value shifted
+ * and Dn the amounts, so vn and vm are asserted apart (vshl.s8 d0, d1, d2 has
+ * vn = 2 and vm = 1). Size 3 is valid for all four, so 64-bit lanes are covered.
+ * The reject is computed from the layout: ef14 1442 has Vd = 1 with Q set, which
+ * the register check refuses. VHADD (opc 0000, B clear) and VPMAX (opc 1010) are
+ * not claimed by these four. */
+static void test_neon_shl_reg_forms(void) {
+    arm_insn in;
+
+    put16(0, 0xEF02); put16(2, 0x0401);                  /* vshl.s8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHL_REG && in.vd == 0 && in.vn == 2 && in.vm == 1 && !in.neon_q && in.neon_size == 0 && !in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vshl.s") == 0);
+    put16(0, 0xFF02); put16(2, 0x0401);                  /* vshl.u8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHL_REG && in.vd == 0 && in.vn == 2 && in.vm == 1 && !in.neon_q && in.neon_size == 0 && in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vshl.u") == 0);
+    put16(0, 0xEF14); put16(2, 0x0442);                  /* vshl.s16 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHL_REG && in.vd == 0 && in.vn == 4 && in.vm == 2 && in.neon_q && in.neon_size == 1 && !in.vfp_unsigned);
+    put16(0, 0xFF62); put16(2, 0x04A1);                  /* vshl.u32 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHL_REG && in.vd == 16 && in.vn == 18 && in.vm == 17 && !in.neon_q && in.neon_size == 2 && in.vfp_unsigned);
+    put16(0, 0xEF74); put16(2, 0x04E2);                  /* vshl.s64 q8, q9, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHL_REG && in.vd == 16 && in.vn == 20 && in.vm == 18 && in.neon_q && in.neon_size == 3 && !in.vfp_unsigned);
+    put16(0, 0xFF35); put16(2, 0x3404);                  /* vshl.u64 d3, d4, d5 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHL_REG && in.vd == 3 && in.vn == 5 && in.vm == 4 && !in.neon_q && in.neon_size == 3 && in.vfp_unsigned);
+    put16(0, 0xEF11); put16(2, 0x0400);                  /* vshl.s16 d0, d0, d1: Vd = Vm */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHL_REG && in.vd == 0 && in.vn == 1 && in.vm == 0 && !in.neon_q && in.neon_size == 1 && !in.vfp_unsigned);
+
+    put16(0, 0xEF02); put16(2, 0x0411);                  /* vqshl.s8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QSHL_REG && in.vd == 0 && in.vn == 2 && in.vm == 1 && !in.neon_q && in.neon_size == 0 && !in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vqshl.s") == 0);
+    put16(0, 0xFF14); put16(2, 0x0452);                  /* vqshl.u16 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QSHL_REG && in.vd == 0 && in.vn == 4 && in.vm == 2 && in.neon_q && in.neon_size == 1 && in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vqshl.u") == 0);
+    put16(0, 0xEF62); put16(2, 0x04B1);                  /* vqshl.s32 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QSHL_REG && in.vd == 16 && in.vn == 18 && in.vm == 17 && !in.neon_q && in.neon_size == 2 && !in.vfp_unsigned);
+    put16(0, 0xFF74); put16(2, 0x04F2);                  /* vqshl.u64 q8, q9, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QSHL_REG && in.vd == 16 && in.vn == 20 && in.vm == 18 && in.neon_q && in.neon_size == 3 && in.vfp_unsigned);
+
+    put16(0, 0xEF02); put16(2, 0x0501);                  /* vrshl.s8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_RSHL_REG && in.vd == 0 && in.vn == 2 && in.vm == 1 && !in.neon_q && in.neon_size == 0 && !in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vrshl.s") == 0);
+    put16(0, 0xFF12); put16(2, 0x0501);                  /* vrshl.u16 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_RSHL_REG && in.vd == 0 && in.vn == 2 && in.vm == 1 && !in.neon_q && in.neon_size == 1 && in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vrshl.u") == 0);
+    put16(0, 0xEF24); put16(2, 0x0542);                  /* vrshl.s32 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_RSHL_REG && in.vd == 0 && in.vn == 4 && in.vm == 2 && in.neon_q && in.neon_size == 2 && !in.vfp_unsigned);
+    put16(0, 0xFF72); put16(2, 0x05A1);                  /* vrshl.u64 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_RSHL_REG && in.vd == 16 && in.vn == 18 && in.vm == 17 && !in.neon_q && in.neon_size == 3 && in.vfp_unsigned);
+
+    put16(0, 0xEF02); put16(2, 0x0511);                  /* vqrshl.s8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QRSHL_REG && in.vd == 0 && in.vn == 2 && in.vm == 1 && !in.neon_q && in.neon_size == 0 && !in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vqrshl.s") == 0);
+    put16(0, 0xFF04); put16(2, 0x0552);                  /* vqrshl.u8 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QRSHL_REG && in.vd == 0 && in.vn == 4 && in.vm == 2 && in.neon_q && in.neon_size == 0 && in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vqrshl.u") == 0);
+    put16(0, 0xEF72); put16(2, 0x05B1);                  /* vqrshl.s64 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QRSHL_REG && in.vd == 16 && in.vn == 18 && in.vm == 17 && !in.neon_q && in.neon_size == 3 && !in.vfp_unsigned);
+    put16(0, 0xFF64); put16(2, 0x05F2);                  /* vqrshl.u32 q8, q9, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QRSHL_REG && in.vd == 16 && in.vn == 20 && in.vm == 18 && in.neon_q && in.neon_size == 2 && in.vfp_unsigned);
+
+    /* Neighbours. VHADD (opc 0000, B clear) and VPMAX (opc 1010, B clear) are
+     * not any of these four. Only that is asserted here, so another family can
+     * claim them later without this test changing. */
+    put16(0, 0xEF01); put16(2, 0x0002);                  /* vhadd.s8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_SHL_REG && in.op != OP_NEON_QSHL_REG && in.op != OP_NEON_RSHL_REG && in.op != OP_NEON_QRSHL_REG);
+    put16(0, 0xEF01); put16(2, 0x0A02);                  /* vpmax.s8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_SHL_REG && in.op != OP_NEON_QSHL_REG && in.op != OP_NEON_RSHL_REG && in.op != OP_NEON_QRSHL_REG);
+
+    /* Reject: a Q register with an odd Vd (d1) is refused by the register check. */
+    put16(0, 0xEF14); put16(2, 0x1442);                  /* vshl.s16 with Vd = 1 and Q set */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+
+    printf("ok   neon shifts by register: vshl, vqshl, vrshl, vqrshl, every size, and the rejects\n");
+}
+
 /* Widening: the three-registers-of-different-lengths group and VSHLL/VMOVL.
  * Each encoding was taken from arm-vita-eabi-as and checked by objdump. The
  * rejects are computed from the layout, and each comment gives the bit that
@@ -2119,6 +2217,7 @@ int main(void) {
     test_neon_ldst_multi();
     test_neon_narrow_forms();
     test_neon_cmp_forms();
+    test_neon_shl_reg_forms();
     test_tables_hints_exclusives();
     printf("all decode tests passed\n");
     return 0;

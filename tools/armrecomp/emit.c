@@ -1286,6 +1286,22 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             break;
         }
 
+        /* Shift by register. The value is vm and the amounts are vn, so the
+         * helper takes them in that order. Each D half reads only its own half
+         * of vm and vn, and Q registers are even-aligned, so a Q store to vd
+         * never lands on a later input of the same instruction. */
+        case OP_NEON_SHL_REG: case OP_NEON_QSHL_REG:
+        case OP_NEON_RSHL_REG: case OP_NEON_QRSHL_REG: {
+            int regs = in->neon_q ? 2 : 1;
+            int rnd = in->op == OP_NEON_RSHL_REG || in->op == OP_NEON_QRSHL_REG;
+            int sat = in->op == OP_NEON_QSHL_REG || in->op == OP_NEON_QRSHL_REG;
+            for (int k = 0; k < regs; k++)
+                fprintf(f, "    neon_setd(%d, neon_shl_reg(neon_getd(%d), neon_getd(%d), %d, %d, %d, %d));\n",
+                        in->vd + k, in->vm + k, in->vn + k, in->neon_size,
+                        in->vfp_unsigned, rnd, sat);
+            break;
+        }
+
         case OP_NEON_SHL: case OP_NEON_SHR: case OP_NEON_SRA: {
             int regs = in->neon_q ? 2 : 1;
             for (int k = 0; k < regs; k++) {

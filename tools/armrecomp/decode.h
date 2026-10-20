@@ -134,6 +134,10 @@ typedef enum {
     OP_NEON_CGT, OP_NEON_CGE,   /* integer compares, all-ones where true; vfp_unsigned */
     OP_NEON_MAX, OP_NEON_MIN,   /* integer max and min; vfp_unsigned picks the signedness */
     OP_NEON_ABD, OP_NEON_ABA,   /* absolute difference; ABA adds it to vd, vfp_unsigned */
+    OP_NEON_SHL_REG, OP_NEON_QSHL_REG,   /* by register: the value is vm, the amounts
+                                            the low byte of each vn lane; vfp_unsigned
+                                            picks the signedness; Q saturates left  */
+    OP_NEON_RSHL_REG, OP_NEON_QRSHL_REG, /* the same, with a rounding right shift   */
     OP_NEON_SHL, OP_NEON_SHR, OP_NEON_SRA, /* by immediate: imm is the amount,
                                    neon_size the lane; SHR and SRA use
                                    vfp_unsigned for the signedness            */
