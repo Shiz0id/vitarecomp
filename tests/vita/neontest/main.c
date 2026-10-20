@@ -5,7 +5,8 @@
  * runs it under stock Vita3K and recompiled, and fails if any "NT" line
  * differs. Each line is d0-d7 after the op (or the 64 bytes a store wrote,
  * with 0xEE where it wrote nothing) and how far r0 moved, which catches a
- * wrong writeback amount. Add a T() line with each new NEON form.
+ * wrong writeback amount. Add a T() line with each new NEON form that stock
+ * Vita3K can run; run.sh fails the sample if stock logs one as undefined.
  */
 #include <psp2/kernel/clib.h>
 #include <psp2/kernel/processmgr.h>
@@ -173,8 +174,8 @@ int main(void) {
     T("vrshl.s8 d, -1",      "vmov.i8 d2, #0xff\n vrshl.s8 d0, d1, d2");
     T("vrshl.u32 q, -1",     "vmov.i8 q2, #0xff\n vrshl.u32 q0, q1, q2");
     T("vrshl.u64 d, -1",     "vmov.i64 d2, #0xff\n vrshl.u64 d0, d1, d2");
-    T("vqrshl.s16 q, 2",     "vmov.i8 q2, #2\n vqrshl.s16 q0, q1, q2");
-    T("vqrshl.u8 q, raw",    "vqrshl.u8 q0, q1, q2");
+    /* No VQRSHL: dynarmic does not implement it (its decoder line is
+     * commented out), so stock skips it and has no result to compare. */
     sceClibPrintf("NT done\n");
     sceKernelExitProcess(0);
     return 0;
