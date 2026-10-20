@@ -73,3 +73,4 @@ generated/
 /third_party/Vita3K/external/xxHash
 /third_party/Vita3K/external/yaml-cpp
 /build-homebrew/
+/.claude/worktrees/
