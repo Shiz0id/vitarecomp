@@ -129,6 +129,37 @@ Excluding NEON, roughly **0.5%** remains, so about **99.4% is reachable without
 touching the vector unit**.
 
 
+### Since bridgetest
+
+Running a module for real (see
+[`VITA3K_BRIDGE.md`](VITA3K_BRIDGE.md#first-run-bridgetest)) added coverage the
+counts above predate:
+
+- **`TBB`/`TBH` switches** are emitted as a C `switch`. The table size is taken
+  only from the guard in front of it (`cmp rI,#k` then `bhi`/`bcs`, in 16- or
+  32-bit form), and every target must land at or past the end of the table. A
+  table without a provable bound stays an indirect transfer. A guessed bound
+  would turn data after the table into code.
+- **IT blocks** are applied everywhere an instruction is looked at: discovery,
+  collection and emit. The architecture rule that 16-bit ALU ops do not set
+  flags inside an IT block changes decode, not just emit.
+- **Exclusives and barriers.** Thumb `LDREX`/`STREX` (B/H/word/D), `CLREX`
+  and `DMB`/`DSB`/`ISB` translate. `src/excl.c` keeps the monitor per thread
+  and implements `STREX` as a compare-and-swap against the value `LDREX` saw.
+  A32 forms still trap.
+- **Interworking veneers.** GNU ld's Thumb→ARM veneers
+  (`bx pc` / `ldr ip,[pc]` / `add pc,ip,pc`) are followed to the import stub
+  they reach, so a call through one binds the firmware function by name.
+- **`bx lr` is a C `return`.**
+
+Known gaps in what *is* translated, recorded so they are not mistaken for
+done:
+
+- flag-setting logical ops do not yet set C from the shifter carry-out;
+- `LSR #0`/`ASR #0` in operand 2 mean a shift by 32, and `ROR #0` means
+  `RRX`. These are not handled yet;
+- a branch into the middle of an IT block loses the block's condition.
+
 ## NEON: a minority of the code, but the majority of what is left
 
 The usual reason given for the Vita being a hard recompilation target is its

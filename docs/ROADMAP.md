@@ -161,7 +161,17 @@ and functions are emitted in address order, so a prefix is not a sample.
       code as a Vita3K CPU backend, imports forwarded to Vita3K's HLE by NID,
       guest memory shared with Vita3K's reservation, thread-local register
       files (`VITARECOMP_THREADED`). Unit-tested against the real headers and
-      clean under TSan. The full Vita3K build with it is not yet run
+      clean under TSan
+- [x] **First end-to-end run through the full Vita3K build.** bridgetest
+      (threads, semaphore, clock, memory blocks, display, file I/O, exit) runs
+      recompiled inside Vita3K with output identical to the JIT, under both the
+      `double-buffer` and `external-host` mappings. It found six silent
+      miscompiles ([`LESSONS.md`](LESSONS.md#a-real-emulator-is-a-better-test-than-a-test))
+- [x] **Thread-safe primitives.** Thumb `LDREX`/`STREX`/`CLREX` on a per-thread
+      monitor, barriers as fences
+- [ ] A32 exclusives; shifter carry-out for flag-setting logical ops;
+      `LSR`/`ASR #0` meaning 32, and `RRX`, in operand 2
+- [ ] Run a commercial module through the bridge
 - [ ] The shallow ~92 of `SceGxm`: state setters, texture accessors, mapping
 - [x] **The link arrangement.** Import defaults are one file per import, built
       as a static library listed after the runtime. A linker pulls an archive
