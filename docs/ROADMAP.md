@@ -125,24 +125,27 @@ obstacle on this platform.
       by bits 14 and 12 of the second halfword; masking 14:12 together
       conflated them. BLX also computes its target from `Align(PC,4)`, not
       `PC`. Import calls bound 3,917 → 18,563; coverage 68.6% → 83.3%
-- [ ] Advanced SIMD (NEON) — 10,716 instructions (0.58%), and now not just the
-      largest remaining bucket but the thing the RUNNING program stops on:
-      everything earlier in the boot path is translated. *Advanced SIMD and NEON are the same instruction
-      set — ARM's formal name and the marketing one — so this is one job.*
-      Landed, about 65 of ~110 mnemonics: integer add/sub/logic/compare/
-      pairwise/VMOVN, immediates, lane and core moves, VLD1/VST1, F32
-      arithmetic, by-scalar, min/max, compare, abs/neg and conversions,
-      integer VMUL/VMLA/VMLS, VQADD/VQSUB, shifts by immediate, the shuffles
-      (VEXT, VREV, VSWP/VTRN/VUZP/VZIP, VDUP lane, VTBL/VTBX), VLD2-4/VST2-4,
-      widening (VADDL/W, VSUBL/W, VMULL, VMLAL/VMLSL, VMOVL/VSHLL) and
-      narrowing (VQMOVN/VQMOVUN, VSHRN and its rounding/saturating forms),
-      integer VCGT/VCGE, VMAX/VMIN and VABD/VABA, VSHL/VQSHL/VRSHL/VQRSHL by
-      register, the compares with zero and integer VABS/VNEG. VQRSHL is
-      checked by unit tests only: dynarmic does not implement it.
-      Left: VLDn/VSTn single-lane and all-lanes, the reciprocal estimates and
-      steps, VQABS/VQNEG, VHADD/VHSUB, VPMAX/VPMIN, VCNT/VCLZ/VCLS, VPADDL/VPADAL, VQDMULH/VQRDMULH, fixed-point VCVT. FPSCR.QC is not
-      modelled. How these tasks are run: `docs/DELEGATING.md`. Each new form is
-      checked against stock Vita3K by `tests/vita/neontest`
+- [x] **Advanced SIMD (NEON): every ARMv7 form translated.** It was 10,716
+      instructions (0.58%), the largest remaining bucket, and the thing the
+      running program stopped on. *Advanced SIMD and NEON are the same
+      instruction set — ARM's formal name and the marketing one — so this was
+      one job.* A sweep checks the claim: every mnemonic × type × operand form
+      that GAS accepts for Cortex-A9, about 4,300 distinct encodings, is linked
+      into a Vita ELF and emitted. No ARMv7 encoding traps. The few that do are
+      FP16 and MVE syntax that GAS mis-encodes for this CPU. Each form is
+      checked against stock Vita3K by `tests/vita/neontest`, except the ones
+      dynarmic does not implement:
+      - VQRSHL;
+      - VADDHN/VRADDHN/VSUBHN/VRSUBHN;
+      - vector VQDMULL;
+      - VQDMLAL/VQDMLSL, vector and by scalar.
+
+      Those were checked against references written independently of the
+      helpers. VRECPE/VRSQRTE was also checked exhaustively over all 2^32
+      inputs for each of the four forms. FPSCR.QC (the sticky saturation
+      flag) is not modelled. VMULL.P64 belongs to the Crypto extension, which
+      the Vita's Cortex-A9 does not have. How the tasks were run:
+      `docs/DELEGATING.md`
 - [ ] ARM (A32) operand decoding — a small minority of this corpus. The A32
       media space is also currently classed `A_UNDEF`, which is wrong: `op == 3`
       with bit 4 set is media, not an undefined encoding

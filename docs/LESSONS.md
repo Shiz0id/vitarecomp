@@ -392,3 +392,32 @@ worktree. A new helper that existed only in a worktree failed to build there.
 Had it been an existing helper with changed behaviour, the old one would have
 been compiled in silently, and the run would have passed while checking the
 wrong code.
+
+## A limit that fails quietly is a miscompile
+
+Eighteen VRECPE/VRSQRTE lines took neontest's `main` past 8192 instructions,
+and the last two tests disappeared. Nothing trapped. The app simply exited
+with a code that was a string pointer. The emitter tracked the addresses it
+had collected in a fixed table of 8192 slots. Once the table was full, it
+answered "already emitted" for every new address, so the walk ended there.
+The body was printed in address order with nothing checking for a gap, so the
+C ran off the end of `main` and returned to its caller.
+
+The table grows now. The bigger fix is the gap check: after every instruction
+that can fall through, the emitter checks that the next address was
+collected. If it wasn't, the code enters the function there, when that
+address is one, and otherwise traps with a name. Whatever cuts a body short
+in future, whether a decode failure, the extent bound or a limit, now says
+so. That check found one more site in the samples, a fragment in
+hello_cpp_world that used to return silently.
+
+Unit tests could not have caught this, because no unit test builds a function
+that large. The sample did, only because it kept growing. A test program that
+grows with the work is a stress test nobody had to plan.
+
+The same push finished NEON. "Every family has a task" is not a check, so
+the claim was tested instead. Every mnemonic, type and operand shape was
+generated, and GAS decided which combinations are real. The surviving 4,300
+encodings were linked into one ELF and emitted. One form still trapped:
+VSHLL with a shift equal to the element size, which has an encoding of its
+own. No list written by hand had it.

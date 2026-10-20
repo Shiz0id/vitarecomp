@@ -3,13 +3,18 @@
 Much of the remaining work is the same shape again and again: one family of
 instructions → decode, a runtime helper, an emitter case and tests. That work
 is handed to a smaller, cheaper model as a tightly scoped task, and a reviewer
-checks it before anything reaches the branch. Ten NEON tasks have landed
+checks it before anything reaches the branch. Seventeen NEON tasks landed
 this way: F32 arithmetic in two parts, the integer multiply/saturate/shift set,
 the shuffles, VLD2–4/VST2–4, the widening and narrowing forms, which
 were the first pair run in parallel, the integer compares, max/min and
 absolute difference, and a second parallel pair: shifts by register and the
 compares with zero. With disjoint insertion points that pair
-rebased onto each other with no conflicts. Each task cost well under a dollar, and the
+rebased onto each other with no conflicts. Then, in pairs: halving add and
+pairwise max/min, the two-register misc forms, shifts by immediate, the
+single-lane and all-lanes loads and stores, the narrowing add/sub with
+VABAL/VABDL and the polynomial multiplies, the saturating doubling
+multiplies, and the remaining F32 forms. VRECPE/VRSQRTE and the last form,
+VSHLL by the element size, were done by hand. Each task cost well under a dollar, and the
 reviewer rejected none outright. Review did catch errors in the reviewer's own briefs. It also
 caught one gap the agent could not have seen, which is how `neontest` came about.
 
@@ -90,6 +95,11 @@ still edit the same files, so:
   the change and the other is told not to touch it, and why.
 - **Merge one, then rebase the other onto it and rerun its tests** before
   landing it.
+- **Expect conflicts in the shared lists anyway.** Insertion points keep the
+  logic apart, but both tasks still append to the op enum and to the `main`
+  lists of `test_decode.c` and `test_runtime.c`. When both append at the end
+  of the same list, the rebase conflicts. The resolution is to keep both sides.
+  Check afterwards that each test function is called exactly once.
 
 ## 5. Review
 
