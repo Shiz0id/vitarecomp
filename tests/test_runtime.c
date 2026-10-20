@@ -901,6 +901,162 @@ static void test_neon_int_c(void) {
     printf("ok   neon int: wrapping mul/mla/mls, vqadd/vqsub clamp at both ends, shifts by immediate, vsra wrap\n");
 }
 
+/* Pack n lanes of w bits, lane 0 lowest, from v. A copy of pack_lanes below,
+ * which this block cannot reach since it is defined after test_neon_int_c. */
+static uint64_t imm_pack(const uint64_t *v, int w, int n) {
+    uint64_t mask = w == 64 ? ~0ull : (1ull << w) - 1, r = 0;
+    for (int i = 0; i < n; i++)
+        r |= (v[i] & mask) << (i * w);
+    return r;
+}
+
+/* The shifts by immediate beyond VSHR, VSRA and VSHL, against values worked
+ * out from the definitions, not from the helpers. A byte that reads one way
+ * signed and another unsigned is in most words, so each result is checked
+ * for both where the top bit is set. The mixed words put a different case in
+ * each lane. */
+static void test_neon_shift_imm_c(void) {
+    /* VRSHR rounds half up: (x + 2^(R-1)) >> R. 255 >> 1 is 127.5, rounded
+     * to 128. As a signed byte 0xFF is -1, and -1 >> 1 is -0.5, rounded to 0. */
+    assert(neon_rshr(rep_lane(0xFF, 0), 1, 0, 1) == rep_lane(0x80, 0));
+    assert(neon_rshr(rep_lane(0xFF, 0), 1, 0, 0) == 0);
+    assert(neon_rshr(rep_lane(0x7F, 0), 1, 0, 0) == rep_lane(0x40, 0));   /* 63.5 -> 64 */
+    assert(neon_rshr(rep_lane(0xFD, 0), 1, 0, 0) == rep_lane(0xFF, 0));   /* -1.5 -> -1 */
+    assert(neon_rshr(rep_lane(0x80, 0), 1, 0, 0) == rep_lane(0xC0, 0));   /* -64 */
+    /* R = esize: the top bit alone for unsigned lanes, 0 for signed. */
+    assert(neon_rshr(rep_lane(0xFF, 0), 8, 0, 1) == rep_lane(0x01, 0));   /* 0.996 + 0.5 -> 1 */
+    assert(neon_rshr(rep_lane(0x7F, 0), 8, 0, 1) == 0);
+    assert(neon_rshr(rep_lane(0x80, 0), 8, 0, 0) == 0);                   /* -0.5 + 0.5 -> 0 */
+    assert(neon_rshr(rep_lane(0xFF, 0), 8, 0, 0) == 0);
+    assert(neon_rshr(rep_lane(0x8000, 1), 16, 1, 1) == rep_lane(0x0001, 1));
+    assert(neon_rshr(rep_lane(0x8000, 1), 16, 1, 0) == 0);
+    assert(neon_rshr(rep_lane(0xFFFF, 1), 1, 1, 0) == 0);
+    assert(neon_rshr(rep_lane(0xFFFF, 1), 1, 1, 1) == rep_lane(0x8000, 1));
+    assert(neon_rshr(rep_lane(0xFFFFFFFF, 2), 1, 2, 1) == rep_lane(0x80000000, 2));
+    assert(neon_rshr(rep_lane(0x80000000, 2), 32, 2, 0) == 0);
+    assert(neon_rshr(rep_lane(0x80000000, 2), 32, 2, 1) == rep_lane(0x00000001, 2));
+    assert(neon_rshr(~0ull, 1, 3, 1) == 0x8000000000000000ull);            /* (2^64 - 1 + 1) / 2 */
+    assert(neon_rshr(~0ull, 1, 3, 0) == 0);                                /* -1 >> 1 */
+    assert(neon_rshr(0x8000000000000000ull, 64, 3, 0) == 0);
+    assert(neon_rshr(0x8000000000000000ull, 64, 3, 1) == 1);
+    /* Mixed bytes, R = 2. Signed: 1 2 3 -1 -128 127 -2 0. Unsigned: the same bits. */
+    uint64_t rv[8] = { 0x01, 0x02, 0x03, 0xFF, 0x80, 0x7F, 0xFE, 0x00 };
+    uint64_t rs[8] = { 0x00, 0x01, 0x01, 0x00, 0xE0, 0x20, 0x00, 0x00 };
+    uint64_t ru[8] = { 0x00, 0x01, 0x01, 0x40, 0x20, 0x20, 0x40, 0x00 };
+    assert(neon_rshr(imm_pack(rv, 8, 8), 2, 0, 0) == imm_pack(rs, 8, 8));
+    assert(neon_rshr(imm_pack(rv, 8, 8), 2, 0, 1) == imm_pack(ru, 8, 8));
+
+    /* VRSRA wraps in the lane: 255 + 1 is 0. 16 + 128 for an unsigned 255 >> 1. */
+    assert(neon_rsra(rep_lane(0xFF, 0), rep_lane(0x01, 0), 1, 0, 1) == 0);
+    assert(neon_rsra(rep_lane(0x10, 0), rep_lane(0xFF, 0), 1, 0, 0) == rep_lane(0x10, 0));
+    assert(neon_rsra(rep_lane(0x10, 0), rep_lane(0xFF, 0), 1, 0, 1) == rep_lane(0x90, 0));
+    assert(neon_rsra(~0ull, 2, 1, 3, 1) == 0);
+    uint64_t ad[4] = { 0x0001, 0xFFFF, 0, 0 }, am[4] = { 0x0003, 0x8000, 0, 0 };
+    uint64_t ae[4] = { 0x0003, 0xBFFF, 0, 0 };     /* 3 >> 1 = 2; -32768 >> 1 = -16384 */
+    assert(neon_rsra(imm_pack(ad, 16, 2), imm_pack(am, 16, 2), 1, 1, 0) == imm_pack(ae, 16, 2));
+
+    /* VSRI keeps the top amt bits of d and fills the rest from m >> amt.
+     * 0xAB top 3 bits are 101, so 0xA0, and 0xFF >> 3 is 0x1F: 0xBF. */
+    assert(neon_sri(rep_lane(0xAB, 0), rep_lane(0xFF, 0), 3, 0) == rep_lane(0xBF, 0));
+    assert(neon_sri(rep_lane(0x0F, 0), rep_lane(0x80, 0), 1, 0) == rep_lane(0x40, 0));
+    assert(neon_sri(rep_lane(0x5A, 0), rep_lane(0xFF, 0), 8, 0) == rep_lane(0x5A, 0));  /* R = esize */
+    assert(neon_sri(rep_lane(0x1234, 1), rep_lane(0xFFFF, 1), 4, 1) == rep_lane(0x1FFF, 1));
+    assert(neon_sri(rep_lane(0x12345678, 2), rep_lane(0xFFFFFFFF, 2), 32, 2) == rep_lane(0x12345678, 2));
+    assert(neon_sri(rep_lane(0x12345678, 2), rep_lane(0xFFFFFFFF, 2), 31, 2) == rep_lane(0x12345679, 2));  /* top 31 kept, | 1 */
+    uint64_t sd = 0x0123456789ABCDEFull, sm = 0xFEDCBA9876543210ull;
+    assert(neon_sri(sd, sm, 64, 3) == sd);
+    assert(neon_sri(sd, sm, 8, 3) == 0x01FEDCBA98765432ull);
+
+    /* VSLI keeps the bottom amt bits of d and fills the rest from m << amt. */
+    assert(neon_sli(rep_lane(0xAB, 0), rep_lane(0x0F, 0), 4, 0) == rep_lane(0xFB, 0));
+    assert(neon_sli(rep_lane(0xAB, 0), rep_lane(0x5C, 0), 0, 0) == rep_lane(0x5C, 0));  /* 0 copies m */
+    assert(neon_sli(rep_lane(0x7F, 0), rep_lane(0x03, 0), 7, 0) == rep_lane(0xFF, 0));  /* 3 << 7 keeps bit 7 only */
+    assert(neon_sli(rep_lane(0x1234, 1), rep_lane(0x0001, 1), 15, 1) == rep_lane(0x9234, 1));
+    assert(neon_sli(0x0123456789ABCDEFull, 1, 63, 3) == 0x8123456789ABCDEFull);
+    assert(neon_sli(~0ull, 0x8000000000000001ull, 1, 3) == 0x3ull);                    /* bit 0 of d, m << 1 */
+
+    /* VQSHLU: a negative byte gives 0, and an unsigned result past 255 is 255. */
+    assert(neon_qshlu_imm(rep_lane(0x40, 0), 2, 0) == rep_lane(0xFF, 0));   /* 64 << 2 = 256 */
+    assert(neon_qshlu_imm(rep_lane(0x01, 0), 7, 0) == rep_lane(0x80, 0));
+    assert(neon_qshlu_imm(rep_lane(0xFF, 0), 0, 0) == 0);                   /* -1 */
+    assert(neon_qshlu_imm(rep_lane(0x80, 0), 7, 0) == 0);                   /* -128 */
+    assert(neon_qshlu_imm(rep_lane(0x7F, 0), 1, 0) == rep_lane(0xFE, 0));
+    assert(neon_qshlu_imm(rep_lane(0x03, 0), 6, 0) == rep_lane(0xC0, 0));
+    assert(neon_qshlu_imm(rep_lane(0x04, 0), 6, 0) == rep_lane(0xFF, 0));
+    assert(neon_qshlu_imm(rep_lane(0x7FFF, 1), 1, 1) == rep_lane(0xFFFE, 1));
+    assert(neon_qshlu_imm(rep_lane(0x4000, 1), 2, 1) == rep_lane(0xFFFF, 1));
+    assert(neon_qshlu_imm(rep_lane(0x8000, 1), 1, 1) == 0);
+    assert(neon_qshlu_imm(rep_lane(0x7FFFFFFF, 2), 1, 2) == rep_lane(0xFFFFFFFE, 2));
+    assert(neon_qshlu_imm(rep_lane(0x7FFFFFFF, 2), 2, 2) == rep_lane(0xFFFFFFFF, 2));
+    assert(neon_qshlu_imm(0x4000000000000000ull, 1, 3) == 0x8000000000000000ull);
+    assert(neon_qshlu_imm(0x4000000000000000ull, 2, 3) == ~0ull);
+    assert(neon_qshlu_imm(0x8000000000000000ull, 1, 3) == 0);
+    assert(neon_qshlu_imm(1, 63, 3) == 0x8000000000000000ull);
+    uint64_t qu[8] = { 0x01, 0xFF, 0x40, 0x00, 0x7F, 0x80, 0x03, 0x20 };
+    uint64_t qe[8] = { 0x04, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0x0C, 0x80 };
+    assert(neon_qshlu_imm(imm_pack(qu, 8, 8), 2, 0) == imm_pack(qe, 8, 8));
+
+    /* VQSHL: signed saturates to -128..127, unsigned to 0..255. */
+    assert(neon_qshl_imm(rep_lane(0x40, 0), 1, 0, 0) == rep_lane(0x7F, 0));   /* 128 */
+    assert(neon_qshl_imm(rep_lane(0xC0, 0), 1, 0, 0) == rep_lane(0x80, 0));   /* -128 fits */
+    assert(neon_qshl_imm(rep_lane(0xBF, 0), 1, 0, 0) == rep_lane(0x80, 0));   /* -130 */
+    assert(neon_qshl_imm(rep_lane(0x01, 0), 7, 0, 0) == rep_lane(0x7F, 0));   /* 128 */
+    assert(neon_qshl_imm(rep_lane(0xFF, 0), 7, 0, 0) == rep_lane(0x80, 0));   /* -128 */
+    assert(neon_qshl_imm(rep_lane(0x80, 0), 0, 0, 0) == rep_lane(0x80, 0));
+    assert(neon_qshl_imm(rep_lane(0x80, 0), 1, 0, 1) == rep_lane(0xFF, 0));   /* 256 */
+    assert(neon_qshl_imm(rep_lane(0x7F, 0), 1, 0, 1) == rep_lane(0xFE, 0));
+    assert(neon_qshl_imm(rep_lane(0x01, 0), 7, 0, 1) == rep_lane(0x80, 0));
+    assert(neon_qshl_imm(rep_lane(0xFF, 0), 1, 0, 1) == rep_lane(0xFF, 0));
+    assert(neon_qshl_imm(rep_lane(0x4000, 1), 1, 1, 0) == rep_lane(0x7FFF, 1));
+    assert(neon_qshl_imm(rep_lane(0xC000, 1), 1, 1, 0) == rep_lane(0x8000, 1));
+    assert(neon_qshl_imm(rep_lane(0x80000000, 2), 1, 2, 1) == rep_lane(0xFFFFFFFF, 2));
+    assert(neon_qshl_imm(rep_lane(0x40000000, 2), 1, 2, 0) == rep_lane(0x7FFFFFFF, 2));
+    assert(neon_qshl_imm(0x4000000000000000ull, 1, 3, 0) == 0x7FFFFFFFFFFFFFFFull);
+    assert(neon_qshl_imm(0xC000000000000000ull, 1, 3, 0) == 0x8000000000000000ull);
+    assert(neon_qshl_imm(0x8000000000000000ull, 1, 3, 1) == ~0ull);
+    assert(neon_qshl_imm(1, 63, 3, 1) == 0x8000000000000000ull);
+    uint64_t sq[8] = { 0x40, 0xC0, 0x01, 0x7F, 0x80, 0x3F, 0xFF, 0x00 };
+    uint64_t sqe[8] = { 0x7F, 0x80, 0x02, 0x7F, 0x80, 0x7E, 0xFE, 0x00 };
+    assert(neon_qshl_imm(imm_pack(sq, 8, 8), 1, 0, 0) == imm_pack(sqe, 8, 8));
+
+    /* Float to fixed: x * 2^fbits, toward zero, saturated, NaN to 0. */
+    assert(neon_f32_to_fixed(f32_bits(1.5f), 1, 0) == 3);
+    assert(neon_f32_to_fixed(f32_bits(-1.75f), 2, 0) == 0xFFFFFFF9u);          /* -7 */
+    assert(neon_f32_to_fixed(f32_bits(2147483648.0f), 1, 0) == 0x7FFFFFFFu);   /* 2^32 saturates */
+    assert(neon_f32_to_fixed(f32_bits(2147483648.0f), 1, 1) == 0xFFFFFFFFu);
+    assert(neon_f32_to_fixed(f32_bits(-1073741824.0f), 1, 0) == 0x80000000u); /* -2^31 is in range */
+    assert(neon_f32_to_fixed(0x7FC00000u, 1, 0) == 0);                         /* NaN */
+    assert(neon_f32_to_fixed(0xFFC00000u, 1, 1) == 0);
+    assert(neon_f32_to_fixed(f32_bits(-1.0f), 4, 1) == 0);                     /* unsigned negative */
+    assert(neon_f32_to_fixed(f32_bits(0.75f), 1, 0) == 1);                     /* 1.5 toward zero */
+    assert(neon_f32_to_fixed(f32_bits(-0.75f), 1, 0) == 0xFFFFFFFFu);          /* -1.5 toward zero: -1 */
+    assert(neon_f32_to_fixed(f32_bits(0.5f), 32, 0) == 0x7FFFFFFFu);           /* 2^31 */
+    assert(neon_f32_to_fixed(f32_bits(0.5f), 32, 1) == 0x80000000u);
+    assert(neon_f32_to_fixed(0x7F800000u, 1, 0) == 0x7FFFFFFFu);               /* +inf */
+    assert(neon_f32_to_fixed(0xFF800000u, 1, 0) == 0x80000000u);               /* -inf */
+    assert(neon_f32_to_fixed(0xFF800000u, 1, 1) == 0);
+    assert(neon_f2fixed(neon_pack32(f32_bits(1.5f), f32_bits(-1.75f)), 2, 0)
+           == neon_pack32(6u, 0xFFFFFFF9u));
+
+    /* Fixed to float: v / 2^fbits, rounded once, to nearest even. */
+    assert(neon_fixed_to_f32(3, 1, 0) == f32_bits(1.5f));
+    assert(neon_fixed_to_f32(0xFFFFFFFFu, 1, 0) == f32_bits(-0.5f));          /* -1 / 2 */
+    assert(neon_fixed_to_f32(0x80000000u, 31, 0) == f32_bits(-1.0f));
+    assert(neon_fixed_to_f32(0xFFFFFFFFu, 32, 1) == f32_bits(1.0f));          /* just under 1 */
+    assert(neon_fixed_to_f32(0x80000000u, 31, 1) == f32_bits(1.0f));          /* 2^31 / 2^31 */
+    assert(neon_fixed_to_f32(0x00000001u, 32, 1) == f32_bits(0x1p-32f));
+    assert(neon_fixed_to_f32(0, 16, 1) == 0);
+    /* 2^24 + 0.5 rounds down to 2^24; 2^24 + 1 is a tie and rounds to the even
+     * mantissa, 2^24; 2^24 + 3 is a tie between 2^24 + 2 (odd) and 2^24 + 4. */
+    assert(neon_fixed_to_f32(0x2000001u, 1, 1) == f32_bits(16777216.0f));
+    assert(neon_fixed_to_f32(0x2000002u, 1, 1) == f32_bits(16777216.0f));
+    assert(neon_fixed_to_f32(0x2000006u, 1, 1) == f32_bits(16777220.0f));
+    assert(neon_fixed2f(neon_pack32(3u, 0xFFFFFFF9u), 1, 0)
+           == neon_pack32(f32_bits(1.5f), f32_bits(-3.5f)));
+
+    printf("ok   neon shifts by immediate: vrshr/vrsra, vsri/vsli, vqshlu/vqshl, fixed VCVT, the lane edges\n");
+}
+
 /* Pack n lanes of w bits, lane 0 lowest, from v. */
 static uint64_t pack_lanes(const uint64_t *v, int w, int n) {
     uint64_t r = 0;
@@ -1971,6 +2127,7 @@ int main(void) {
     test_neon_f32();
     test_neon_f32_b();
     test_neon_int_c();
+    test_neon_shift_imm_c();
     test_neon_cmp_c();
     test_neon_shl_reg_c();
     test_neon_halving_c();

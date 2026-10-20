@@ -156,6 +156,17 @@ typedef enum {
     OP_NEON_SHL, OP_NEON_SHR, OP_NEON_SRA, /* by immediate: imm is the amount,
                                    neon_size the lane; SHR and SRA use
                                    vfp_unsigned for the signedness            */
+    OP_NEON_RSHR, OP_NEON_RSRA, /* rounding shift right by immediate, as SHR and
+                                   SRA (RSRA adds it to vd); vfp_unsigned      */
+    OP_NEON_SRI, OP_NEON_SLI,   /* shift right and left insert: imm is the amount,
+                                   vd is read as well as written               */
+    OP_NEON_QSHLU,              /* saturating left shift, signed source and
+                                   unsigned result; imm is the amount           */
+    OP_NEON_QSHL_IMM,           /* saturating left shift by immediate, vfp_unsigned
+                                   the signedness of source and result         */
+    OP_NEON_CVT_FIXED_TO_F, OP_NEON_CVT_F_TO_FIXED, /* fixed-point VCVT: imm is
+                                   fbits (1..32), vfp_unsigned the integer's
+                                   signedness                                  */
     OP_NEON_ADDL, OP_NEON_SUBL, /* widening: vd (a Q pair) = vn ext +/- vm ext,
                                    vn and vm D registers, neon_size the SOURCE
                                    lane, vfp_unsigned the signedness           */

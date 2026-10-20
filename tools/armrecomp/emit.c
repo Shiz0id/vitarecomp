@@ -1412,6 +1412,47 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             break;
         }
 
+        /* Rounding shifts, insert, saturating left shift by immediate, and the
+         * fixed-point VCVT. VRSRA, SRI and SLI read vd as well as write it, and
+         * each D half reads only its own half, as in the cases above. */
+        case OP_NEON_RSHR: case OP_NEON_RSRA: case OP_NEON_SRI: case OP_NEON_SLI:
+        case OP_NEON_QSHLU: case OP_NEON_QSHL_IMM:
+        case OP_NEON_CVT_FIXED_TO_F: case OP_NEON_CVT_F_TO_FIXED: {
+            int regs = in->neon_q ? 2 : 1;
+            for (int k = 0; k < regs; k++) {
+                int d = in->vd + k, m = in->vm + k;
+                unsigned imm = (unsigned)in->imm;
+                int sz = in->neon_size, u = in->vfp_unsigned;
+                switch (in->op) {
+                    case OP_NEON_RSHR:
+                        fprintf(f, "    neon_setd(%d, neon_rshr(neon_getd(%d), %u, %d, %d));\n", d, m, imm, sz, u);
+                        break;
+                    case OP_NEON_RSRA:
+                        fprintf(f, "    neon_setd(%d, neon_rsra(neon_getd(%d), neon_getd(%d), %u, %d, %d));\n", d, d, m, imm, sz, u);
+                        break;
+                    case OP_NEON_SRI:
+                        fprintf(f, "    neon_setd(%d, neon_sri(neon_getd(%d), neon_getd(%d), %u, %d));\n", d, d, m, imm, sz);
+                        break;
+                    case OP_NEON_SLI:
+                        fprintf(f, "    neon_setd(%d, neon_sli(neon_getd(%d), neon_getd(%d), %u, %d));\n", d, d, m, imm, sz);
+                        break;
+                    case OP_NEON_QSHLU:
+                        fprintf(f, "    neon_setd(%d, neon_qshlu_imm(neon_getd(%d), %u, %d));\n", d, m, imm, sz);
+                        break;
+                    case OP_NEON_QSHL_IMM:
+                        fprintf(f, "    neon_setd(%d, neon_qshl_imm(neon_getd(%d), %u, %d, %d));\n", d, m, imm, sz, u);
+                        break;
+                    case OP_NEON_CVT_FIXED_TO_F:
+                        fprintf(f, "    neon_setd(%d, neon_fixed2f(neon_getd(%d), %u, %d));\n", d, m, imm, u);
+                        break;
+                    default:   /* OP_NEON_CVT_F_TO_FIXED */
+                        fprintf(f, "    neon_setd(%d, neon_f2fixed(neon_getd(%d), %u, %d));\n", d, m, imm, u);
+                        break;
+                }
+            }
+            break;
+        }
+
         case OP_NEON_IMM: {
             int regs = in->neon_q ? 2 : 1;
             for (int k = 0; k < regs; k++) {

@@ -688,6 +688,121 @@ static inline uint64_t neon_sra(uint64_t d, uint64_t m, int amt, int size, int i
     return neon_add(d, neon_shr(m, amt, size, is_unsigned), size);
 }
 
+/* VRSHR by immediate, 1 <= amt <= lane width: each lane is the rounding right
+ * shift of neon_shl_lane, the negative-amount half of VRSHL by register. It
+ * is floor(x / 2^amt + 1/2) exactly, with the lane's signedness. amt = w gives
+ * the top bit for unsigned lanes and 0 for signed ones. */
+static inline uint64_t neon_rshr(uint64_t n, int amt, int size, int is_unsigned) {
+    int w = 8 << size;
+    uint64_t r = 0;
+    for (int i = 0; i < 64 / w; i++)
+        r |= neon_shl_lane(neon_lane_of(n, size, i), -amt, w, is_unsigned, 1, 0) << (i * w);
+    return r;
+}
+
+/* VRSRA: each lane of m rounding-shifted as VRSHR does, added to d, wrapping. */
+static inline uint64_t neon_rsra(uint64_t d, uint64_t m, int amt, int size, int is_unsigned) {
+    return neon_add(d, neon_rshr(m, amt, size, is_unsigned), size);
+}
+
+/* VSRI: each lane keeps its top amt bits from d, and the lane of m shifted
+ * right logically by amt fills the bits below them. The keep mask is the lane
+ * mask shifted right, complemented: ~(mask >> amt) selects the top amt bits.
+ * amt = w (the full lane) inserts nothing, so d is returned unchanged. The
+ * branch is needed: at 64 bits mask >> 64 is a shift by the width of the
+ * type, which is undefined C. */
+static inline uint64_t neon_sri(uint64_t d, uint64_t m, int amt, int size) {
+    int w = 8 << size;
+    uint64_t mask = neon_lmask(size), r = 0;
+    for (int i = 0; i < 64 / w; i++) {
+        uint64_t dl = neon_lane_of(d, size, i), x;
+        if (amt >= w) x = dl;
+        else x = (dl & ~(mask >> amt) & mask)
+               | neon_shl_lane(neon_lane_of(m, size, i), -amt, w, 1, 0, 0);
+        r |= x << (i * w);
+    }
+    return r;
+}
+
+/* VSLI: each lane keeps its bottom amt bits from d, and the lane of m shifted
+ * left by amt, within the lane, fills the bits above them. The mask of bits at
+ * and above amt is the lane mask shifted left, so amt 0 clears all of d's
+ * bits and copies m. amt is 0 to w-1, so no shift reaches the lane width. */
+static inline uint64_t neon_sli(uint64_t d, uint64_t m, int amt, int size) {
+    int w = 8 << size;
+    uint64_t mask = neon_lmask(size), r = 0;
+    for (int i = 0; i < 64 / w; i++) {
+        uint64_t dl = neon_lane_of(d, size, i);
+        uint64_t x = (dl & ~((mask << amt) & mask) & mask)
+                   | neon_shl_lane(neon_lane_of(m, size, i), amt, w, 1, 0, 0);
+        r |= x << (i * w);
+    }
+    return r;
+}
+
+/* VQSHL by immediate, 0 <= amt < w: the saturating left shift of neon_shl_lane.
+ * is_unsigned picks the signedness of both the source and the result, and a
+ * result past the lane's range clamps to its limit (see neon_shl_lane). */
+static inline uint64_t neon_qshl_imm(uint64_t m, int amt, int size, int is_unsigned) {
+    int w = 8 << size;
+    uint64_t r = 0;
+    for (int i = 0; i < 64 / w; i++)
+        r |= neon_shl_lane(neon_lane_of(m, size, i), amt, w, is_unsigned, 0, 1) << (i * w);
+    return r;
+}
+
+/* VQSHLU: the source lane is signed, the result unsigned. A negative lane gives
+ * 0, since no unsigned value is below zero. A positive lane is an unsigned
+ * value already, so it is shifted as one, saturating to the lane's all-ones. */
+static inline uint64_t neon_qshlu_imm(uint64_t m, int amt, int size) {
+    int w = 8 << size;
+    uint64_t r = 0;
+    for (int i = 0; i < 64 / w; i++) {
+        uint64_t x = neon_lane_of(m, size, i);
+        uint64_t y = ((x >> (w - 1)) & 1) ? 0 : neon_shl_lane(x, amt, w, 1, 0, 1);
+        r |= y << (i * w);
+    }
+    return r;
+}
+
+/* F32 to S32 or U32 with fbits fraction bits: x * 2^fbits, rounded toward zero
+ * and saturated to the 32-bit range. A float has 24 significant bits and fbits
+ * is at most 32, so the product is exact in double, and truncation is the only
+ * rounding. NaN gives 0. Infinities saturate like any out-of-range value. */
+static inline uint32_t neon_f32_to_fixed(uint32_t bits, int fbits, int is_unsigned) {
+    float f = neon_f32_in(bits);
+    if (f != f) return 0;                                   /* NaN */
+    double x = (double)f * (double)(1ull << fbits);
+    if (is_unsigned) {
+        if (x < 0.0) return 0;                              /* negatives and -0 */
+        if (x >= 4294967296.0) return 0xFFFFFFFFu;
+        return (uint32_t)x;
+    }
+    if (x >= 2147483648.0) return 0x7FFFFFFFu;
+    if (x < -2147483648.0) return 0x80000000u;              /* -2^31 itself is in range */
+    return (uint32_t)(int32_t)x;
+}
+
+/* S32 or U32 with fbits fraction bits to F32: v / 2^fbits. The integer and the
+ * power of two are both exact in double, and the division by a power of two is
+ * exact too, so the one rounding is the conversion to float, which rounds to
+ * nearest, ties to even. The smallest result is 2^-32, a normal float, so the
+ * flush in neon_f32_out has nothing to do. */
+static inline uint32_t neon_fixed_to_f32(uint32_t v, int fbits, int is_unsigned) {
+    double x = is_unsigned ? (double)v : (double)(int32_t)v;
+    return neon_f32_out((float)(x / (double)(1ull << fbits)));
+}
+
+static inline uint64_t neon_f2fixed(uint64_t x, int fbits, int is_unsigned) {
+    return neon_pack32(neon_f32_to_fixed(neon_lo32(x), fbits, is_unsigned),
+                       neon_f32_to_fixed(neon_hi32(x), fbits, is_unsigned));
+}
+
+static inline uint64_t neon_fixed2f(uint64_t x, int fbits, int is_unsigned) {
+    return neon_pack32(neon_fixed_to_f32(neon_lo32(x), fbits, is_unsigned),
+                       neon_fixed_to_f32(neon_hi32(x), fbits, is_unsigned));
+}
+
 /* --- Advanced SIMD widening ------------------------------------------------
  *
  * The three-registers-of-different-lengths group and VSHLL/VMOVL. A source

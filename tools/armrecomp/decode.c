@@ -1155,6 +1155,47 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
             o->op = OP_NEON_SHLL;
             o->imm = (uint32_t)(v - esize);
             set(o, A_SIMD, nm[U][o->imm == 0][size]);
+        } else if (opc == 0x2 || opc == 0x3) {             /* VRSHR, VRSRA */
+            if (Q && ((d | m) & 1)) return 0;
+            o->op = opc == 0x2 ? OP_NEON_RSHR : OP_NEON_RSRA;
+            o->imm = (uint32_t)(2 * esize - v);
+            if (opc == 0x2)
+                set(o, A_SIMD, U ? "vrshr.u" : "vrshr.s");
+            else
+                set(o, A_SIMD, U ? "vrsra.u" : "vrsra.s");
+        } else if (opc == 0x4 && U) {                      /* VSRI (U clear is not a form) */
+            if (Q && ((d | m) & 1)) return 0;
+            o->op = OP_NEON_SRI;
+            o->imm = (uint32_t)(2 * esize - v);
+            set(o, A_SIMD, "vsri.i");
+        } else if (opc == 0x5 && U) {                      /* VSLI (VSHL is U clear) */
+            if (Q && ((d | m) & 1)) return 0;
+            o->op = OP_NEON_SLI;
+            o->imm = (uint32_t)(v - esize);
+            set(o, A_SIMD, "vsli.i");
+        } else if (opc == 0x6 && U) {                      /* VQSHLU (U clear is not a form) */
+            if (Q && ((d | m) & 1)) return 0;
+            o->op = OP_NEON_QSHLU;
+            o->imm = (uint32_t)(v - esize);
+            set(o, A_SIMD, "vqshlu.s");
+        } else if (opc == 0x7) {                           /* VQSHL */
+            if (Q && ((d | m) & 1)) return 0;
+            o->op = OP_NEON_QSHL_IMM;
+            o->imm = (uint32_t)(v - esize);
+            set(o, A_SIMD, U ? "vqshl.u" : "vqshl.s");
+        } else if ((opc == 0xE || opc == 0xF) && v >= 32 && v < 64) {
+            /* Fixed-point VCVT works on 32-bit lanes only. v is 32..63, which
+             * is L clear with imm6 bit 5 set, so size is 2 by the derivation
+             * above. fbits is 64 - v, 1..32. v under 32 is UNDEFINED, and L set
+             * would be a 64-bit lane that VCVT does not have; both fall through
+             * to the reject. */
+            if (Q && ((d | m) & 1)) return 0;
+            o->op = opc == 0xE ? OP_NEON_CVT_FIXED_TO_F : OP_NEON_CVT_F_TO_FIXED;
+            o->imm = (uint32_t)(64 - v);
+            if (opc == 0xE)
+                set(o, A_SIMD, U ? "vcvt.f32.u32" : "vcvt.f32.s32");
+            else
+                set(o, A_SIMD, U ? "vcvt.u32.f32" : "vcvt.s32.f32");
         } else {
             return 0;
         }

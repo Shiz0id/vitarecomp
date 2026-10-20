@@ -1410,8 +1410,9 @@ static void test_homebrew_forms(void) {
 
     /* Negatives. The one-register immediate forms share h1 and h2 bit 7 with
      * these, and must still decode as VMOV/VMVN immediate. VSLI (opc 0101 with
-     * U set), VSRI (0100, U set) and VRSHR (0010) are other operations and are
-     * not claimed. */
+     * U set), VSRI (0100, U set) and VRSHR (0010) are other operations, with
+     * ops of their own (test_neon_shift_imm_forms), and must not be taken for
+     * these. */
     put16(0, 0xEFC0); put16(2, 0x0010);                  /* vmov.i32 d16, #0 */
     in = dec(ARM_T32, BASE);
     assert(in.op == OP_NEON_IMM && in.neon_fn == NL_MOV && in.vd == 16 && in.imm64 == 0 && !in.neon_q);
@@ -1427,8 +1428,8 @@ static void test_homebrew_forms(void) {
     put16(0, 0xEF8F); put16(2, 0x0211);                  /* vrshr.s8 d0, d1, #1 */
     in = dec(ARM_T32, BASE);
     assert(in.op != OP_NEON_SHR && in.op != OP_NEON_SRA && in.cls == A_SIMD);
-    /* The fixed-point VCVT (#16) has the same h2 bit 4 and bit 7 as a shift;
-     * it must stay out of the shift group. */
+    /* The fixed-point VCVT (#16) has the same h2 bit 4 and bit 7 as a shift.
+     * It is decoded in the same group, as its own op, never as a shift. */
     put16(0, 0xEFB0); put16(2, 0x0F11);                  /* vcvt.s32.f32 d0, d1, #16 */
     in = dec(ARM_T32, BASE);
     assert(in.op != OP_NEON_SHR && in.op != OP_NEON_SHL && in.op != OP_NEON_SRA);
@@ -2080,6 +2081,109 @@ static void test_neon_narrow_forms(void) {
     printf("ok   neon narrowing: vmovn, vqmovn/vqmovun, vshrn/vrshrn, vqshrn/vqrshrn, vqshrun/vqrshrun, and their rejects\n");
 }
 
+/* The shifts by immediate beyond VSHR, VSRA and VSHL: the rounding forms, the
+ * inserts, the saturating left shifts and the fixed-point VCVT. Each encoding
+ * was taken from arm-vita-eabi-as and objdump. The fields are checked against
+ * the lane and the amount the encoding gives (R = 2*esize - L:imm6 for right
+ * shifts, L:imm6 - esize for left shifts, fbits = 64 - L:imm6 for VCVT).
+ * The rejects are the UNDEFINED cases the comment names. */
+static void expect_shift(uint16_t h1, uint16_t h2, arm_op op, int vd, int vm,
+                         int q, int size, int imm, int u) {
+    put16(0, h1); put16(2, h2);
+    arm_insn in = dec(ARM_T32, BASE);
+    if (in.op != op || in.vd != vd || in.vm != vm || in.neon_q != q ||
+        in.neon_size != size || in.imm != (uint32_t)imm || in.vfp_unsigned != u) {
+        fprintf(stderr, "shift %04X %04X: op %d vd %d vm %d q %d size %d imm %u u %d\n",
+                h1, h2, (int)in.op, in.vd, in.vm, in.neon_q, in.neon_size,
+                (unsigned)in.imm, in.vfp_unsigned);
+        assert(0);
+    }
+}
+
+static void expect_none(uint16_t h1, uint16_t h2) {
+    put16(0, h1); put16(2, h2);
+    arm_insn in = dec(ARM_T32, BASE);
+    if (in.op != OP_NONE || in.cls != A_SIMD) {
+        fprintf(stderr, "reject %04X %04X decoded as op %d\n", h1, h2, (int)in.op);
+        assert(0);
+    }
+}
+
+static void test_neon_shift_imm_forms(void) {
+    arm_insn in;
+
+    /* VRSHR and VRSRA. Right shifts: L:imm6 = 8..15 is 8-bit lanes, and the
+     * amount runs 1..8 there. L set is 64-bit lanes. */
+    expect_shift(0xEF8F, 0x0211, OP_NEON_RSHR, 0, 1, 0, 0, 1, 0);     /* vrshr.s8 d0, d1, #1 */
+    expect_shift(0xFF90, 0x0252, OP_NEON_RSHR, 0, 2, 1, 1, 16, 1);    /* vrshr.u16 q0, q1, #16: R = esize */
+    expect_shift(0xEFF9, 0x0231, OP_NEON_RSHR, 16, 17, 0, 2, 7, 0);   /* vrshr.s32 d16, d17, #7 */
+    expect_shift(0xFFC0, 0x02F2, OP_NEON_RSHR, 16, 18, 1, 3, 64, 1);  /* vrshr.u64 q8, q9, #64 */
+    expect_shift(0xEF8F, 0x0291, OP_NEON_RSHR, 0, 1, 0, 3, 49, 0);    /* vrshr.s64 d0, d1, #49: a valid 64-bit form */
+    expect_shift(0xEF8E, 0x1211, OP_NEON_RSHR, 1, 1, 0, 0, 2, 0);     /* vrshr.s8 d1, d1, #2 */
+    expect_shift(0xEF88, 0x0311, OP_NEON_RSRA, 0, 1, 0, 0, 8, 0);     /* vrsra.s8 d0, d1, #8: R = esize */
+    expect_shift(0xFFBD, 0x0352, OP_NEON_RSRA, 0, 2, 1, 2, 3, 1);     /* vrsra.u32 q0, q1, #3 */
+    expect_shift(0xEFBF, 0x3394, OP_NEON_RSRA, 3, 4, 0, 3, 1, 0);     /* vrsra.s64 d3, d4, #1 */
+
+    /* VSRI and VSLI. VSRI is U set (U clear is not a form), and VSLI is U set
+     * opc 0101 where VSHL is U clear. R = esize and Lft = 0 are both legal. */
+    expect_shift(0xFF8F, 0x0411, OP_NEON_SRI, 0, 1, 0, 0, 1, 1);      /* vsri.8 d0, d1, #1 */
+    expect_shift(0xFF90, 0x0452, OP_NEON_SRI, 0, 2, 1, 1, 16, 1);     /* vsri.16 q0, q1, #16 */
+    expect_shift(0xFFFB, 0x0431, OP_NEON_SRI, 16, 17, 0, 2, 5, 1);    /* vsri.32 d16, d17, #5 */
+    expect_shift(0xFF80, 0x3494, OP_NEON_SRI, 3, 4, 0, 3, 64, 1);     /* vsri.64 d3, d4, #64 */
+    expect_shift(0xFF88, 0x0511, OP_NEON_SLI, 0, 1, 0, 0, 0, 1);      /* vsli.8 d0, d1, #0 */
+    expect_shift(0xFF9F, 0x0552, OP_NEON_SLI, 0, 2, 1, 1, 15, 1);     /* vsli.16 q0, q1, #15 */
+    expect_shift(0xFFFF, 0x0531, OP_NEON_SLI, 16, 17, 0, 2, 31, 1);   /* vsli.32 d16, d17, #31 */
+    expect_shift(0xFFC1, 0x05F2, OP_NEON_SLI, 16, 18, 1, 3, 1, 1);    /* vsli.64 q8, q9, #1 */
+
+    /* VQSHL and VQSHLU. VQSHLU is U set only. */
+    expect_shift(0xEF89, 0x0711, OP_NEON_QSHL_IMM, 0, 1, 0, 0, 1, 0); /* vqshl.s8 d0, d1, #1 */
+    expect_shift(0xFF9F, 0x0752, OP_NEON_QSHL_IMM, 0, 2, 1, 1, 15, 1);/* vqshl.u16 q0, q1, #15 */
+    expect_shift(0xEFE0, 0x0731, OP_NEON_QSHL_IMM, 16, 17, 0, 2, 0, 0);/* vqshl.s32 d16, d17, #0 */
+    expect_shift(0xFFBF, 0x3794, OP_NEON_QSHL_IMM, 3, 4, 0, 3, 63, 1);/* vqshl.u64 d3, d4, #63 */
+    expect_shift(0xFF8F, 0x0611, OP_NEON_QSHLU, 0, 1, 0, 0, 7, 1);    /* vqshlu.s8 d0, d1, #7 */
+    expect_shift(0xFF91, 0x0652, OP_NEON_QSHLU, 0, 2, 1, 1, 1, 1);    /* vqshlu.s16 q0, q1, #1 */
+    expect_shift(0xFFE0, 0x0631, OP_NEON_QSHLU, 16, 17, 0, 2, 0, 1);  /* vqshlu.s32 d16, d17, #0 */
+    expect_shift(0xFFCA, 0x06F2, OP_NEON_QSHLU, 16, 18, 1, 3, 10, 1); /* vqshlu.s64 q8, q9, #10 */
+
+    /* Fixed-point VCVT: imm is fbits, 64 - L:imm6. Only 32-bit lanes, so
+     * L:imm6 is 32..63 with L clear, and fbits runs 1..32. */
+    expect_shift(0xEFBF, 0x0F11, OP_NEON_CVT_F_TO_FIXED, 0, 1, 0, 2, 1, 0);    /* vcvt.s32.f32 d0, d1, #1 */
+    expect_shift(0xFFA0, 0x0F52, OP_NEON_CVT_F_TO_FIXED, 0, 2, 1, 2, 32, 1);   /* vcvt.u32.f32 q0, q1, #32 */
+    expect_shift(0xEFF0, 0x0E31, OP_NEON_CVT_FIXED_TO_F, 16, 17, 0, 2, 16, 0); /* vcvt.f32.s32 d16, d17, #16 */
+    expect_shift(0xFFFF, 0x0E72, OP_NEON_CVT_FIXED_TO_F, 16, 18, 1, 2, 1, 1);  /* vcvt.f32.u32 q8, q9, #1 */
+
+    /* Mnemonics, in the style of the other shifts. */
+    put16(0, 0xEF8F); put16(2, 0x0211); in = dec(ARM_T32, BASE);
+    assert(strcmp(in.mnemonic, "vrshr.s") == 0);
+    put16(0, 0xFF8F); put16(2, 0x0411); in = dec(ARM_T32, BASE);
+    assert(strcmp(in.mnemonic, "vsri.i") == 0);
+    put16(0, 0xFF8F); put16(2, 0x0611); in = dec(ARM_T32, BASE);
+    assert(strcmp(in.mnemonic, "vqshlu.s") == 0);
+    put16(0, 0xEFBF); put16(2, 0x0F11); in = dec(ARM_T32, BASE);
+    assert(strcmp(in.mnemonic, "vcvt.s32.f32") == 0);
+
+    /* Rejects. 0100 with U clear and 0110 with U clear are not forms. With
+     * L:imm6 = 011111 (31) the fixed-point VCVT is UNDEFINED, as it is with
+     * L set (127 here). With Q set, an odd Vm (3) or Vd (1) is UNDEFINED. The
+     * last two differ from the valid vrshr.s8 q0, q1 (0252) only in Vm or Vd. */
+    expect_none(0xEF8F, 0x0411);     /* 0100 U clear */
+    expect_none(0xEF8F, 0x0611);     /* 0110 U clear */
+    expect_none(0xEF9F, 0x0F11);     /* VCVT, L:imm6 = 31 < 32 */
+    expect_none(0xEFBF, 0x0F91);     /* VCVT, L set: 64-bit lanes */
+    expect_none(0xEF8F, 0x0253);     /* vrshr.s8 q0, q1 with Vm = 3 (odd) */
+    expect_none(0xEF8F, 0x1252);     /* vrshr.s8 q with Vd = 1 (odd) */
+
+    /* The forms that share this group and were already claimed. */
+    expect_shift(0xEF8F, 0x0011, OP_NEON_SHR, 0, 1, 0, 0, 1, 0);      /* vshr.s8 d0, d1, #1 */
+    expect_shift(0xFF9D, 0x0111, OP_NEON_SRA, 0, 1, 0, 1, 3, 1);      /* vsra.u16 d0, d1, #3 */
+    expect_shift(0xEFA3, 0x0511, OP_NEON_SHL, 0, 1, 0, 2, 3, 0);      /* vshl.s32 d0, d1, #3 */
+    expect_shift(0xEF89, 0x0A11, OP_NEON_SHLL, 0, 1, 0, 0, 1, 0);     /* vshll.s8 q0, d1, #1 */
+    put16(0, 0xFFBB); put16(2, 0x0701); in = dec(ARM_T32, BASE);     /* vcvt.s32.f32 d0, d1 */
+    assert(in.op == OP_NEON_FCVT_TO_INT);
+
+    printf("ok   neon shifts by immediate: vrshr/vrsra, vsri/vsli, vqshl/vqshlu, fixed VCVT, and their rejects\n");
+}
+
 static void test_shifts_and_indexing(void) {
     memset(code, 0, sizeof(code));
     arm_insn in;
@@ -2601,6 +2705,7 @@ int main(void) {
     test_neon_misc_forms();
     test_neon_widen_forms();
     test_neon_shuffle_forms();
+    test_neon_shift_imm_forms();
     test_neon_ldst_multi();
     test_neon_narrow_forms();
     test_neon_cmp_forms();
