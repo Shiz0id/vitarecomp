@@ -62,6 +62,9 @@ typedef struct {
     /* Thumb code pointers named by SCE relocations (ET_SCE_RELEXEC only).
      * Exact, not heuristic: the loader's own list of words it patches. */
     uint32_t seeds_reloc;
+    uint32_t rejected_reloc;   /* odd addresses past code_end: data */
+    uint32_t code_end;         /* end of the last import stub, when the layout agrees */
+    uint32_t seeds_in_stub;    /* targets inside an import stub: refused */
     uint8_t  reloc_malformed;
     /* Mode-switching calls whose target is not a known import stub, and so
      * were not followed into ARM. Counted rather than hidden: if a module has

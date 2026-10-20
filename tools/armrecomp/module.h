@@ -117,6 +117,7 @@ void vm_free(vm_module *m);
 
 /* Look up a call target. Returns NULL when the address is not an import stub. */
 const vm_stub *vm_find_stub(const vm_module *m, uint32_t addr);
+const vm_stub *vm_stub_covering(const vm_module *m, uint32_t addr);
 
 /* Parse the module info at `entry` (the raw e_entry value; the segment index in
  * its top two bits is honoured). Returns 0 on success. */

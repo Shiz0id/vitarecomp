@@ -700,14 +700,20 @@ static int cmd_discover(const char *path) {
     printf("module:   %s   (%s)\n", vm.info.name,
            vc.elf.type == VC_ET_SCE_EXEC ? "ET_SCE_EXEC, no relocations"
                                          : "ET_SCE_RELEXEC");
-    printf("text:     %u bytes at 0x%08X\n\n", img.seg_len, img.seg_vaddr);
+    printf("text:     %u bytes at 0x%08X\n", img.seg_len, img.seg_vaddr);
+    printf("code:     ends at 0x%08X%s\n\n", r.code_end,
+           r.code_end == img.seg_vaddr + img.seg_len ? "  (no stub boundary; whole segment)"
+                                                     : "  (after the last import stub)");
 
     printf("seeds:\n");
     printf("  module_start        %u\n", r.seeds_entry);
     printf("  exports             %u\n", r.seeds_export);
-    if (vc.elf.type != VC_ET_SCE_EXEC)
+    if (vc.elf.type != VC_ET_SCE_EXEC) {
         printf("  relocations         %u%s\n", r.seeds_reloc,
                r.reloc_malformed ? "  (stream malformed; stopped early)" : "  (stored Thumb pointers)");
+        printf("    rejected          %u  (odd address past the code: data)\n",
+               r.rejected_reloc);
+    }
     printf("  call targets        %u\n", r.seeds_call);
     printf("  pointer shape       %u  (heuristic; %u candidates rejected)\n",
            r.seeds_shape, r.rejected_shape);
@@ -717,6 +723,8 @@ static int cmd_discover(const char *path) {
            img.data_seg_count == 1 ? "" : "s");
     printf("  movw/movt pointers  %u  (code addresses built in a register)\n",
            r.seeds_movw);
+    if (r.seeds_in_stub)
+        printf("  in-stub refused     %u  (target inside an import stub)\n", r.seeds_in_stub);
     if (r.seeds_arm_refused)
         printf("  arm seeds refused   %u  (blx to a non-stub: unconfirmed ARM)\n",
                r.seeds_arm_refused);

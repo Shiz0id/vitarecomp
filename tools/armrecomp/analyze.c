@@ -73,6 +73,13 @@ static int arm_seed_ok(const vm_module *mod, uint32_t target) {
     return vm_find_stub(mod, target) != NULL;
 }
 
+/* Inside an import stub but not at its start: data decoded as a branch into
+ * the loader's table, never a function. */
+static int in_stub_body(const vm_module *mod, uint32_t a) {
+    const vm_stub *st = vm_stub_covering(mod, a);
+    return st && st->addr != a;
+}
+
 /* --- walking one function --------------------------------------------------- */
 /*
  * Follows local control flow from `start`, marking instruction starts and
@@ -117,11 +124,49 @@ static int thumb_entry_plausible(const uint8_t *text, uint32_t base, uint32_t le
     return 0;
 }
 
+/* A thunk: a function entry that does only plain register arithmetic and
+ * then branches (`mov r3, r0; mov r0, r1; mov r1, r3; b.w __cxa_atexit`).
+ * SP and LR still hold their entry values at the branch, so it is a tail call
+ * and its target is a function.
+ *
+ * Checked from the entry by a straight scan rather than inside walk(),
+ * because walk() stops at code already decoded, and a thunk is often reached
+ * first by falling through from the function before it (one ending in a
+ * noreturn call such as __cxa_end_cleanup), before it is known to be an
+ * entry at all. */
+#define THUNK_SCAN 8
+
+static void thunk_tail(const vm_image *img, vf_result *r, seedq *q,
+                       uint32_t start, arm_mode mode) {
+    const uint8_t *text = img->data + img->seg_file;
+    const uint32_t base = img->seg_vaddr;
+    const uint32_t len  = img->seg_len;
+    if (mode != ARM_T32) return;
+    uint32_t a = start;
+    for (int i = 0; i < THUNK_SCAN; i++) {
+        arm_insn in;
+        int n = arm_decode(text, base, len, a, ARM_T32, &in);
+        if (n == 0 || in.conditional) return;
+        if (in.cls == A_BRANCH && in.has_target) {
+            if (in.target != start && in.target >= base && in.target + 2 <= r->code_end) {
+                sq_push(q, in.target, ARM_T32, 0);
+                r->seeds_call++;
+            }
+            return;
+        }
+        if (in.op == OP_IT) return;
+        if (!(in.cls == A_NOP || (in.cls == A_ALU && in.rd != 13 && in.rd != 14))) return;
+        a += (uint32_t)n;
+    }
+}
+
 static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
                  seedq *q, uint32_t start, arm_mode mode, vf_func *fn) {
     const uint8_t *text = img->data + img->seg_file;
     const uint32_t base = img->seg_vaddr;
     const uint32_t len  = img->seg_len;
+
+    thunk_tail(img, r, q, start, mode);
 
     /* Local block worklist. Bounded: a pathological function cannot make this
      * grow without bound because every block start is marked seen first. */
@@ -138,11 +183,19 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
         uint32_t movw_lo[16];
         uint16_t movw_valid = 0;
         uint8_t  itstate = 0;
+        int      lr_restored = 0;   /* previous insn popped LR but not PC */
 
         for (;;) {
             if (a < base || a >= base + len) break;
             uint32_t off = a - base;
             if (seen_get(r, off)) break;          /* already decoded here */
+
+            /* An import stub is the loader's, not code to translate: calls to
+             * it are routed to the firmware by NID. Only the stub itself, as
+             * its own entry, is walked; any other way in — Thumb data that
+             * decodes as a branch into one, or falling off one stub into the
+             * next — is not code. */
+            if (in_stub_body(mod, a) || (a != start && vm_find_stub(mod, a))) break;
 
             arm_insn in;
             int n = arm_decode(text, base, len, a, s.mode, &in);
@@ -173,7 +226,7 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
                 } else if (in.op == OP_MOVT && (movw_valid & bit)) {
                     uint32_t v = movw_lo[in.rd] | ((in.imm & 0xFFFFu) << 16);
                     uint32_t t = v & ~1u;
-                    if ((v & 1) && t >= base && t + 2 <= base + len &&
+                    if ((v & 1) && t >= base && t + 2 <= r->code_end &&
                         thumb_entry_plausible(text, base, len, t)) {
                         sq_push(q, t, ARM_T32, 1);
                         r->seeds_movw++;
@@ -224,6 +277,7 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
                      * the calls whose targets discovery cannot follow. */
                     r->indirect_sites++;
                 }
+                lr_restored = 0;
                 a += (uint32_t)n;
                 continue;
             }
@@ -258,10 +312,33 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
                 r->seeds_call++;
                 if (!in.conditional) break;
             } else if (in.cls == A_BRANCH && in.has_target) {
+                /* A forward unconditional B.W is a tail call too when it lands
+                 * on a prologue (atexit ending in `b.w __register_exitproc`) or
+                 * leaves straight from an epilogue that put LR back (`pop
+                 * {r4, lr}; b.w __aeabi_atexit`; see also thunk_tail). With the frame
+                 * as it was on entry, calling the target and returning is the
+                 * same as jumping to it, so registering it is always safe.
+                 *
+                 * It must then NOT also be followed as local flow. The emitter
+                 * bounds a body by flow from its own entry, so a tail branch
+                 * past that bound can only become a call to a registered
+                 * function; and the walk marks what it decodes as seen, so a
+                 * target absorbed into the caller here would be registered
+                 * with an empty body of its own (its own walk stops at once),
+                 * and every tail branch IT makes would go unregistered. */
+                if (!in.conditional && s.mode == ARM_T32 && in.target != start &&
+                    in.target >= base && in.target + 2 <= r->code_end &&
+                    (lr_restored || thumb_entry_plausible(text, base, len, in.target))) {
+                    sq_push(q, in.target, s.mode, 0);
+                    r->seeds_call++;
+                    break;
+                }
                 sq_push(&local, in.target, s.mode, 0);
                 if (!in.conditional) break;       /* unconditional: flow ends */
             }
 
+            lr_restored = in.op == OP_POP && (in.reglist & (1u << 14)) &&
+                          !(in.reglist & (1u << 15)) && !in.conditional;
             a += (uint32_t)n;
         }
     }
@@ -284,12 +361,13 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
 
 /* Does this word have the SHAPE of a pointer to Thumb code? Cheap, and
  * deliberately says nothing about whether a function is there. */
-static int code_ptr_shape(const vm_image *img, const uint8_t *p, uint32_t *out) {
+static int code_ptr_shape(const vm_image *img, uint32_t code_end,
+                          const uint8_t *p, uint32_t *out) {
     uint32_t w = (uint32_t)p[0] | ((uint32_t)p[1] << 8)
                | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
     if (!(w & 1)) return 0;                       /* Thumb pointers only */
     uint32_t t = w & ~1u;
-    if (t < img->seg_vaddr || t >= img->seg_vaddr + img->seg_len) return 0;
+    if (t < img->seg_vaddr || t >= code_end) return 0;
     if ((t - img->seg_vaddr) & 1) return 0;
     *out = t;
     return 1;
@@ -304,10 +382,10 @@ static int code_ptr_shape(const vm_image *img, const uint8_t *p, uint32_t *out) 
  * more than any property of the individual entries. */
 #define SHAPE_RUN_MIN 4
 
-static uint32_t shape_run_len(const vm_image *img, const uint8_t *scan,
+static uint32_t shape_run_len(const vm_image *img, uint32_t code_end, const uint8_t *scan,
                               uint32_t scan_len, uint32_t off) {
     uint32_t n = 0, t;
-    while (off + 4 <= scan_len && code_ptr_shape(img, scan + off, &t)) {
+    while (off + 4 <= scan_len && code_ptr_shape(img, code_end, scan + off, &t)) {
         n++;
         off += 4;
     }
@@ -334,13 +412,13 @@ static uint32_t shape_scan_region(const vm_image *img, vf_result *r, seedq *q,
          * qualify is at most SHAPE_RUN_MIN words, so re-measuring across it is
          * bounded and cheap. */
         if (run_left == 0) {
-            uint32_t n = shape_run_len(img, scan, scan_len, off);
+            uint32_t n = shape_run_len(img, r->code_end, scan, scan_len, off);
             if (n >= SHAPE_RUN_MIN) run_left = n;
         }
         int in_table = run_left > 0;
         if (run_left) run_left--;
 
-        if (!code_ptr_shape(img, scan + off, &t)) continue;
+        if (!code_ptr_shape(img, r->code_end, scan + off, &t)) continue;
 
         /* Do not re-seed something already decoded: that is not a discovery. */
         if (seen_get(r, t - base)) continue;
@@ -410,7 +488,14 @@ typedef struct {
 /* A relocated word or MOVW pointing into the executable segment with the
  * Thumb bit set is a stored pointer to Thumb code — said by the loader's own
  * table, not inferred. Targets with bit 0 clear are left alone: in this
- * segment they are as likely to be .rodata as ARM code. */
+ * segment they are as likely to be .rodata as ARM code.
+ *
+ * Bit 0 set is still not the same as code, because an odd address is just
+ * as often data: newlib's __ctype_ptr__ is `_ctype_ + 1`, and any string can
+ * start at an odd byte. Seeded as functions those pulled .rodata into
+ * translation — the ctype table decodes as a run of `movs r0, #32`, a font as
+ * NEON. Such targets all lie past the code (see code_end) and are refused
+ * there, which is a property of the layout rather than a guess about bytes. */
 static void reloc_seed(void *vctx, uint32_t patch, uint32_t code, uint32_t target) {
     reloc_ctx *c = (reloc_ctx *)vctx;
     (void)patch;
@@ -419,6 +504,7 @@ static void reloc_seed(void *vctx, uint32_t patch, uint32_t code, uint32_t targe
     uint32_t t = target & ~1u;
     const vm_image *img = c->img;
     if (t < img->seg_vaddr || t >= img->seg_vaddr + img->seg_len) return;
+    if (t >= c->r->code_end) { c->r->rejected_reloc++; return; }
 
     arm_insn in;
     const uint8_t *text = img->data + img->seg_file;
@@ -428,11 +514,33 @@ static void reloc_seed(void *vctx, uint32_t patch, uint32_t code, uint32_t targe
     c->r->seeds_reloc++;
 }
 
+/* Where code ends in the executable segment.
+ *
+ * The segment holds .text, then the import stubs, then read-only data —
+ * strings, tables, the module's own export and import descriptors. The
+ * stubs are known exactly from the import tables, so the end of the last one
+ * is a firm boundary: nothing past it is a function a stored pointer can name.
+ * It is trusted only when the layout agrees — the import and export
+ * descriptors, which are certainly data, must lie beyond it. Otherwise the
+ * whole segment stays eligible, as before. (.fini, a few bytes after the
+ * stubs in a VitaSDK module, is still reached: by its call, which is not
+ * limited by this.) */
+static uint32_t code_end_of(const vm_image *img, const vm_module *mod) {
+    uint32_t base = img->seg_vaddr, end = base + img->seg_len;
+    if (!mod || !mod->have_info || !mod->stub_count) return end;
+    uint32_t last = mod->stubs[mod->stub_count - 1].addr + 16;
+    if (last > end) return end;
+    if (mod->info.import_top && base + mod->info.import_top < last) return end;
+    if (mod->info.export_top && base + mod->info.export_top < last) return end;
+    return last;
+}
+
 /* --- entry point ------------------------------------------------------------ */
 
 int vf_discover(const vm_image *img, const vm_module *mod, vf_result *out) {
     memset(out, 0, sizeof(*out));
 
+    out->code_end = code_end_of(img, mod);
     out->seen_bytes = (img->seg_len / 2 + 7) / 8 + 1;
     out->seen = (uint8_t *)calloc(out->seen_bytes, 1);
     if (!out->seen) return 1;
@@ -491,11 +599,15 @@ int vf_discover(const vm_image *img, const vm_module *mod, vf_result *out) {
      *    entry point found 47 instructions. */
     {
         const uint8_t *text = img->data + img->seg_file;
-        for (uint32_t off = 0; off + 4 <= img->seg_len; off += 2) {
+        for (uint32_t off = 0; base + off + 4 <= out->code_end; off += 2) {
             arm_insn in;
             if (arm_decode(text, base, img->seg_len, base + off, ARM_T32, &in) == 0) continue;
+            /* Both ends below code_end: this sweep also decodes literal
+             * pools and the second halves of wide instructions, and a "BL"
+             * found there can point anywhere — .rodata included. A real call
+             * into .fini comes from code the walk reaches, not from here. */
             if (in.cls == A_CALL && in.has_target &&
-                in.target >= base && in.target < base + img->seg_len) {
+                in.target >= base && in.target < out->code_end) {
                 /* Same rule as the descent above. This sweep decodes every
                  * halfword of .text including its data, so it is the site that
                  * manufactures bogus mode switches in bulk. */
@@ -532,6 +644,7 @@ int vf_discover(const vm_image *img, const vm_module *mod, vf_result *out) {
         seed s = q.v[head++];
         if (s.addr < base || s.addr >= base + img->seg_len) continue;
         if (FN_TEST(s.addr)) continue;
+        if (in_stub_body(mod, s.addr)) { out->seeds_in_stub++; continue; }
 
         FN_MARK(s.addr);
         add_func(out, s.addr, s.mode, s.heur);
@@ -547,6 +660,7 @@ int vf_discover(const vm_image *img, const vm_module *mod, vf_result *out) {
         seed s = q.v[head++];
         if (s.addr < base || s.addr >= base + img->seg_len) continue;
         if (FN_TEST(s.addr)) continue;
+        if (in_stub_body(mod, s.addr)) { out->seeds_in_stub++; continue; }
 
         FN_MARK(s.addr);
         add_func(out, s.addr, s.mode, s.heur);
