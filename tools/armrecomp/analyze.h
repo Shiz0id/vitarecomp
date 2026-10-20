@@ -53,6 +53,12 @@ typedef struct {
      * the counts would hide which sweep is doing the work. */
     uint32_t seeds_shape_data;
     uint32_t rejected_shape;
+    /* Thumb code pointers built in a register by a MOVW/MOVT pair and never
+     * stored or called directly: thread entries, callbacks, handlers passed
+     * to firmware. Kept apart from the shape tiers because the evidence is
+     * different — the value is constructed by an instruction, not found in a
+     * stored word. */
+    uint32_t seeds_movw;
     /* Mode-switching calls whose target is not a known import stub, and so
      * were not followed into ARM. Counted rather than hidden: if a module has
      * genuine ARM code outside its stub table, this is the number that says

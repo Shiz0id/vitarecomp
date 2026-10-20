@@ -694,6 +694,8 @@ static int cmd_discover(const char *path) {
     printf("    in data segments  %u  (%u segment%s scanned)\n",
            r.seeds_shape_data, img.data_seg_count,
            img.data_seg_count == 1 ? "" : "s");
+    printf("  movw/movt pointers  %u  (code addresses built in a register)\n",
+           r.seeds_movw);
     if (r.seeds_arm_refused)
         printf("  arm seeds refused   %u  (blx to a non-stub: unconfirmed ARM)\n",
                r.seeds_arm_refused);

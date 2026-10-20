@@ -81,6 +81,41 @@ static int arm_seed_ok(const vm_module *mod, uint32_t target) {
  * every instruction still gets decoded exactly once, from the right mode.
  */
 
+/* Do the bytes at `t` begin like a compiled Thumb function? PUSH (0xB4xx /
+ * 0xB5xx), PUSH.W / STMDB (0xE92D), or SUB SP, #imm. Leaf functions that push
+ * nothing fail it; that is the price of a filter that actually filters. */
+static int thumb_prologue(const uint8_t *text, uint32_t base, uint32_t t) {
+    uint16_t h = (uint16_t)(text[t - base] | ((uint16_t)text[t - base + 1] << 8));
+    return ((h & 0xFE00) == 0xB400) || (h == 0xE92D) || ((h & 0xFF80) == 0xB080);
+}
+
+/* The same question asked with a little slack, for a constructed pointer.
+ *
+ * An optimising compiler is free to schedule a load ahead of the push that
+ * saves registers — GCC does exactly that on a thread entry that reads its
+ * argument block first, so the function opens `ldrd r3, r2, [r1]` and pushes
+ * one instruction later. So: a push within the first few instructions, with
+ * nothing before it that ends or leaves the block and nothing undecodable.
+ * Kept separate from thumb_prologue, whose strictness was measured on the
+ * shape sweep's corpus and is not loosened here. */
+#define PROLOGUE_SLACK 4
+
+static int thumb_entry_plausible(const uint8_t *text, uint32_t base, uint32_t len,
+                                 uint32_t t) {
+    uint32_t a = t;
+    for (int i = 0; i < PROLOGUE_SLACK; i++) {
+        if (a + 2 > base + len) return 0;
+        if (thumb_prologue(text, base, a)) return 1;
+        arm_insn in;
+        int n = arm_decode(text, base, len, a, ARM_T32, &in);
+        if (n == 0 || in.cls == A_UNKNOWN || in.cls == A_UNDEF) return 0;
+        if (in.cls == A_BRANCH || in.cls == A_RETURN || in.cls == A_CALL ||
+            in.cls == A_INDIRECT) return 0;
+        a += (uint32_t)n;
+    }
+    return 0;
+}
+
 static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
                  seedq *q, uint32_t start, arm_mode mode, vf_func *fn) {
     const uint8_t *text = img->data + img->seg_file;
@@ -95,6 +130,12 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
     while (local.n) {
         seed s = local.v[--local.n];
         uint32_t a = s.addr;
+
+        /* The low half each register last received from a MOVW in this
+         * block. Per block, not per function: a value tracked across a branch
+         * join could have come from either side. */
+        uint32_t movw_lo[16];
+        uint16_t movw_valid = 0;
 
         for (;;) {
             if (a < base || a >= base + len) break;
@@ -111,6 +152,34 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
             fn->insns++;
             if (a + (uint32_t)n > fn->end) fn->end = a + (uint32_t)n;
             if (in.cls == A_SIMD) r->simd_insns++;
+
+            /* A code pointer built in a register. Thumb-2 makes a 32-bit
+             * constant with MOVW (low half) then MOVT (high half), and that
+             * is how a function's address reaches sceKernelCreateThread or a
+             * callback registration: it is never called, never stored where a
+             * shape sweep would see it, so nothing else discovers it — and the
+             * first transfer to it is a dispatch miss. Requiring the Thumb bit
+             * and a prologue near the start keeps odd addresses into the
+             * read-only data sharing this segment (strings, mostly: their bytes
+             * are not push encodings) from being taken for code. */
+            if (in.cls == A_ALU && in.rd >= 0 && in.rd < 16) {
+                uint16_t bit = (uint16_t)(1u << in.rd);
+                if (in.op == OP_MOV && in.has_imm && strcmp(in.mnemonic, "movw") == 0) {
+                    movw_lo[in.rd] = in.imm & 0xFFFFu;
+                    movw_valid |= bit;
+                } else if (in.op == OP_MOVT && (movw_valid & bit)) {
+                    uint32_t v = movw_lo[in.rd] | ((in.imm & 0xFFFFu) << 16);
+                    uint32_t t = v & ~1u;
+                    if ((v & 1) && t >= base && t + 2 <= base + len &&
+                        thumb_entry_plausible(text, base, len, t)) {
+                        sq_push(q, t, ARM_T32, 1);
+                        r->seeds_movw++;
+                    }
+                    movw_valid &= (uint16_t)~bit;
+                } else {
+                    movw_valid &= (uint16_t)~bit;   /* overwritten in between */
+                }
+            }
 
             /* Calls seed new functions. An interworking call flips the mode of
              * the callee, which is the whole reason mode travels with a seed. */
@@ -272,12 +341,7 @@ static uint32_t shape_scan_region(const vm_image *img, vf_result *r, seedq *q,
          * you would expect: leaves that start with `movw` because they store a
          * constant and save nothing, and one that is a bare `bx lr`. Each one
          * missed is a run-time trap in a table the program walks at startup. */
-        uint16_t h = (uint16_t)(text[t - base] | ((uint16_t)text[t - base + 1] << 8));
-        int prologue = ((h & 0xFE00) == 0xB400)          /* push            */
-                    || (h == 0xE92D)                     /* push.w / stmdb  */
-                    || ((h & 0xFF80) == 0xB080);         /* sub sp, #imm    */
-
-        if (!prologue && !in_table) { r->rejected_shape++; continue; }
+        if (!thumb_prologue(text, base, t) && !in_table) { r->rejected_shape++; continue; }
 
         sq_push(q, t, ARM_T32, 1);
         r->seeds_shape++;
