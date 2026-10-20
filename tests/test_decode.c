@@ -1857,6 +1857,30 @@ static void test_neon_widen_forms(void) {
     assert(in.op == OP_NEON_SHLL && in.vd == 2 && in.vm == 2 && in.neon_size == 2);
     assert(in.vfp_unsigned && in.imm == 1 && strcmp(in.mnemonic, "vshll.u32") == 0);
 
+    /* VSHLL by the element size: its own encoding in the two-register misc
+     * group, A = 10 opc 0110. Encodings from arm-vita-eabi-as. */
+    put16(0, 0xFFB2); put16(2, 0x0301);                  /* vshll.i8 q0, d1, #8 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHLL && in.vd == 0 && in.vm == 1 && in.neon_size == 0);
+    assert(in.imm == 8 && in.has_imm && strcmp(in.mnemonic, "vshll.i8") == 0);
+    put16(0, 0xFFF6); put16(2, 0x0321);                  /* vshll.i16 q8, d17, #16 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHLL && in.vd == 16 && in.vm == 17 && in.neon_size == 1);
+    assert(in.imm == 16 && strcmp(in.mnemonic, "vshll.i16") == 0);
+    put16(0, 0xFFFA); put16(2, 0xE32F);                  /* vshll.i32 q15, d31, #32 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHLL && in.vd == 30 && in.vm == 31 && in.neon_size == 2);
+    assert(in.imm == 32 && strcmp(in.mnemonic, "vshll.i32") == 0);
+    put16(0, 0xFFB2); put16(2, 0x1301);                  /* Qd odd (d1) */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xFFB2); put16(2, 0x0341);                  /* Q set */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xFFBE); put16(2, 0x0301);                  /* size 3 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+
     /* Rejects. */
     put16(0, 0xEF91); put16(2, 0x1C02);                  /* vmull: d = 1, Qd odd */
     in = dec(ARM_T32, BASE);

@@ -1652,9 +1652,9 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
      * VQNEG (1111). opc 0011, 0110 and 0111 are not claimed. A = 10 is VSWP
      * (opc 0000, size 0 only), VTRN (0001), VUZP (0010) and VZIP (0011).
      * Size 3 is undefined for all of them, and so are VUZP and VZIP at size 2
-     * with D registers. VMOVN (A = 10, opc 0100) and the F32 group (size 2, A
-     * bit 0 set) are handled above and their opc and A values do not reach
-     * this code. */
+     * with D registers. A = 10 opc 0110 is VSHLL by the element size, below.
+     * VMOVN (A = 10, opc 0100) and the F32 group (size 2, A bit 0 set) are
+     * handled above and their opc and A values do not reach this code. */
     if ((h1 & 0xFFB0) == 0xFFB0 && (h2 & 0x0810) == 0) {
         int A = h1 & 3, size = (h1 >> 2) & 3, opc = (h2 >> 7) & 0xF;
         if (A == 0 && opc <= 2 && opc + size < 3) {
@@ -1724,6 +1724,23 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
             o->neon_q = (uint8_t)Q;
             o->neon_size = (uint8_t)size;
             set(o, A_SIMD, nm[opc][size]);
+            return 1;
+        }
+        /* VSHLL with the shift equal to the element size. The shift-immediate
+         * VSHLL stops at esize - 1, so this shift has its own encoding, with
+         * Q clear and Qd even. Shifting a lane by its whole width pushes out
+         * every extension bit, so signed and unsigned give the same result
+         * and the mnemonic is .i. */
+        if (A == 2 && opc == 6) {
+            static const char *const nm[3] = { "vshll.i8", "vshll.i16", "vshll.i32" };
+            if (Q || (d & 1) || size == 3) return 0;
+            o->op = OP_NEON_SHLL;
+            o->vd = (int8_t)d; o->vm = (int8_t)m;
+            o->neon_size = (uint8_t)size;
+            o->imm = (uint32_t)(8 << size);
+            o->has_imm = 1;
+            o->vfp_unsigned = 1;
+            set(o, A_SIMD, nm[size]);
             return 1;
         }
     }

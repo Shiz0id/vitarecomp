@@ -113,6 +113,9 @@ int main(void) {
     T("vshll.u8 q #3",       "vshll.u8 q0, d1, #3");
     T("vshll.s16 q #15",     "vshll.s16 q0, d1, #15");
     T("vshll.u32 q #1",      "vshll.u32 q1, d2, #1");
+    T("vshll.i8 q #8",       "vshll.i8 q0, d1, #8");
+    T("vshll.i16 q #16",     "vshll.i16 q1, d4, #16");
+    T("vshll.i32 q #32",     "vshll.i32 q2, d5, #32");
     T("vrshr.s8 d #1",        "vrshr.s8 d0, d1, #1");
     T("vrshr.u16 q #16",      "vrshr.u16 q0, q1, #16");
     T("vrshr.s32 d #7",       "vrshr.s32 d2, d3, #7");
