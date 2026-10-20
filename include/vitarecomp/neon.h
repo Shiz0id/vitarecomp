@@ -516,6 +516,46 @@ static inline uint64_t neon_shl_reg(uint64_t m, uint64_t n, int size, int is_uns
     return r;
 }
 
+/* VHADD (kind 0), VRHADD (kind 1) and VHSUB (kind 2), lane by lane. The exact
+ * sum or difference of two lanes needs one bit more than the lane, so it is
+ * formed in int64 (lanes here are at most 32 bits, so nothing overflows), then
+ * halved and truncated to the lane. VRHADD adds 1 before halving. The halving
+ * is a floor: C's >> of a negative int64 is implementation-defined, so it is
+ * taken by division, and -3 halves to -2, not -1. Size 3 is UNDEFINED and
+ * decode refuses it before this is called. */
+static inline uint64_t neon_halve(uint64_t n, uint64_t m, int size, int is_unsigned, int kind) {
+    int w = 8 << size;
+    uint64_t mask = neon_lmask(size), r = 0;
+    for (int i = 0; i < 64 / w; i++) {
+        uint64_t a = neon_lane_of(n, size, i), b = neon_lane_of(m, size, i);
+        int64_t sa = is_unsigned ? (int64_t)a : neon_sext(a, w);
+        int64_t sb = is_unsigned ? (int64_t)b : neon_sext(b, w);
+        int64_t t = kind == 2 ? sa - sb : sa + sb + (kind == 1);
+        int64_t h = t >= 0 ? t / 2 : -((-t + 1) / 2);    /* floor(t / 2) */
+        r |= ((uint64_t)h & mask) << (i * w);
+    }
+    return r;
+}
+
+/* VPMAX (min = 0) and VPMIN (min = 1). As in neon_padd, the pairs of n fill
+ * the low half of the result and the pairs of m the high half, and each pair
+ * is reduced to its larger or smaller lane. The inputs are values, so the
+ * caller's store comes after both are read: vpmax d0, d0, d1 is safe. D only:
+ * a Q form is UNDEFINED and decode refuses it. */
+static inline uint64_t neon_pminmax(uint64_t n, uint64_t m, int size, int is_unsigned, int min) {
+    int w = 8 << size, lanes = 64 / w;
+    uint64_t r = 0;
+    for (int i = 0; i < lanes; i++) {
+        uint64_t src = (i < lanes / 2) ? n : m;
+        int j = (i % (lanes / 2)) * 2;
+        uint64_t a = neon_lane_of(src, size, j), b = neon_lane_of(src, size, j + 1);
+        int a_greater = is_unsigned ? a > b : neon_sext(a, w) > neon_sext(b, w);
+        int take_a = min ? !a_greater : a_greater;
+        r |= (take_a ? a : b) << (i * w);
+    }
+    return r;
+}
+
 /* VSHL by immediate: each lane shifted left by amt, 0 <= amt < lane width.
  * Bits shifted out of a lane are masked off rather than carried upward. */
 static inline uint64_t neon_shl(uint64_t n, int amt, int size) {

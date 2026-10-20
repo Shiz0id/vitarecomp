@@ -1170,6 +1170,116 @@ static void test_neon_shl_reg_c(void) {
     printf("ok   neon shl reg: vshl, vqshl, vrshl, vqrshl by register, amounts, rounding and saturation\n");
 }
 
+/* VHADD, VRHADD and VHSUB, and VPMAX and VPMIN, worked out from the definitions.
+ * The sums that overflow their lane are the cases a lane-width sum gets wrong:
+ * 0xFF + 0xFF is 510 and halves to 0xFF, where 0xFE would halve to 0x7F. */
+static void test_neon_halving_c(void) {
+    /* VHADD, unsigned and signed, every size. 0xFF + 0xFF, 0x7F + 0x7F = 254
+     * halves to 127, and 0x80 + 0x80 = -256 halves to -128. */
+    assert(neon_halve(rep_lane(0xFF, 0), rep_lane(0xFF, 0), 0, 1, 0) == rep_lane(0xFF, 0));
+    assert(neon_halve(rep_lane(0x7F, 0), rep_lane(0x7F, 0), 0, 0, 0) == rep_lane(0x7F, 0));
+    assert(neon_halve(rep_lane(0x80, 0), rep_lane(0x80, 0), 0, 0, 0) == rep_lane(0x80, 0));
+    assert(neon_halve(rep_lane(0xFFFF, 1), rep_lane(0xFFFF, 1), 1, 1, 0) == rep_lane(0xFFFF, 1));
+    assert(neon_halve(rep_lane(0x7FFF, 1), rep_lane(0x7FFF, 1), 1, 0, 0) == rep_lane(0x7FFF, 1));
+    assert(neon_halve(rep_lane(0x8000, 1), rep_lane(0x8000, 1), 1, 0, 0) == rep_lane(0x8000, 1));
+    assert(neon_halve(rep_lane(0xFFFFFFFF, 2), rep_lane(0xFFFFFFFF, 2), 2, 1, 0) == rep_lane(0xFFFFFFFF, 2));
+    assert(neon_halve(rep_lane(0x7FFFFFFF, 2), rep_lane(0x7FFFFFFF, 2), 2, 0, 0) == rep_lane(0x7FFFFFFF, 2));
+    assert(neon_halve(rep_lane(0x80000000, 2), rep_lane(0x80000000, 2), 2, 0, 0) == rep_lane(0x80000000, 2));
+
+    /* Rounding. VRHADD adds 1 before the halve: 0xFF + 0xFE = 509 gives 0xFE
+     * for VHADD (254) and 0xFF for VRHADD (510 halves to 255). Signed -1 + 0 is
+     * -1 for VHADD (floor of -0.5) and 0 for VRHADD. 0xFFFFFFFE + 1 is 2^32 - 1,
+     * which VHADD halves to 0x7FFFFFFF, and VRHADD gives 2^31. */
+    assert(neon_halve(rep_lane(0xFF, 0), rep_lane(0xFE, 0), 0, 1, 0) == rep_lane(0xFE, 0));
+    assert(neon_halve(rep_lane(0xFF, 0), rep_lane(0xFE, 0), 0, 1, 1) == rep_lane(0xFF, 0));
+    assert(neon_halve(rep_lane(0xFF, 0), rep_lane(0x00, 0), 0, 0, 0) == rep_lane(0xFF, 0));
+    assert(neon_halve(rep_lane(0xFF, 0), rep_lane(0x00, 0), 0, 0, 1) == rep_lane(0x00, 0));
+    assert(neon_halve(rep_lane(0xFFFFFFFE, 2), rep_lane(0x01, 2), 2, 1, 0) == rep_lane(0x7FFFFFFF, 2));
+    assert(neon_halve(rep_lane(0xFFFFFFFE, 2), rep_lane(0x01, 2), 2, 1, 1) == rep_lane(0x80000000, 2));
+
+    /* VHSUB floors the exact difference: 0 - 1 = -1 is 0xFF for either sign.
+     * The VHADD and VRHADD pair below is -3 + 0: the floor of -1.5 is -2 (0xFE),
+     * while VRHADD gives (-3 + 1) / 2 = -1 (0xFF). Truncation would give -1 for
+     * the first. */
+    assert(neon_halve(rep_lane(0x00, 0), rep_lane(0x01, 0), 0, 0, 2) == rep_lane(0xFF, 0));
+    assert(neon_halve(rep_lane(0x00, 0), rep_lane(0x01, 0), 0, 1, 2) == rep_lane(0xFF, 0));
+    assert(neon_halve(rep_lane(0x00, 1), rep_lane(0x01, 1), 1, 0, 2) == rep_lane(0xFFFF, 1));
+    assert(neon_halve(rep_lane(0x00, 2), rep_lane(0x01, 2), 2, 1, 2) == rep_lane(0xFFFFFFFF, 2));
+    assert(neon_halve(rep_lane(0xFD, 0), rep_lane(0x00, 0), 0, 0, 0) == rep_lane(0xFE, 0));
+    assert(neon_halve(rep_lane(0xFD, 0), rep_lane(0x00, 0), 0, 0, 1) == rep_lane(0xFF, 0));
+    /* Wide differences: s8 0x80 - 0x7F = -255 halves to -128 (0x80), and u8
+     * 0 - 0xFF = -255 gives the same 0x80. s16 0x8000 - 0x7FFF = -65535 halves
+     * to -32768, and u32 0 - 0xFFFFFFFF to -2^31. Positive values truncate:
+     * 0x10 - 0x03 = 13 halves to 6. */
+    assert(neon_halve(rep_lane(0x80, 0), rep_lane(0x7F, 0), 0, 0, 2) == rep_lane(0x80, 0));
+    assert(neon_halve(rep_lane(0x00, 0), rep_lane(0xFF, 0), 0, 1, 2) == rep_lane(0x80, 0));
+    assert(neon_halve(rep_lane(0x8000, 1), rep_lane(0x7FFF, 1), 1, 0, 2) == rep_lane(0x8000, 1));
+    assert(neon_halve(rep_lane(0x00, 2), rep_lane(0xFFFFFFFF, 2), 2, 1, 2) == rep_lane(0x80000000, 2));
+    assert(neon_halve(rep_lane(0x10, 0), rep_lane(0x03, 0), 0, 1, 2) == rep_lane(0x06, 0));
+
+    /* Mixed lanes in one word, 8-bit, signed and unsigned, for the three
+     * halving ops. The lanes are the ones the shift tests use, so a lane that
+     * is negative in one reading and large in the other shows up. */
+    uint64_t ma[8] = { 0x01, 0x02, 0x10, 0x80, 0xFF, 0x7F, 0xF0, 0x03 };
+    uint64_t mb[8] = { 0x01, 0xFF, 0x02, 0xFE, 0x00, 0x03, 0xFD, 0x01 };
+    uint64_t MA = pack_lanes(ma, 8, 8), MB = pack_lanes(mb, 8, 8);
+    uint64_t e_hadd_s[8] = { 0x01, 0x00, 0x09, 0xBF, 0xFF, 0x41, 0xF6, 0x02 };
+    uint64_t e_hadd_u[8] = { 0x01, 0x80, 0x09, 0xBF, 0x7F, 0x41, 0xF6, 0x02 };
+    uint64_t e_rhadd_s[8] = { 0x01, 0x01, 0x09, 0xBF, 0x00, 0x41, 0xF7, 0x02 };
+    uint64_t e_rhadd_u[8] = { 0x01, 0x81, 0x09, 0xBF, 0x80, 0x41, 0xF7, 0x02 };
+    uint64_t e_hsub_s[8] = { 0x00, 0x01, 0x07, 0xC1, 0xFF, 0x3E, 0xF9, 0x01 };
+    uint64_t e_hsub_u[8] = { 0x00, 0x81, 0x07, 0xC1, 0x7F, 0x3E, 0xF9, 0x01 };
+    assert(neon_halve(MA, MB, 0, 0, 0) == pack_lanes(e_hadd_s, 8, 8));
+    assert(neon_halve(MA, MB, 0, 1, 0) == pack_lanes(e_hadd_u, 8, 8));
+    assert(neon_halve(MA, MB, 0, 0, 1) == pack_lanes(e_rhadd_s, 8, 8));
+    assert(neon_halve(MA, MB, 0, 1, 1) == pack_lanes(e_rhadd_u, 8, 8));
+    assert(neon_halve(MA, MB, 0, 0, 2) == pack_lanes(e_hsub_s, 8, 8));
+    assert(neon_halve(MA, MB, 0, 1, 2) == pack_lanes(e_hsub_u, 8, 8));
+
+    /* VPMAX and VPMIN. The pairs of n give lanes 0-3 and the pairs of m lanes
+     * 4-7, so a result that takes its upper half from n shows at once. The
+     * pairs are (0x80, 0x7F), which are -128 and 127 signed but 128 and 127
+     * unsigned, and (0x05, 0xFF) of m, which is 5 and -1 signed, 5 and 255
+     * unsigned. */
+    uint64_t pn[8] = { 0x80, 0x7F, 0x01, 0x02, 0x03, 0xF0, 0x10, 0x20 };
+    uint64_t pm[8] = { 0x05, 0xFF, 0x40, 0x3F, 0x00, 0x01, 0x09, 0x08 };
+    uint64_t PN = pack_lanes(pn, 8, 8), PM = pack_lanes(pm, 8, 8);
+    uint64_t e_pmax_s[8] = { 0x7F, 0x02, 0x03, 0x20, 0x05, 0x40, 0x01, 0x09 };
+    uint64_t e_pmax_u[8] = { 0x80, 0x02, 0xF0, 0x20, 0xFF, 0x40, 0x01, 0x09 };
+    uint64_t e_pmin_s[8] = { 0x80, 0x01, 0xF0, 0x10, 0xFF, 0x3F, 0x00, 0x08 };
+    uint64_t e_pmin_u[8] = { 0x7F, 0x01, 0x03, 0x10, 0x05, 0x3F, 0x00, 0x08 };
+    assert(neon_pminmax(PN, PM, 0, 0, 0) == pack_lanes(e_pmax_s, 8, 8));
+    assert(neon_pminmax(PN, PM, 0, 1, 0) == pack_lanes(e_pmax_u, 8, 8));
+    assert(neon_pminmax(PN, PM, 0, 0, 1) == pack_lanes(e_pmin_s, 8, 8));
+    assert(neon_pminmax(PN, PM, 0, 1, 1) == pack_lanes(e_pmin_u, 8, 8));
+
+    /* 16-bit: n = { 0x8000, 0x7FFF, 1, 0xFFFF }, m = { 5, 4, 0x8001, 2 }. */
+    uint64_t hn[4] = { 0x8000, 0x7FFF, 0x0001, 0xFFFF }, hm[4] = { 0x0005, 0x0004, 0x8001, 0x0002 };
+    uint64_t HN = pack_lanes(hn, 16, 4), HM = pack_lanes(hm, 16, 4);
+    uint64_t e16_pmax_s[4] = { 0x7FFF, 0x0001, 0x0005, 0x0002 };
+    uint64_t e16_pmax_u[4] = { 0x8000, 0xFFFF, 0x0005, 0x8001 };
+    uint64_t e16_pmin_s[4] = { 0x8000, 0xFFFF, 0x0004, 0x8001 };
+    uint64_t e16_pmin_u[4] = { 0x7FFF, 0x0001, 0x0004, 0x0002 };
+    assert(neon_pminmax(HN, HM, 1, 0, 0) == pack_lanes(e16_pmax_s, 16, 4));
+    assert(neon_pminmax(HN, HM, 1, 1, 0) == pack_lanes(e16_pmax_u, 16, 4));
+    assert(neon_pminmax(HN, HM, 1, 0, 1) == pack_lanes(e16_pmin_s, 16, 4));
+    assert(neon_pminmax(HN, HM, 1, 1, 1) == pack_lanes(e16_pmin_u, 16, 4));
+
+    /* 32-bit: n = { 0x80000000, 0x7FFFFFFF }, m = { 1, 0xFFFFFFFF }. */
+    uint64_t wn[2] = { 0x80000000, 0x7FFFFFFF }, wm[2] = { 0x00000001, 0xFFFFFFFF };
+    uint64_t WN = pack_lanes(wn, 32, 2), WM = pack_lanes(wm, 32, 2);
+    uint64_t e32_pmax_s[2] = { 0x7FFFFFFF, 0x00000001 };
+    uint64_t e32_pmax_u[2] = { 0x80000000, 0xFFFFFFFF };
+    assert(neon_pminmax(WN, WM, 2, 0, 0) == pack_lanes(e32_pmax_s, 32, 2));
+    assert(neon_pminmax(WN, WM, 2, 1, 0) == pack_lanes(e32_pmax_u, 32, 2));
+    uint64_t e32_pmin_s[2] = { 0x80000000, 0xFFFFFFFF };
+    uint64_t e32_pmin_u[2] = { 0x7FFFFFFF, 0x00000001 };
+    assert(neon_pminmax(WN, WM, 2, 0, 1) == pack_lanes(e32_pmin_s, 32, 2));
+    assert(neon_pminmax(WN, WM, 2, 1, 1) == pack_lanes(e32_pmin_u, 32, 2));
+
+    printf("ok   neon halving add and subtract, pairwise max and min: every size, signedness and overflow\n");
+}
+
 /* The widening helpers, against values worked out by hand from the lanes.
  * Every source has a lane with its sign bit set, so each signed result differs
  * from the unsigned one. The 32-bit products 0x80000000 * 0x80000000 are 2^62
@@ -1747,6 +1857,7 @@ int main(void) {
     test_neon_int_c();
     test_neon_cmp_c();
     test_neon_shl_reg_c();
+    test_neon_halving_c();
     test_neon_widen();
     test_neon_shuffle();
     test_neon_ldst();

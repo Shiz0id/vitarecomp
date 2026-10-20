@@ -1343,6 +1343,27 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             break;
         }
 
+        /* Halving add and subtract, and pairwise max and min. A Q halving op is
+         * two D halves, each reading its own half of vn and vm. Half 0 stores
+         * to an even D and half 1 reads only odd Ds, so the first store never
+         * reaches a later input. VPMAX and VPMIN are D only, and neon_pminmax
+         * takes its inputs by value, so vpmax d0, d0, d1 reads both first. */
+        case OP_NEON_HADD: case OP_NEON_RHADD: case OP_NEON_HSUB: {
+            int regs = in->neon_q ? 2 : 1;
+            int kind = in->op == OP_NEON_HADD ? 0 : in->op == OP_NEON_RHADD ? 1 : 2;
+            for (int k = 0; k < regs; k++)
+                fprintf(f, "    neon_setd(%d, neon_halve(neon_getd(%d), neon_getd(%d), %d, %d, %d));\n",
+                        in->vd + k, in->vn + k, in->vm + k, in->neon_size,
+                        in->vfp_unsigned, kind);
+            break;
+        }
+
+        case OP_NEON_PMAX: case OP_NEON_PMIN:
+            fprintf(f, "    neon_setd(%d, neon_pminmax(neon_getd(%d), neon_getd(%d), %d, %d, %d));\n",
+                    in->vd, in->vn, in->vm, in->neon_size, in->vfp_unsigned,
+                    in->op == OP_NEON_PMIN);
+            break;
+
         case OP_NEON_SHL: case OP_NEON_SHR: case OP_NEON_SRA: {
             int regs = in->neon_q ? 2 : 1;
             for (int k = 0; k < regs; k++) {

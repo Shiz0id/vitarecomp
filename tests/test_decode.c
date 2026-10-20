@@ -1538,6 +1538,103 @@ static void test_neon_shl_reg_forms(void) {
     printf("ok   neon shifts by register: vshl, vqshl, vrshl, vqrshl, every size, and the rejects\n");
 }
 
+/* Halving add and subtract (opc 0000, 0001, 0010 with B clear) and pairwise
+ * max and min (opc 1010). Each encoding was taken from arm-vita-eabi-as and
+ * checked by objdump. The rejects: size 3 for the halving ops and for VPMAX,
+ * and Q set on VPMAX. The Q reject is the D form vpmax.s8 d0, d2, d4 with h2
+ * bit 6 set, since the assembler has no Q form of VPMAX to take it from. */
+static void test_neon_halving_forms(void) {
+    arm_insn in;
+
+    put16(0, 0xEF01); put16(2, 0x0002);                  /* vhadd.s8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_HADD && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.neon_size == 0 && !in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vhadd.s") == 0);
+    put16(0, 0xFF12); put16(2, 0x0044);                  /* vhadd.u16 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_HADD && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.neon_q && in.neon_size == 1 && in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vhadd.u") == 0);
+    put16(0, 0xEF61); put16(2, 0x00A2);                  /* vhadd.s32 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_HADD && in.vd == 16 && in.vn == 17 && in.vm == 18 && !in.neon_q && in.neon_size == 2 && !in.vfp_unsigned);
+
+    put16(0, 0xFF01); put16(2, 0x0102);                  /* vrhadd.u8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_RHADD && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.neon_size == 0 && in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vrhadd.u") == 0);
+    put16(0, 0xEF52); put16(2, 0x01E4);                  /* vrhadd.s16 q8, q9, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_RHADD && in.vd == 16 && in.vn == 18 && in.vm == 20 && in.neon_q && in.neon_size == 1 && !in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vrhadd.s") == 0);
+    put16(0, 0xFF24); put16(2, 0x3105);                  /* vrhadd.u32 d3, d4, d5 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_RHADD && in.vd == 3 && in.vn == 4 && in.vm == 5 && !in.neon_q && in.neon_size == 2 && in.vfp_unsigned);
+
+    put16(0, 0xEF01); put16(2, 0x0202);                  /* vhsub.s8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_HSUB && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.neon_size == 0 && !in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vhsub.s") == 0);
+    put16(0, 0xFF11); put16(2, 0x0202);                  /* vhsub.u16 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_HSUB && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.neon_size == 1 && in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vhsub.u") == 0);
+    put16(0, 0xEF22); put16(2, 0x0244);                  /* vhsub.s32 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_HSUB && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.neon_q && in.neon_size == 2 && !in.vfp_unsigned);
+
+    put16(0, 0xEF01); put16(2, 0x0A02);                  /* vpmax.s8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_PMAX && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.neon_size == 0 && !in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vpmax.s") == 0);
+    put16(0, 0xFF51); put16(2, 0x0AA2);                  /* vpmax.u16 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_PMAX && in.vd == 16 && in.vn == 17 && in.vm == 18 && !in.neon_q && in.neon_size == 1 && in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vpmax.u") == 0);
+    put16(0, 0xEF24); put16(2, 0x3A05);                  /* vpmax.s32 d3, d4, d5 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_PMAX && in.vd == 3 && in.vn == 4 && in.vm == 5 && !in.neon_q && in.neon_size == 2 && !in.vfp_unsigned);
+    put16(0, 0xEF00); put16(2, 0x0A01);                  /* vpmax.s8 d0, d0, d1: Vd = Vn */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_PMAX && in.vd == 0 && in.vn == 0 && in.vm == 1 && !in.neon_q && in.neon_size == 0 && !in.vfp_unsigned);
+
+    put16(0, 0xFF01); put16(2, 0x0A12);                  /* vpmin.u8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_PMIN && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.neon_size == 0 && in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vpmin.u") == 0);
+    put16(0, 0xEF11); put16(2, 0x0A12);                  /* vpmin.s16 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_PMIN && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.neon_size == 1 && !in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vpmin.s") == 0);
+    put16(0, 0xFF61); put16(2, 0x0AB2);                  /* vpmin.u32 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_PMIN && in.vd == 16 && in.vn == 17 && in.vm == 18 && !in.neon_q && in.neon_size == 2 && in.vfp_unsigned);
+
+    /* Neighbours: VQADD (opc 0000 with B set) and VPADD (opc 1011) keep their
+     * claims, since the new B-clear cases do not reach them. */
+    put16(0, 0xEF01); put16(2, 0x0012);                  /* vqadd.s8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QADD && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.neon_size == 0 && !in.vfp_unsigned);
+    put16(0, 0xEF01); put16(2, 0x0B12);                  /* vpadd.i8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_PADD && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.neon_size == 0);
+
+    /* Rejects. Size 3 (h1 bits 5:4 = 11) is UNDEFINED for the halving ops and
+     * for VPMAX. Q set on VPMAX is UNDEFINED: h2 bit 6 is the only difference
+     * from vpmax.s8 d0, d2, d4 (0A04), and it is refused even though the
+     * registers are even. */
+    put16(0, 0xEF31); put16(2, 0x0002);                  /* vhadd with size 3 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xEF31); put16(2, 0x0A02);                  /* vpmax with size 3 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xEF02); put16(2, 0x0A44);                  /* vpmax.s8 with Q set */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+
+    printf("ok   neon halving add and subtract, pairwise max and min: every size, the rejects\n");
+}
+
 /* Widening: the three-registers-of-different-lengths group and VSHLL/VMOVL.
  * Each encoding was taken from arm-vita-eabi-as and checked by objdump. The
  * rejects are computed from the layout, and each comment gives the bit that
@@ -2338,6 +2435,7 @@ int main(void) {
     test_neon_narrow_forms();
     test_neon_cmp_forms();
     test_neon_shl_reg_forms();
+    test_neon_halving_forms();
     test_tables_hints_exclusives();
     printf("all decode tests passed\n");
     return 0;

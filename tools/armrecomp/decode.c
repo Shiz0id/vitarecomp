@@ -924,6 +924,31 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
             set(o, A_SIMD, nm[k][B][U]);
             return 1;
         }
+        /* Halving add and subtract: opc 0000 (VHADD), 0001 (VRHADD) and 0010
+         * (VHSUB) with B clear. With B set those three are VQADD, the logical
+         * group and VQSUB, which are claimed above. U picks the signedness.
+         * Size 3 is UNDEFINED for all three and is refused. */
+        if ((opc == 0x0 || opc == 0x1 || opc == 0x2) && B == 0 && size != 3) {
+            static const char *const nm[3][2] = {
+                { "vhadd.s", "vhadd.u" }, { "vrhadd.s", "vrhadd.u" }, { "vhsub.s", "vhsub.u" },
+            };
+            o->op = opc == 0x0 ? OP_NEON_HADD : opc == 0x1 ? OP_NEON_RHADD : OP_NEON_HSUB;
+            o->vfp_unsigned = (uint8_t)U;
+            set(o, A_SIMD, nm[opc][U]);
+            return 1;
+        }
+        /* Pairwise max and min: opc 1010, B clear for VPMAX and set for VPMIN,
+         * U the signedness. They exist for D registers only, so Q set is
+         * UNDEFINED, and size 3 is UNDEFINED as well. */
+        if (opc == 0xA && !Q && size != 3) {
+            static const char *const nm[2][2] = {
+                { "vpmax.s", "vpmax.u" }, { "vpmin.s", "vpmin.u" },
+            };
+            o->op = B ? OP_NEON_PMIN : OP_NEON_PMAX;
+            o->vfp_unsigned = (uint8_t)U;
+            set(o, A_SIMD, nm[B][U]);
+            return 1;
+        }
         if (opc == 0xD && !(size & 1)) {                   /* float, .F32 only */
             /* For floats the size field is sz (bit 20, 0 for F32) and bit 21
              * (size>>1) is an operation bit, so the operation is picked by U,

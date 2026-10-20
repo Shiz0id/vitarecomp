@@ -141,6 +141,11 @@ typedef enum {
                                             the low byte of each vn lane; vfp_unsigned
                                             picks the signedness; Q saturates left  */
     OP_NEON_RSHL_REG, OP_NEON_QRSHL_REG, /* the same, with a rounding right shift   */
+    OP_NEON_HADD, OP_NEON_RHADD, OP_NEON_HSUB, /* halving add, rounding halving add and
+                                   halving subtract: floor of the exact result / 2;
+                                   vfp_unsigned picks the signedness             */
+    OP_NEON_PMAX, OP_NEON_PMIN, /* pairwise max and min, D registers only;
+                                   vfp_unsigned picks the signedness             */
     OP_NEON_SHL, OP_NEON_SHR, OP_NEON_SRA, /* by immediate: imm is the amount,
                                    neon_size the lane; SHR and SRA use
                                    vfp_unsigned for the signedness            */

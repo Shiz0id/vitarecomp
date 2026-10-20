@@ -176,6 +176,23 @@ int main(void) {
     T("vrshl.u64 d, -1",     "vmov.i64 d2, #0xff\n vrshl.u64 d0, d1, d2");
     /* No VQRSHL: dynarmic does not implement it (its decoder line is
      * commented out), so stock skips it and has no result to compare. */
+    T("vhadd.s8 d",          "vhadd.s8 d0, d1, d2");
+    T("vhadd.u16 q",         "vhadd.u16 q0, q1, q2");
+    T("vhadd.s32 d=n",       "vhadd.s32 d0, d0, d1");
+    T("vrhadd.u8 d",         "vrhadd.u8 d0, d1, d2");
+    T("vrhadd.s16 q",        "vrhadd.s16 q0, q1, q2");
+    T("vrhadd.u32 d",        "vrhadd.u32 d3, d2, d1");
+    T("vrhadd.u8 q=n",       "vrhadd.u8 q0, q0, q1");
+    T("vhsub.s8 d",          "vhsub.s8 d0, d1, d2");
+    T("vhsub.u16 d",         "vhsub.u16 d0, d1, d2");
+    T("vhsub.s32 q",         "vhsub.s32 q0, q1, q2");
+    T("vhsub.u8 q",          "vhsub.u8 q0, q1, q2");
+    T("vpmax.s8 d",          "vpmax.s8 d0, d1, d2");
+    T("vpmax.u16 d",         "vpmax.u16 d0, d1, d2");
+    T("vpmax.s32 d=n",       "vpmax.s32 d0, d0, d3");
+    T("vpmin.u8 d",          "vpmin.u8 d0, d1, d2");
+    T("vpmin.s16 d",         "vpmin.s16 d0, d1, d2");
+    T("vpmin.u32 d=n",       "vpmin.u32 d0, d0, d1");
     sceClibPrintf("NT done\n");
     sceKernelExitProcess(0);
     return 0;
