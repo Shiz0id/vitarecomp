@@ -234,7 +234,7 @@ committing:
 |---|---|---|
 | [vita-headers](https://github.com/vitasdk/vita-headers) | MIT | The NID database — the published mapping from import NIDs to function names. The reference for the HLE work list. |
 | [VitaSDK](https://github.com/vitasdk) | MIT | Headers and the published ABI for `sceGxm` / `sceKernel` / `sceCtrl`. |
-| **[Vita3K](https://github.com/Vita3K/Vita3K)** | **GPLv2** | **Oracle only** — run as a separate process and compared against. No code copied, linked, or vendored. |
+| **[Vita3K](https://github.com/Vita3K/Vita3K)** | **GPLv2** | **Vendored, unlinked** — a verbatim copy lives in [`third_party/Vita3K/`](third_party/VITA3K.md). The toolkit does not build or link it; it is there to read, run as an oracle, and lift from into GPL-licensed game repos. |
 | [psprecomp](https://github.com/sp00nznet/psprecomp) | MIT | Sibling project for PSP. Same "`module_start` is not the program" shape, same oracle arrangement with PPSSPP. |
 | [ps3recomp](https://github.com/sp00nznet/ps3recomp) | MIT | Sibling project for PS3. Same project structure and conventions. |
 
@@ -251,6 +251,13 @@ What does carry over is everything else — independently implemented algorithms
 with credit, and functional facts (NIDs, struct layouts, enum values, calling
 conventions) which are not copyrightable and are most of what the shallow work
 needs.
+
+**Vita3K is vendored, not linked.** A verbatim copy sits in
+`third_party/Vita3K/` (see [`third_party/VITA3K.md`](third_party/VITA3K.md)),
+under its own GPLv2. The toolkit sources stay MIT and contain none of it; a
+per-game repo that incorporates Vita3K code becomes a GPLv2 combined work, which
+MIT permits. That keeps the toolkit forkable under MIT while letting a title
+whose bottleneck is `sceGxm` and GXP shaders reuse the work that already exists.
 
 *Licenses above are the working understanding and are re-checked before any code
 or data from a project is actually used.*
@@ -279,7 +286,7 @@ reverse-engineering. With thanks to:
   hashes.
 - **[Vita3K](https://github.com/Vita3K/Vita3K)** — the best public description
   of Vita behaviour that exists. Used as a behavioural oracle and as
-  documentation. **Reference only; no code copied.**
+  documentation. **Vendored in `third_party/Vita3K/`; not linked into the toolkit.**
 - The **Vita homebrew and reverse-engineering community**, whose published work
   on the SELF format, the module info structures and the NID scheme is what
   makes any of this tractable.

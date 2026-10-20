@@ -34,3 +34,10 @@ keys/
 
 # Generated recompiler output — millions of lines, rebuilt from your own dump.
 generated/
+
+# --- vendored Vita3K ------------------------------------------------------------
+# A verbatim upstream copy. The game-data patterns above (modules/, sce_sys/)
+# match directories inside it that are source, not dumps, so it is re-included
+# wholesale here.
+!third_party/Vita3K/**/
+!third_party/Vita3K/**

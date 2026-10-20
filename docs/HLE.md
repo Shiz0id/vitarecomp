@@ -107,8 +107,12 @@ That last row is not a consolation prize. Structure layouts, GXP container
 format, enum values and calling conventions are functional facts rather than
 expression, and they are most of what the shallow 92 functions need.
 
-Vita3K stays what it has been throughout: a **behavioural oracle**, run as a
-separate process and compared against. No code copied, linked, or vendored.
+Inside the toolkit, Vita3K stays a **behavioural oracle**, run as a separate
+process and compared against; no toolkit source copies or links it. A verbatim
+copy is vendored at `third_party/Vita3K/` (see
+[`third_party/VITA3K.md`](../third_party/VITA3K.md)) so a GPL-licensed game repo
+can incorporate its HLE and shader work directly — the combined work is then
+GPLv2.
 
 ## Order of work
 
