@@ -774,6 +774,133 @@ static void test_neon_f32_b(void) {
     printf("ok   neon f32 b: max/min signed zeros and NaN, compares, abs/neg, vcvt saturation, vmls scalar\n");
 }
 
+/* A lane value repeated across the whole D word, for lanes of 8 << size bits. */
+static uint64_t rep_lane(uint64_t v, int size) {
+    int w = 8 << size;
+    uint64_t r = 0;
+    for (int i = 0; i < 64 / w; i++)
+        r |= (v & neon_lmask(size)) << (i * w);
+    return r;
+}
+
+static void test_neon_int_c(void) {
+    /* VMUL wraps to the lane. 0xFF*0xFF = 0xFE01 keeps 0x01 in 8-bit lanes,
+     * and 0x8000*2 = 0x10000 keeps 0 in 16-bit lanes. */
+    assert(neon_mul(~0ull, ~0ull, 0) == 0x0101010101010101ull);
+    assert(neon_mul(0x8000800080008000ull, 0x0002000200020002ull, 1) == 0);
+    assert(neon_mul(0xFFFFull, 0xFFFFull, 1) == 0x0001ull);                  /* (-1)*(-1) */
+    assert(neon_mul(0x80000000FFFFFFFFull, 0x0000000200000002ull, 2) == 0x00000000FFFFFFFEull);
+    assert(neon_mul(~0ull, ~0ull, 2) == 0x0000000100000001ull);              /* (2^32-1)^2 low word */
+    assert(neon_mul(0x8000000180000001ull, 0x0000000200000002ull, 2) == 0x0000000200000002ull);
+
+    /* VMLA and VMLS add and subtract the wrapped product, wrapping too. */
+    assert(neon_mla(~0ull, ~0ull, 0x0202020202020202ull, 0) == 0xFDFDFDFDFDFDFDFDull);  /* 0xFF + 0xFE */
+    assert(neon_mls(0, 0x0303030303030303ull, 0x0505050505050505ull, 0) == 0xF1F1F1F1F1F1F1F1ull);
+    assert(neon_mla(0, 0x8001800180018001ull, 0x0003000300030003ull, 1) == 0x8003800380038003ull);
+    assert(neon_mls(0x0000000700000005ull, 0x0000000200000003ull, 0x0000000000000002ull, 2)
+           == 0x00000007FFFFFFFFull);                                /* 5 - 3*2 = -1; 7 - 2*0 = 7 */
+
+    /* VQADD and VQSUB, signed at both ends for every size up to 32 bits. */
+    assert(neon_qop(rep_lane(0x7F, 0), rep_lane(0x01, 0), 0, 0, 0) == rep_lane(0x7F, 0));
+    assert(neon_qop(rep_lane(0x80, 0), rep_lane(0xFF, 0), 0, 0, 0) == rep_lane(0x80, 0));
+    assert(neon_qop(rep_lane(0x80, 0), rep_lane(0x01, 0), 0, 0, 1) == rep_lane(0x80, 0));
+    assert(neon_qop(rep_lane(0x7F, 0), rep_lane(0xFF, 0), 0, 0, 1) == rep_lane(0x7F, 0));
+    assert(neon_qop(rep_lane(0x7F, 0), rep_lane(0x7E, 0), 0, 0, 0) == rep_lane(0x7F, 0));  /* 127+126 clamps */
+    assert(neon_qop(rep_lane(0x7FFF, 1), rep_lane(0x0001, 1), 1, 0, 0) == rep_lane(0x7FFF, 1));
+    assert(neon_qop(rep_lane(0x8000, 1), rep_lane(0x8000, 1), 1, 0, 0) == rep_lane(0x8000, 1));
+    assert(neon_qop(rep_lane(0x8000, 1), rep_lane(0x0001, 1), 1, 0, 1) == rep_lane(0x8000, 1));
+    assert(neon_qop(rep_lane(0x7FFF, 1), rep_lane(0xFFFF, 1), 1, 0, 1) == rep_lane(0x7FFF, 1));
+    assert(neon_qop(rep_lane(0x7FFFFFFF, 2), rep_lane(1, 2), 2, 0, 0) == rep_lane(0x7FFFFFFF, 2));
+    assert(neon_qop(rep_lane(0x80000000u, 2), rep_lane(0x80000000u, 2), 2, 0, 0) == rep_lane(0x80000000u, 2));
+    assert(neon_qop(rep_lane(0x80000000u, 2), rep_lane(1, 2), 2, 0, 1) == rep_lane(0x80000000u, 2));
+    assert(neon_qop(rep_lane(0x7FFFFFFF, 2), rep_lane(0xFFFFFFFF, 2), 2, 0, 1) == rep_lane(0x7FFFFFFF, 2));
+
+    /* 64-bit signed: INT64_MAX+1 and INT64_MIN-1 clamp, with no overflow in C. */
+    assert(neon_qop(0x7FFFFFFFFFFFFFFFull, 1, 3, 0, 0) == 0x7FFFFFFFFFFFFFFFull);
+    assert(neon_qop(0x8000000000000000ull, ~0ull, 3, 0, 0) == 0x8000000000000000ull);  /* INT64_MIN + -1 */
+    assert(neon_qop(0x8000000000000000ull, 1, 3, 0, 1) == 0x8000000000000000ull);      /* INT64_MIN - 1 */
+    assert(neon_qop(0x7FFFFFFFFFFFFFFFull, ~0ull, 3, 0, 1) == 0x7FFFFFFFFFFFFFFFull);  /* INT64_MAX - -1 */
+    assert(neon_qop(0x8000000000000000ull, 0x8000000000000000ull, 3, 0, 1) == 0);   /* MIN - MIN: no clamp */
+    assert(neon_qop(0x8000000000000000ull, 0x8000000000000000ull, 3, 0, 0) == 0x8000000000000000ull);
+    assert(neon_qop(0x7FFFFFFFFFFFFFFFull, 0x7FFFFFFFFFFFFFFFull, 3, 0, 0) == 0x7FFFFFFFFFFFFFFFull);
+    assert(neon_qop(0x0000000000000003ull, 0xFFFFFFFFFFFFFFFFull, 3, 0, 0) == 0x0000000000000002ull); /* 3 + -1 */
+    assert(neon_qop(0x7FFFFFFFFFFFFFFEull, 0x0000000000000001ull, 3, 0, 0) == 0x7FFFFFFFFFFFFFFFull); /* no overflow */
+    assert(neon_qop(0x0000000000000001ull, 0x0000000000000003ull, 3, 0, 1) == 0xFFFFFFFFFFFFFFFEull); /* 1 - 3 */
+
+    /* Unsigned, 0 and the top value at every size. */
+    assert(neon_qop(rep_lane(0xFF, 0), rep_lane(0x01, 0), 0, 1, 0) == rep_lane(0xFF, 0));
+    assert(neon_qop(rep_lane(0x00, 0), rep_lane(0x01, 0), 0, 1, 1) == 0);          /* 0 - 1 clamps at 0 */
+    assert(neon_qop(rep_lane(0x80, 0), rep_lane(0x7F, 0), 0, 1, 1) == rep_lane(0x01, 0));
+    assert(neon_qop(rep_lane(0xFFFF, 1), rep_lane(0x0001, 1), 1, 1, 0) == rep_lane(0xFFFF, 1));
+    assert(neon_qop(rep_lane(0x0000, 1), rep_lane(0x0001, 1), 1, 1, 1) == 0);
+    assert(neon_qop(rep_lane(0xFFFFFFFFu, 2), rep_lane(1, 2), 2, 1, 0) == rep_lane(0xFFFFFFFFu, 2));
+    assert(neon_qop(rep_lane(0, 2), rep_lane(1, 2), 2, 1, 1) == 0);
+    assert(neon_qop(~0ull, 1, 3, 1, 0) == ~0ull);                                  /* UINT64_MAX + 1 */
+    assert(neon_qop(0, 1, 3, 1, 1) == 0);                                          /* 0 - 1 */
+    assert(neon_qop(1, 2, 3, 1, 1) == 0);
+    assert(neon_qop(5, 3, 3, 1, 1) == 2);                                          /* not saturating */
+    assert(neon_qop(0x0102030405060708ull, 0x0101010101010101ull, 0, 1, 1) == 0x0001020304050607ull);
+
+    /* VSHR by the full lane width: signed gives the sign, unsigned gives 0. */
+    assert(neon_shr(rep_lane(0x80, 0), 8, 0, 0) == rep_lane(0xFF, 0));
+    assert(neon_shr(rep_lane(0x80, 0), 8, 0, 1) == 0);
+    assert(neon_shr(rep_lane(0x7F, 0), 8, 0, 0) == 0);
+    assert(neon_shr(rep_lane(0x8000, 1), 16, 1, 0) == rep_lane(0xFFFF, 1));
+    assert(neon_shr(rep_lane(0x8000, 1), 16, 1, 1) == 0);
+    assert(neon_shr(rep_lane(0x7FFF, 1), 16, 1, 0) == 0);
+    assert(neon_shr(rep_lane(0x80000000u, 2), 32, 2, 0) == rep_lane(0xFFFFFFFFu, 2));
+    assert(neon_shr(rep_lane(0x80000000u, 2), 32, 2, 1) == 0);
+    assert(neon_shr(rep_lane(0x7FFFFFFFu, 2), 32, 2, 0) == 0);
+    assert(neon_shr(0x8000000000000000ull, 64, 3, 0) == ~0ull);
+    assert(neon_shr(0x8000000000000000ull, 64, 3, 1) == 0);
+    assert(neon_shr(0x7FFFFFFFFFFFFFFFull, 64, 3, 0) == 0);
+    assert(neon_shr(~0ull, 64, 3, 0) == ~0ull);
+    assert(neon_shr(~0ull, 64, 3, 1) == 0);
+
+    /* One-bit right shifts of negative and positive lanes, every size. */
+    assert(neon_shr(rep_lane(0x80, 0), 1, 0, 0) == rep_lane(0xC0, 0));              /* -128 >> 1 = -64 */
+    assert(neon_shr(rep_lane(0xFF, 0), 1, 0, 0) == rep_lane(0xFF, 0));              /* -1 >> 1 = -1 */
+    assert(neon_shr(rep_lane(0x7F, 0), 1, 0, 0) == rep_lane(0x3F, 0));
+    assert(neon_shr(rep_lane(0xFF, 0), 1, 0, 1) == rep_lane(0x7F, 0));
+    assert(neon_shr(rep_lane(0x8000, 1), 1, 1, 0) == rep_lane(0xC000, 1));
+    assert(neon_shr(rep_lane(0xFFFE, 1), 1, 1, 0) == rep_lane(0xFFFF, 1));           /* -2 >> 1 = -1 */
+    assert(neon_shr(rep_lane(0x7FFF, 1), 1, 1, 0) == rep_lane(0x3FFF, 1));
+    assert(neon_shr(rep_lane(0x8000, 1), 1, 1, 1) == rep_lane(0x4000, 1));
+    assert(neon_shr(rep_lane(0x80000000u, 2), 1, 2, 0) == rep_lane(0xC0000000u, 2));
+    assert(neon_shr(rep_lane(0xFFFFFFFEu, 2), 1, 2, 0) == rep_lane(0xFFFFFFFFu, 2));
+    assert(neon_shr(rep_lane(0x7FFFFFFFu, 2), 1, 2, 0) == rep_lane(0x3FFFFFFFu, 2));
+    assert(neon_shr(rep_lane(0x80000000u, 2), 1, 2, 1) == rep_lane(0x40000000u, 2));
+    assert(neon_shr(0x8000000000000000ull, 1, 3, 0) == 0xC000000000000000ull);
+    assert(neon_shr(0x8000000000000001ull, 1, 3, 0) == 0xC000000000000000ull);      /* floor, not toward zero */
+    assert(neon_shr(0x8000000000000001ull, 63, 3, 0) == ~0ull);
+    assert(neon_shr(0x7FFFFFFFFFFFFFFFull, 1, 3, 0) == 0x3FFFFFFFFFFFFFFFull);
+    assert(neon_shr(0x7FFFFFFFFFFFFFFFull, 1, 3, 1) == 0x3FFFFFFFFFFFFFFFull);
+    /* Lanes of mixed sign in one word: each lane shifts on its own sign. */
+    assert(neon_shr(0x80017FFF0002FFFEull, 1, 1, 0) == 0xC0003FFF0001FFFFull);
+
+    /* VSHL: amount esize-1 is the top bit, and bits leaving a lane are dropped. */
+    assert(neon_shl(rep_lane(0x01, 0), 7, 0) == rep_lane(0x80, 0));
+    assert(neon_shl(rep_lane(0x81, 0), 7, 0) == rep_lane(0x80, 0));                /* bit 8 is dropped */
+    assert(neon_shl(rep_lane(0x0001, 1), 15, 1) == rep_lane(0x8000, 1));
+    assert(neon_shl(rep_lane(0x00000001u, 2), 31, 2) == rep_lane(0x80000000u, 2));
+    assert(neon_shl(0x0000000000000001ull, 63, 3) == 0x8000000000000000ull);
+    assert(neon_shl(0x0000000000000003ull, 63, 3) == 0x8000000000000000ull);       /* bit 64 dropped */
+    assert(neon_shl(0x0123456789ABCDEFull, 0, 3) == 0x0123456789ABCDEFull);
+    assert(neon_shl(0x8001ull, 1, 0) == 0x0002ull);     /* lane 1's top bit leaves the lane, not carried */
+
+    /* VSRA: d + (m >> amount), wrapping. */
+    assert(neon_sra(rep_lane(0x10, 0), rep_lane(0x10, 0), 1, 0, 0) == rep_lane(0x18, 0));
+    assert(neon_sra(rep_lane(0xFF, 0), rep_lane(0x80, 0), 8, 0, 0) == rep_lane(0xFE, 0)); /* +(-1) wraps */
+    assert(neon_sra(rep_lane(0x80, 0), rep_lane(0x80, 0), 1, 0, 1) == rep_lane(0xC0, 0));
+    assert(neon_sra(rep_lane(0xFF, 0), rep_lane(0xFE, 0), 1, 0, 0) == rep_lane(0xFE, 0)); /* -2>>1 = -1; 0xFF+0xFF wraps */
+    assert(neon_sra(rep_lane(0xFFFF, 1), rep_lane(0xFFFF, 1), 16, 1, 0) == rep_lane(0xFFFE, 1));
+    assert(neon_sra(0, 0x8000000000000000ull, 64, 3, 0) == ~0ull);
+    assert(neon_sra(1, 0x8000000000000000ull, 64, 3, 0) == 0);                       /* 1 + -1 wraps to 0 */
+    assert(neon_sra(0x8000000000000000ull, 0x8000000000000000ull, 64, 3, 1) == 0x8000000000000000ull); /* unsigned: +0 */
+
+    printf("ok   neon int: wrapping mul/mla/mls, vqadd/vqsub clamp at both ends, shifts by immediate, vsra wrap\n");
+}
+
 static void test_bit_ops(void) {
     assert(vita_rbit(1u) == 0x80000000u);
     assert(vita_rbit(0x12345678u) == 0x1E6A2C48u);
@@ -807,6 +934,7 @@ int main(void) {
     test_neon_lanes();
     test_neon_f32();
     test_neon_f32_b();
+    test_neon_int_c();
     test_bit_ops();
     test_parallel_and_lanes();
     test_vfp_d32();

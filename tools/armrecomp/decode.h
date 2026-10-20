@@ -118,6 +118,11 @@ typedef enum {
     OP_NEON_FABS, OP_NEON_FNEG, /* sign bit only: no flush, NaN payload kept  */
     OP_NEON_FCVT_TO_INT,        /* F32 to S32 or U32 (vfp_unsigned), toward 0 */
     OP_NEON_FCVT_FROM_INT,      /* S32 or U32 (vfp_unsigned) to F32           */
+    OP_NEON_MUL, OP_NEON_MLA, OP_NEON_MLS, /* integer, lanes of 8/16/32, wrapping */
+    OP_NEON_QADD, OP_NEON_QSUB, /* saturating; vfp_unsigned picks the signedness */
+    OP_NEON_SHL, OP_NEON_SHR, OP_NEON_SRA, /* by immediate: imm is the amount,
+                                   neon_size the lane; SHR and SRA use
+                                   vfp_unsigned for the signedness            */
     OP_VMOV_V_RR,               /* two core regs (rt, rt2) -> a D register or
                                    an S pair, vm naming it                   */
     OP_VMOV_RR_V,               /* the reverse                              */

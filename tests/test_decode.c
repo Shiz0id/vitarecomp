@@ -1217,7 +1217,223 @@ static void test_homebrew_forms(void) {
     in = dec(ARM_T32, BASE);
     assert(in.op == OP_NEON_ADD);
 
-    printf("ok   homebrew forms: vld1/vst1, vdup, lane and pair moves, vceq, vpadd, vmovn, vcvt, rev/rbit, extends, smulxy, f32 vector, f32 max/min/cmp/abs/neg/cvt\n");
+    /* Integer VMUL, VMLA, VMLS, every size in D and Q. The opc is 1001 for all
+     * three: B set and U clear is VMUL, B clear is VMLA (U=0) or VMLS (U=1). */
+    put16(0, 0xEF01); put16(2, 0x0912);                  /* vmul.i8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MUL && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.neon_size == 0);
+    put16(0, 0xEF52); put16(2, 0x09F4);                  /* vmul.i16 q8, q9, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MUL && in.vd == 16 && in.vn == 18 && in.vm == 20 && in.neon_q && in.neon_size == 1);
+    put16(0, 0xEF61); put16(2, 0x09B2);                  /* vmul.i32 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MUL && in.vd == 16 && in.vn == 17 && in.vm == 18 && !in.neon_q && in.neon_size == 2);
+    put16(0, 0xEF12); put16(2, 0x0954);                  /* vmul.i16 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MUL && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.neon_q && in.neon_size == 1);
+    /* VMUL.P8 is the same opc with U set. It is a polynomial multiply, not a
+     * wrapping one, so it must not be claimed as OP_NEON_MUL. */
+    put16(0, 0xFF01); put16(2, 0x0912);                  /* vmul.p8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_MUL && in.cls == A_SIMD);
+    put16(0, 0xFF02); put16(2, 0x0954);                  /* vmul.p8 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_MUL && in.cls == A_SIMD);
+    /* The float VMUL and VMLA share the three-register group with opc 1101. */
+    put16(0, 0xFF01); put16(2, 0x0D12);                  /* vmul.f32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMUL && in.op != OP_NEON_MUL);
+    put16(0, 0xEF01); put16(2, 0x0D12);                  /* vmla.f32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMLA && in.op != OP_NEON_MLA);
+
+    put16(0, 0xEF01); put16(2, 0x0902);                  /* vmla.i8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MLA && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.neon_size == 0);
+    put16(0, 0xEF12); put16(2, 0x0944);                  /* vmla.i16 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MLA && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.neon_q && in.neon_size == 1);
+    put16(0, 0xEF61); put16(2, 0x09A2);                  /* vmla.i32 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MLA && in.vd == 16 && in.vn == 17 && in.vm == 18 && !in.neon_q && in.neon_size == 2);
+    put16(0, 0xFF01); put16(2, 0x0902);                  /* vmls.i8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MLS && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.neon_size == 0);
+    put16(0, 0xFF12); put16(2, 0x0944);                  /* vmls.i16 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MLS && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.neon_q && in.neon_size == 1);
+    put16(0, 0xFF62); put16(2, 0x09E4);                  /* vmls.i32 q8, q9, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MLS && in.vd == 16 && in.vn == 18 && in.vm == 20 && in.neon_q && in.neon_size == 2);
+    /* Neighbours: VADD and VSUB are opc 1000, VMLA.F32 is not an integer VMLA. */
+    put16(0, 0xEF01); put16(2, 0x0802);                  /* vadd.i8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ADD && in.op != OP_NEON_MLA);
+    put16(0, 0xFF61); put16(2, 0x08A2);                  /* vsub.i32 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SUB && in.op != OP_NEON_MLS);
+
+    /* Saturating add and subtract, every size in D and Q. U picks the sign:
+     * VQADD is opc 0000 and VQSUB opc 0010, both with B set. */
+    put16(0, 0xEF01); put16(2, 0x0012);                  /* vqadd.s8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QADD && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.neon_size == 0 && !in.vfp_unsigned);
+    put16(0, 0xFF01); put16(2, 0x0012);                  /* vqadd.u8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QADD && in.neon_size == 0 && in.vfp_unsigned);
+    put16(0, 0xEF12); put16(2, 0x0054);                  /* vqadd.s16 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QADD && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.neon_q && in.neon_size == 1 && !in.vfp_unsigned);
+    put16(0, 0xFF12); put16(2, 0x0054);                  /* vqadd.u16 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QADD && in.neon_q && in.neon_size == 1 && in.vfp_unsigned);
+    put16(0, 0xEF61); put16(2, 0x00B2);                  /* vqadd.s32 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QADD && in.vd == 16 && in.vn == 17 && in.vm == 18 && !in.neon_q && in.neon_size == 2 && !in.vfp_unsigned);
+    put16(0, 0xFF62); put16(2, 0x00F4);                  /* vqadd.u32 q8, q9, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QADD && in.vd == 16 && in.vn == 18 && in.vm == 20 && in.neon_q && in.neon_size == 2 && in.vfp_unsigned);
+    put16(0, 0xEF32); put16(2, 0x0054);                  /* vqadd.s64 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QADD && in.neon_q && in.neon_size == 3 && !in.vfp_unsigned);
+    put16(0, 0xFF71); put16(2, 0x00B2);                  /* vqadd.u64 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QADD && in.vd == 16 && in.neon_size == 3 && in.vfp_unsigned && !in.neon_q);
+    put16(0, 0xEF01); put16(2, 0x0212);                  /* vqsub.s8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QSUB && in.neon_size == 0 && !in.vfp_unsigned && !in.neon_q);
+    put16(0, 0xFF11); put16(2, 0x0212);                  /* vqsub.u16 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QSUB && in.neon_size == 1 && in.vfp_unsigned && !in.neon_q);
+    put16(0, 0xEF12); put16(2, 0x0254);                  /* vqsub.s16 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QSUB && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.neon_q && in.neon_size == 1);
+    put16(0, 0xEF61); put16(2, 0x02B2);                  /* vqsub.s32 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QSUB && in.vd == 16 && in.neon_size == 2 && !in.vfp_unsigned);
+    put16(0, 0xFF62); put16(2, 0x02F4);                  /* vqsub.u32 q8, q9, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QSUB && in.vd == 16 && in.neon_q && in.neon_size == 2 && in.vfp_unsigned);
+    put16(0, 0xEF32); put16(2, 0x0254);                  /* vqsub.s64 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QSUB && in.neon_q && in.neon_size == 3 && !in.vfp_unsigned);
+    put16(0, 0xFF71); put16(2, 0x02B2);                  /* vqsub.u64 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QSUB && in.vd == 16 && in.neon_size == 3 && in.vfp_unsigned);
+    /* The wrapping forms share the opc slots with the other pairs, so VADD and
+     * VSUB (opc 1000) must not be claimed as saturating, nor the reverse. */
+    put16(0, 0xEF01); put16(2, 0x0802);                  /* vadd.i8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ADD && in.op != OP_NEON_QADD);
+    put16(0, 0xEF32); put16(2, 0x0844);                  /* vadd.i64 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ADD && in.op != OP_NEON_QADD);
+    put16(0, 0xEF11); put16(2, 0x0B02);                  /* vqdmulh.s16 d0, d1, d2 (not claimed) */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_QADD && in.op != OP_NEON_MUL);
+
+    /* Shifts by immediate. L:imm6 (h2 bit 7 and h1 bits 5:0) gives the size and
+     * amount: VSHR is opc 0000 and VSRA 0001 (right, amount 2*esize - L:imm6),
+     * VSHL 0101 with U clear (left, amount L:imm6 - esize). Both ends are tested:
+     * the full lane width and 1 for right shifts, 0 and esize-1 for VSHL. */
+    put16(0, 0xEF8F); put16(2, 0x0011);                  /* vshr.s8 d0, d1, #1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHR && in.vd == 0 && in.vm == 1 && !in.neon_q && in.neon_size == 0 && in.imm == 1 && !in.vfp_unsigned);
+    put16(0, 0xEF88); put16(2, 0x0011);                  /* vshr.s8 d0, d1, #8: full width */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHR && in.neon_size == 0 && in.imm == 8 && !in.vfp_unsigned);
+    put16(0, 0xFFC8); put16(2, 0x0031);                  /* vshr.u8 d16, d17, #8 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHR && in.vd == 16 && in.vm == 17 && in.neon_size == 0 && in.imm == 8 && in.vfp_unsigned);
+    put16(0, 0xEF90); put16(2, 0x0011);                  /* vshr.s16 d0, d1, #16: full width */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHR && in.neon_size == 1 && in.imm == 16 && !in.vfp_unsigned);
+    put16(0, 0xFFDF); put16(2, 0x0072);                  /* vshr.u16 q8, q9, #1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHR && in.vd == 16 && in.vm == 18 && in.neon_q && in.neon_size == 1 && in.imm == 1 && in.vfp_unsigned);
+    put16(0, 0xEFA0); put16(2, 0x0052);                  /* vshr.s32 q0, q1, #32: full width */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHR && in.vd == 0 && in.vm == 2 && in.neon_q && in.neon_size == 2 && in.imm == 32 && !in.vfp_unsigned);
+    put16(0, 0xFFE0); put16(2, 0x0031);                  /* vshr.u32 d16, d17, #32: full width */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHR && in.neon_size == 2 && in.imm == 32 && in.vfp_unsigned);
+    put16(0, 0xEFBF); put16(2, 0x00D2);                  /* vshr.s64 q0, q1, #1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHR && in.neon_q && in.neon_size == 3 && in.imm == 1 && !in.vfp_unsigned);
+    put16(0, 0xFFC0); put16(2, 0x00F2);                  /* vshr.u64 q8, q9, #64: full width */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHR && in.vd == 16 && in.vm == 18 && in.neon_q && in.neon_size == 3 && in.imm == 64 && in.vfp_unsigned);
+    put16(0, 0xEF80); put16(2, 0x0091);                  /* vshr.s64 d0, d1, #64: full width */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHR && !in.neon_q && in.neon_size == 3 && in.imm == 64);
+
+    put16(0, 0xEF8F); put16(2, 0x0511);                  /* vshl.i8 d0, d1, #7: esize-1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHL && in.vd == 0 && in.vm == 1 && in.neon_size == 0 && in.imm == 7);
+    put16(0, 0xEF88); put16(2, 0x0511);                  /* vshl.i8 d0, d1, #0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHL && in.neon_size == 0 && in.imm == 0);
+    put16(0, 0xEFDF); put16(2, 0x0572);                  /* vshl.i16 q8, q9, #15: esize-1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHL && in.vd == 16 && in.vm == 18 && in.neon_q && in.neon_size == 1 && in.imm == 15);
+    put16(0, 0xEF90); put16(2, 0x0511);                  /* vshl.i16 d0, d1, #0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHL && in.neon_size == 1 && in.imm == 0);
+    put16(0, 0xEFFF); put16(2, 0x0531);                  /* vshl.i32 d16, d17, #31: esize-1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHL && in.vd == 16 && in.vm == 17 && in.neon_size == 2 && in.imm == 31);
+    put16(0, 0xEFA0); put16(2, 0x0552);                  /* vshl.i32 q0, q1, #0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHL && in.neon_q && in.neon_size == 2 && in.imm == 0);
+    put16(0, 0xEFBF); put16(2, 0x0591);                  /* vshl.i64 d0, d1, #63: esize-1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHL && in.neon_size == 3 && in.imm == 63 && !in.neon_q);
+
+    put16(0, 0xEF88); put16(2, 0x0111);                  /* vsra.s8 d0, d1, #8: full width */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SRA && in.vd == 0 && in.vm == 1 && in.neon_size == 0 && in.imm == 8 && !in.vfp_unsigned);
+    put16(0, 0xFFD0); put16(2, 0x0172);                  /* vsra.u16 q8, q9, #16: full width */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SRA && in.vd == 16 && in.vm == 18 && in.neon_q && in.neon_size == 1 && in.imm == 16 && in.vfp_unsigned);
+    put16(0, 0xEFE0); put16(2, 0x0131);                  /* vsra.s32 d16, d17, #32: full width */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SRA && in.vd == 16 && in.neon_size == 2 && in.imm == 32 && !in.vfp_unsigned);
+    put16(0, 0xFF80); put16(2, 0x01D2);                  /* vsra.u64 q0, q1, #64: full width */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SRA && in.neon_q && in.neon_size == 3 && in.imm == 64 && in.vfp_unsigned);
+    put16(0, 0xFF8F); put16(2, 0x0111);                  /* vsra.u8 d0, d1, #1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SRA && in.neon_size == 0 && in.imm == 1 && in.vfp_unsigned);
+    put16(0, 0xEFFF); put16(2, 0x01B1);                  /* vsra.s64 d16, d17, #1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SRA && in.vd == 16 && in.vm == 17 && in.neon_size == 3 && in.imm == 1 && !in.vfp_unsigned);
+
+    /* Negatives. The one-register immediate forms share h1 and h2 bit 7 with
+     * these, and must still decode as VMOV/VMVN immediate. VSLI (opc 0101 with
+     * U set), VSRI (0100, U set) and VRSHR (0010) are other operations and are
+     * not claimed. */
+    put16(0, 0xEFC0); put16(2, 0x0010);                  /* vmov.i32 d16, #0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_IMM && in.neon_fn == NL_MOV && in.vd == 16 && in.imm64 == 0 && !in.neon_q);
+    put16(0, 0xEF80); put16(2, 0x0030);                  /* vmvn.i32 d0, #0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_IMM && in.neon_fn == NL_MVN);
+    put16(0, 0xFF88); put16(2, 0x0511);                  /* vsli.8 d0, d1, #0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_SHL && in.op != OP_NEON_SHR && in.op != OP_NEON_SRA && in.cls == A_SIMD);
+    put16(0, 0xFF8F); put16(2, 0x0411);                  /* vsri.8 d0, d1, #1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_SHR && in.op != OP_NEON_SRA && in.cls == A_SIMD);
+    put16(0, 0xEF8F); put16(2, 0x0211);                  /* vrshr.s8 d0, d1, #1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_SHR && in.op != OP_NEON_SRA && in.cls == A_SIMD);
+    /* The fixed-point VCVT (#16) has the same h2 bit 4 and bit 7 as a shift;
+     * it must stay out of the shift group. */
+    put16(0, 0xEFB0); put16(2, 0x0F11);                  /* vcvt.s32.f32 d0, d1, #16 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_SHR && in.op != OP_NEON_SHL && in.op != OP_NEON_SRA);
+
+    printf("ok   homebrew forms: vld1/vst1, vdup, lane and pair moves, vceq, vpadd, vmovn, vcvt, rev/rbit, extends, smulxy, f32 vector, f32 max/min/cmp/abs/neg/cvt, integer vmul/vmla/vmls, vqadd/vqsub, shifts by immediate\n");
 }
 
 static void test_shifts_and_indexing(void) {

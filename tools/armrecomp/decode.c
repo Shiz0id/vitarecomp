@@ -855,6 +855,33 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
             set(o, A_SIMD, "vpadd.i");
             return 1;
         }
+        /* Integer multiply: opc 1001. With B clear it is VMLA (U=0) or VMLS
+         * (U=1). With B set and U clear it is VMUL. B set and U set is VMUL.P8,
+         * the polynomial multiply, which is a different operation and is not
+         * claimed; the other sizes with U set there are undefined. */
+        if (opc == 0x9 && size != 3) {
+            if (B == 1 && U == 0) {
+                o->op = OP_NEON_MUL;
+                set(o, A_SIMD, "vmul.i");
+                return 1;
+            }
+            if (B == 0) {
+                o->op = U ? OP_NEON_MLS : OP_NEON_MLA;
+                set(o, A_SIMD, U ? "vmls.i" : "vmla.i");
+                return 1;
+            }
+        }
+        /* Saturating add and subtract: opc 0000 (VQADD) and 0010 (VQSUB) with
+         * B set, every size including 64-bit, U picking the signedness. */
+        if ((opc == 0x0 || opc == 0x2) && B == 1) {
+            o->op = opc == 0x0 ? OP_NEON_QADD : OP_NEON_QSUB;
+            o->vfp_unsigned = (uint8_t)U;
+            if (opc == 0x0)
+                set(o, A_SIMD, U ? "vqadd.u" : "vqadd.s");
+            else
+                set(o, A_SIMD, U ? "vqsub.u" : "vqsub.s");
+            return 1;
+        }
         if (opc == 0xD && !(size & 1)) {                   /* float, .F32 only */
             /* For floats the size field is sz (bit 20, 0 for F32) and bit 21
              * (size>>1) is an operation bit, so the operation is picked by U,
@@ -932,6 +959,44 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
             return 1;
         }
         return 0;
+    }
+
+    /* Two registers and a shift amount: h1 111U 1111 1D imm6, h2 dddd opc(4) L
+     * Q M 1 mmmm. Bit 7 of h1 is set and bit 4 of h2 is set, which keeps this
+     * apart from the scalar and miscellaneous groups. The lane size and the
+     * amount share L:imm6 (h2 bit 7 and h1 bits 5:0). Its highest set bit gives
+     * the size: 0001xxx is 8-bit lanes, 001xxxx 16-bit, 01xxxxx 32-bit and
+     * 1xxxxxx 64-bit. The bits under it are the shift. A right shift is
+     * 2*esize - L:imm6, so the full lane width is encodable: it is L:imm6 =
+     * esize, the bottom of each size's range. A left shift is L:imm6 - esize,
+     * 0 to esize-1. A value under 8 (0000xxx) is not this group: it is the
+     * one-register modified immediate, already tried above. */
+    if ((h1 & 0x0080) && (h2 & 0x0010)) {
+        int opc = (h2 >> 8) & 0xF;
+        int v = (((h2 >> 7) & 1) << 6) | (h1 & 0x3F);      /* L:imm6 */
+        if (v < 8 || (Q && ((d | m) & 1))) return 0;
+        int size = v >= 64 ? 3 : v >= 32 ? 2 : v >= 16 ? 1 : 0;
+        int esize = 8 << size;
+        if (opc == 0x0 || opc == 0x1) {                    /* VSHR, VSRA */
+            o->op = opc == 0x0 ? OP_NEON_SHR : OP_NEON_SRA;
+            o->imm = (uint32_t)(2 * esize - v);
+            if (opc == 0x0)
+                set(o, A_SIMD, U ? "vshr.u" : "vshr.s");
+            else
+                set(o, A_SIMD, U ? "vsra.u" : "vsra.s");
+        } else if (opc == 0x5 && !U) {                     /* VSHL (VSLI is U=1) */
+            o->op = OP_NEON_SHL;
+            o->imm = (uint32_t)(v - esize);
+            set(o, A_SIMD, "vshl.i");
+        } else {
+            return 0;
+        }
+        o->vd = (int8_t)d; o->vm = (int8_t)m;
+        o->neon_q = (uint8_t)Q;
+        o->neon_size = (uint8_t)size;
+        o->vfp_unsigned = (uint8_t)U;
+        o->has_imm = 1;
+        return 1;
     }
 
     /* Two registers, miscellaneous: h1 1111 1111 1D11 ss10. Only VMOVN

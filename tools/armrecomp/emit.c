@@ -1220,6 +1220,51 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             break;
         }
 
+        /* Integer multiply, saturating add and subtract, and shifts by
+         * immediate. Each helper does the whole D word (neon.h). The Q halves
+         * are independent (the registers of a Q are aligned pairs, so no half
+         * reads what the other half has written), so the order does not matter.
+         * The accumulate forms read the destination before they write it. */
+        case OP_NEON_MUL: case OP_NEON_MLA: case OP_NEON_MLS: {
+            int regs = in->neon_q ? 2 : 1;
+            for (int k = 0; k < regs; k++) {
+                int d = in->vd + k, n = in->vn + k, m = in->vm + k;
+                if (in->op == OP_NEON_MUL)
+                    fprintf(f, "    neon_setd(%d, neon_mul(neon_getd(%d), neon_getd(%d), %d));\n",
+                            d, n, m, in->neon_size);
+                else
+                    fprintf(f, "    neon_setd(%d, neon_%s(neon_getd(%d), neon_getd(%d), neon_getd(%d), %d));\n",
+                            d, in->op == OP_NEON_MLA ? "mla" : "mls", d, n, m, in->neon_size);
+            }
+            break;
+        }
+
+        case OP_NEON_QADD: case OP_NEON_QSUB: {
+            int regs = in->neon_q ? 2 : 1;
+            for (int k = 0; k < regs; k++)
+                fprintf(f, "    neon_setd(%d, neon_qop(neon_getd(%d), neon_getd(%d), %d, %d, %d));\n",
+                        in->vd + k, in->vn + k, in->vm + k, in->neon_size,
+                        in->vfp_unsigned, in->op == OP_NEON_QSUB);
+            break;
+        }
+
+        case OP_NEON_SHL: case OP_NEON_SHR: case OP_NEON_SRA: {
+            int regs = in->neon_q ? 2 : 1;
+            for (int k = 0; k < regs; k++) {
+                int d = in->vd + k, m = in->vm + k;
+                if (in->op == OP_NEON_SHL)
+                    fprintf(f, "    neon_setd(%d, neon_shl(neon_getd(%d), %u, %d));\n",
+                            d, m, (unsigned)in->imm, in->neon_size);
+                else if (in->op == OP_NEON_SHR)
+                    fprintf(f, "    neon_setd(%d, neon_shr(neon_getd(%d), %u, %d, %d));\n",
+                            d, m, (unsigned)in->imm, in->neon_size, in->vfp_unsigned);
+                else
+                    fprintf(f, "    neon_setd(%d, neon_sra(neon_getd(%d), neon_getd(%d), %u, %d, %d));\n",
+                            d, d, m, (unsigned)in->imm, in->neon_size, in->vfp_unsigned);
+            }
+            break;
+        }
+
         case OP_NEON_IMM: {
             int regs = in->neon_q ? 2 : 1;
             for (int k = 0; k < regs; k++) {

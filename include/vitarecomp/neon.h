@@ -311,6 +311,123 @@ static inline uint64_t neon_i2f(uint64_t x, int is_unsigned) {
                        neon_i32_to_f32(neon_hi32(x), is_unsigned));
 }
 
+/* --- Advanced SIMD integer multiply, saturation and shifts ------------------
+ *
+ * Lanes are 8 << size bits. The helpers read each lane as an unsigned value
+ * and write it back masked, so no bit crosses a lane boundary. A signed lane
+ * is sign-extended by hand (neon_sext): a right shift of a negative int is
+ * implementation-defined in C, and the shifts below never rely on it.
+ * The lane adds and subtracts of the same-length group (neon_add, neon_sub)
+ * are reused for the accumulating forms. */
+
+static inline uint64_t neon_lmask(int size) {
+    return size == 3 ? ~0ull : (1ull << (8u << size)) - 1;
+}
+
+static inline uint64_t neon_lane_of(uint64_t x, int size, int i) {
+    return (x >> (i * (8u << size))) & neon_lmask(size);
+}
+
+/* A lane of w bits (w < 64) as a signed value. The sign is taken by
+ * subtraction: a lane v with its top bit set is -(2^w - v), and 2^w - v is
+ * computed as sign - (v below the sign bit), all in unsigned values. */
+static inline int64_t neon_sext(uint64_t v, int w) {
+    uint64_t sign = 1ull << (w - 1);
+    if (v & sign) return -(int64_t)(sign - (v & (sign - 1)));
+    return (int64_t)v;
+}
+
+/* VMUL, VMLA and VMLS. The product of two lanes is formed in a uint64_t, so
+ * 16- and 32-bit lanes never promote to a signed int and overflow. Only the
+ * low lane bits are kept, which is what wrapping means here. The low bits of a
+ * product do not depend on signedness, so one helper serves all of them. */
+static inline uint64_t neon_mul(uint64_t n, uint64_t m, int size) {
+    int w = 8 << size;
+    uint64_t r = 0;
+    for (int i = 0; i < 64 / w; i++)
+        r |= ((neon_lane_of(n, size, i) * neon_lane_of(m, size, i)) & neon_lmask(size)) << (i * w);
+    return r;
+}
+
+static inline uint64_t neon_mla(uint64_t d, uint64_t n, uint64_t m, int size) {
+    return neon_add(d, neon_mul(n, m, size), size);
+}
+
+static inline uint64_t neon_mls(uint64_t d, uint64_t n, uint64_t m, int size) {
+    return neon_sub(d, neon_mul(n, m, size), size);
+}
+
+/* VQADD and VQSUB: each lane's sum or difference, clamped to the lane type.
+ * Signed clamps to [-2^(w-1), 2^(w-1)-1], unsigned to [0, 2^w-1]. For lanes
+ * under 64 bits the arithmetic is exact in int64 or uint64, so the clamp is a
+ * plain comparison. A 64-bit lane has no wider type to sum in, so overflow is
+ * read from the operands' sign bits (signed) or from a wrap (unsigned), and the
+ * clamp value is picked by the sign of the first operand. Signed overflow is
+ * never computed in C, so none of this is undefined.
+ *
+ * QC, the cumulative saturation flag, is not modelled: FPSCR has no QC bit in
+ * vfp.h and nothing in the runtime reads one. */
+static inline uint64_t neon_qop(uint64_t n, uint64_t m, int size, int is_unsigned, int sub) {
+    int w = 8 << size;
+    uint64_t mask = neon_lmask(size), r = 0;
+    for (int i = 0; i < 64 / w; i++) {
+        uint64_t a = neon_lane_of(n, size, i), b = neon_lane_of(m, size, i), x;
+        if (size == 3) {
+            uint64_t s = sub ? a - b : a + b;
+            if (is_unsigned)
+                x = sub ? (a < b ? 0 : s) : (s < a ? ~0ull : s);
+            else if (sub ? (((a ^ b) & (a ^ s)) >> 63) : (((~(a ^ b)) & (a ^ s)) >> 63))
+                x = (a >> 63) ? 0x8000000000000000ull : 0x7FFFFFFFFFFFFFFFull;
+            else
+                x = s;
+        } else if (is_unsigned) {
+            uint64_t s = sub ? (a < b ? 0 : a - b) : a + b;
+            x = s > mask ? mask : s;
+        } else {
+            int64_t sa = neon_sext(a, w), sb = neon_sext(b, w);
+            int64_t s = sub ? sa - sb : sa + sb;
+            int64_t hi = (1ll << (w - 1)) - 1, lo = -hi - 1;
+            x = (uint64_t)(s > hi ? hi : s < lo ? lo : s) & mask;
+        }
+        r |= x << (i * w);
+    }
+    return r;
+}
+
+/* VSHL by immediate: each lane shifted left by amt, 0 <= amt < lane width.
+ * Bits shifted out of a lane are masked off rather than carried upward. */
+static inline uint64_t neon_shl(uint64_t n, int amt, int size) {
+    int w = 8 << size;
+    uint64_t r = 0;
+    for (int i = 0; i < 64 / w; i++)
+        r |= ((neon_lane_of(n, size, i) << amt) & neon_lmask(size)) << (i * w);
+    return r;
+}
+
+/* VSHR by immediate, 1 <= amt <= lane width. The full width is a legal
+ * amount and is not a C shift (which would be undefined): unsigned lanes give
+ * zero, and signed lanes give all sign bits. A negative signed lane is shifted
+ * as ~((~v) >> amt), which is the arithmetic shift written in unsigned
+ * arithmetic, so it rounds toward minus infinity as VSHR does. */
+static inline uint64_t neon_shr(uint64_t n, int amt, int size, int is_unsigned) {
+    int w = 8 << size;
+    uint64_t mask = neon_lmask(size), sign = 1ull << (w - 1), r = 0;
+    for (int i = 0; i < 64 / w; i++) {
+        uint64_t v = neon_lane_of(n, size, i), x;
+        int neg = !is_unsigned && (v & sign);
+        if (amt >= w)     x = neg ? mask : 0;
+        else if (neg)     x = mask & ~(((~v) & mask) >> amt);
+        else              x = v >> amt;
+        r |= x << (i * w);
+    }
+    return r;
+}
+
+/* VSRA: each lane of m shifted right as VSHR does, then added to d, wrapping. */
+static inline uint64_t neon_sra(uint64_t d, uint64_t m, int amt, int size, int is_unsigned) {
+    return neon_add(d, neon_shr(m, amt, size, is_unsigned), size);
+}
+
 #ifdef __cplusplus
 }
 #endif
