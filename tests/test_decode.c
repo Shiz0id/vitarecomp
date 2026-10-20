@@ -1636,6 +1636,147 @@ static void test_neon_halving_forms(void) {
     printf("ok   neon halving add and subtract, pairwise max and min: every size, the rejects\n");
 }
 
+/* The narrowing add and subtract (opc 0100, 0110), the absolute difference
+ * long (0101, 0111), the polynomial VMULL.P8 (1110) and VMUL.P8 (1001 with B
+ * and U set). Each encoding was taken from arm-vita-eabi-as and checked by
+ * objdump. Size is the result lane for the narrowing forms, so the suffix is
+ * one step up. The rejects: an odd Qn or Qm for the narrowing forms, an odd
+ * Qd for VABAL and VMULL, U set on VMULL.P8, size 01 or 10 on it, and size 01
+ * on VMUL.P8. The odd Dd of vaddhn.i64 d3 is legal, since the result is D. */
+static void test_neon_hn_poly_forms(void) {
+    arm_insn in;
+
+    put16(0, 0xEF82); put16(2, 0x0404);                  /* vaddhn.i16 d0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ADDHN && in.vd == 0 && in.vn == 2 && in.vm == 4);
+    assert(in.neon_size == 0 && !in.vfp_unsigned && strcmp(in.mnemonic, "vaddhn.i16") == 0);
+    put16(0, 0xEFD2); put16(2, 0x04A4);                  /* vaddhn.i32 d16, q9, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ADDHN && in.vd == 16 && in.vn == 18 && in.vm == 20);
+    assert(in.neon_size == 1 && !in.vfp_unsigned && strcmp(in.mnemonic, "vaddhn.i32") == 0);
+    put16(0, 0xEFA4); put16(2, 0x3406);                  /* vaddhn.i64 d3, q2, q3: odd Dd */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ADDHN && in.vd == 3 && in.vn == 4 && in.vm == 6);
+    assert(in.neon_size == 2 && !in.vfp_unsigned && strcmp(in.mnemonic, "vaddhn.i64") == 0);
+    put16(0, 0xFF82); put16(2, 0x0404);                  /* vraddhn.i16 d0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_RADDHN && in.vd == 0 && in.vn == 2 && in.vm == 4);
+    assert(in.neon_size == 0 && strcmp(in.mnemonic, "vraddhn.i16") == 0);
+    put16(0, 0xFFE0); put16(2, 0x14A2);                  /* vraddhn.i64 d17, q8, q9 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_RADDHN && in.vd == 17 && in.vn == 16 && in.vm == 18);
+    assert(in.neon_size == 2 && strcmp(in.mnemonic, "vraddhn.i64") == 0);
+    put16(0, 0xEF82); put16(2, 0x0604);                  /* vsubhn.i16 d0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SUBHN && in.vd == 0 && in.vn == 2 && in.vm == 4);
+    assert(in.neon_size == 0 && strcmp(in.mnemonic, "vsubhn.i16") == 0);
+    put16(0, 0xEF98); put16(2, 0x560C);                  /* vsubhn.i32 d5, q4, q6 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SUBHN && in.vd == 5 && in.vn == 8 && in.vm == 12);
+    assert(in.neon_size == 1 && strcmp(in.mnemonic, "vsubhn.i32") == 0);
+    put16(0, 0xFF92); put16(2, 0x0604);                  /* vrsubhn.i32 d0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_RSUBHN && in.vd == 0 && in.vn == 2 && in.vm == 4);
+    assert(in.neon_size == 1 && strcmp(in.mnemonic, "vrsubhn.i32") == 0);
+    put16(0, 0xFFE2); put16(2, 0x06A4);                  /* vrsubhn.i64 d16, q9, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_RSUBHN && in.vd == 16 && in.vn == 18 && in.vm == 20);
+    assert(in.neon_size == 2 && strcmp(in.mnemonic, "vrsubhn.i64") == 0);
+
+    put16(0, 0xEF82); put16(2, 0x0503);                  /* vabal.s8 q0, d2, d3 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ABAL && in.vd == 0 && in.vn == 2 && in.vm == 3);
+    assert(in.neon_size == 0 && !in.vfp_unsigned && strcmp(in.mnemonic, "vabal.s8") == 0);
+    put16(0, 0xFFD1); put16(2, 0x05A2);                  /* vabal.u16 q8, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ABAL && in.vd == 16 && in.vn == 17 && in.vm == 18);
+    assert(in.neon_size == 1 && in.vfp_unsigned && strcmp(in.mnemonic, "vabal.u16") == 0);
+    put16(0, 0xEFA4); put16(2, 0x2505);                  /* vabal.s32 q1, d4, d5 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ABAL && in.vd == 2 && in.vn == 4 && in.vm == 5);
+    assert(in.neon_size == 2 && !in.vfp_unsigned && strcmp(in.mnemonic, "vabal.s32") == 0);
+    put16(0, 0xFF81); put16(2, 0x0702);                  /* vabdl.u8 q0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ABDL && in.vd == 0 && in.vn == 1 && in.vm == 2);
+    assert(in.neon_size == 0 && in.vfp_unsigned && strcmp(in.mnemonic, "vabdl.u8") == 0);
+    put16(0, 0xEFD1); put16(2, 0x07A2);                  /* vabdl.s16 q8, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ABDL && in.vd == 16 && in.vn == 17 && in.vm == 18);
+    assert(in.neon_size == 1 && !in.vfp_unsigned && strcmp(in.mnemonic, "vabdl.s16") == 0);
+    put16(0, 0xFFA0); put16(2, 0x4701);                  /* vabdl.u32 q2, d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ABDL && in.vd == 4 && in.vn == 0 && in.vm == 1);
+    assert(in.neon_size == 2 && in.vfp_unsigned && strcmp(in.mnemonic, "vabdl.u32") == 0);
+    put16(0, 0xEF80); put16(2, 0x0701);                  /* vabdl.s8 q0, d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ABDL && in.vd == 0 && in.vn == 0 && in.vm == 1);
+    assert(in.neon_size == 0 && !in.vfp_unsigned && strcmp(in.mnemonic, "vabdl.s8") == 0);
+
+    put16(0, 0xEF81); put16(2, 0x0E02);                  /* vmull.p8 q0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_PMULL && in.vd == 0 && in.vn == 1 && in.vm == 2);
+    assert(in.neon_size == 0 && !in.vfp_unsigned && strcmp(in.mnemonic, "vmull.p8") == 0);
+    put16(0, 0xEFC1); put16(2, 0x0EA2);                  /* vmull.p8 q8, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_PMULL && in.vd == 16 && in.vn == 17 && in.vm == 18);
+    assert(in.neon_size == 0 && strcmp(in.mnemonic, "vmull.p8") == 0);
+
+    /* VMUL.P8 has no signedness, so U (here 1) is not carried into vfp_unsigned. */
+    put16(0, 0xFF01); put16(2, 0x0912);                  /* vmul.p8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_PMUL && in.vd == 0 && in.vn == 1 && in.vm == 2);
+    assert(!in.neon_q && in.neon_size == 0 && !in.vfp_unsigned && strcmp(in.mnemonic, "vmul.p8") == 0);
+    put16(0, 0xFF02); put16(2, 0x0954);                  /* vmul.p8 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_PMUL && in.vd == 0 && in.vn == 2 && in.vm == 4);
+    assert(in.neon_q && in.neon_size == 0 && strcmp(in.mnemonic, "vmul.p8") == 0);
+    put16(0, 0xFF42); put16(2, 0x09F4);                  /* vmul.p8 q8, q9, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_PMUL && in.vd == 16 && in.vn == 18 && in.vm == 20);
+    assert(in.neon_q && in.neon_size == 0 && strcmp(in.mnemonic, "vmul.p8") == 0);
+
+    /* Neighbours: the claims above do not take the integer forms that share
+     * their opc or U bits. VADDL (opc 0000), VMULL.S8 (1100), VMUL.I8 (1001,
+     * B set, U clear) and VMLS.I8 (1001, B clear, U set) all keep their ops. */
+    put16(0, 0xEF81); put16(2, 0x0002);                  /* vaddl.s8 q0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ADDL && in.vd == 0 && in.vn == 1 && in.vm == 2);
+    put16(0, 0xEF81); put16(2, 0x0C02);                  /* vmull.s8 q0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MULL && in.vd == 0 && in.vn == 1 && in.vm == 2);
+    put16(0, 0xEF01); put16(2, 0x0912);                  /* vmul.i8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MUL && in.vd == 0 && in.vn == 1 && in.vm == 2);
+    put16(0, 0xFF01); put16(2, 0x0902);                  /* vmls.i8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MLS && in.vd == 0 && in.vn == 1 && in.vm == 2);
+
+    /* Rejects. */
+    put16(0, 0xEF83); put16(2, 0x0404);                  /* vaddhn: n = 3, Qn odd */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xEF82); put16(2, 0x0405);                  /* vaddhn: m = 5, Qm odd */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xEF82); put16(2, 0x1503);                  /* vabal: d = 1, Qd odd */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xFF81); put16(2, 0x0E02);                  /* vmull.p8 with U set: UNDEFINED */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xEF91); put16(2, 0x0E02);                  /* vmull.p8 with size 01: UNDEFINED */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xEFA1); put16(2, 0x0E02);                  /* vmull.p64 (size 10): Crypto, refused */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xFF11); put16(2, 0x0912);                  /* vmul.p8 with size 01: UNDEFINED */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+
+    printf("ok   neon narrowing add/subtract, vabal/vabdl, vmull.p8 and vmul.p8: every size, the rejects\n");
+}
+
 /* Widening: the three-registers-of-different-lengths group and VSHLL/VMOVL.
  * Each encoding was taken from arm-vita-eabi-as and checked by objdump. The
  * rejects are computed from the layout, and each comment gives the bit that
@@ -1723,7 +1864,7 @@ static void test_neon_widen_forms(void) {
     put16(0, 0xEFA3); put16(2, 0x0104);                  /* vaddw: n = 3, Qn odd */
     in = dec(ARM_T32, BASE);
     assert(in.op == OP_NONE && in.cls == A_SIMD);
-    put16(0, 0xEF81); put16(2, 0x0402);                  /* opc 0100, VADDHN: not claimed */
+    put16(0, 0xEF81); put16(2, 0x0402);                  /* opc 0100, VADDHN: n = 1, Qn odd */
     in = dec(ARM_T32, BASE);
     assert(in.op == OP_NONE && in.cls == A_SIMD);
     put16(0, 0xEFB1); put16(2, 0x0C02);                  /* ss = 11, VEXT with imm 12 */
@@ -2986,6 +3127,7 @@ int main(void) {
     test_neon_cmp_forms();
     test_neon_shl_reg_forms();
     test_neon_halving_forms();
+    test_neon_hn_poly_forms();
     test_tables_hints_exclusives();
     printf("all decode tests passed\n");
     return 0;

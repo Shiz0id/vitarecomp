@@ -857,12 +857,17 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
         }
         /* Integer multiply: opc 1001. With B clear it is VMLA (U=0) or VMLS
          * (U=1). With B set and U clear it is VMUL. B set and U set is VMUL.P8,
-         * the polynomial multiply, which is a different operation and is not
-         * claimed; the other sizes with U set there are undefined. */
+         * the polynomial multiply, which exists for size 00 only: sizes 01 and
+         * 10 with U set are UNDEFINED, and fall through to the return 0 below. */
         if (opc == 0x9 && size != 3) {
             if (B == 1 && U == 0) {
                 o->op = OP_NEON_MUL;
                 set(o, A_SIMD, "vmul.i");
+                return 1;
+            }
+            if (B == 1 && U == 1 && size == 0) {
+                o->op = OP_NEON_PMUL;
+                set(o, A_SIMD, "vmul.p8");
                 return 1;
             }
             if (B == 0) {
@@ -1004,18 +1009,83 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
     }
 
     /* Three registers of different lengths: h1 111U 1111 1D ss nnnn, h2 dddd
-     * opc(4) N 0 M 0 mmmm. ss (h1 bits 5:4) is the SOURCE lane size, 8 << ss,
-     * and the result is a Q register, so d must be even. ss = 11 is not this
-     * group: it is the 1111 space of VEXT, VMOVN and the rest, all of which
-     * have bits 5:4 set. Bits 6 and 4 of h2 are clear here, which keeps it
-     * apart from the scalar group (bit 6 set) and the shift and one-register
-     * immediate groups (bit 4 set). The opc values not claimed return 0:
-     * 0100 VADDHN, 0101 VABAL, 0110 VSUBHN, 0111 VABDL, 1001, 1011 and 1101
-     * (VQDML*), 1110, the polynomial VMULL, and 1111, which is undefined. The
-     * W forms (0001, 0011) take a Q register for vn as well, so n must be
-     * even. */
+     * opc(4) N 0 M 0 mmmm. For the L forms ss (h1 bits 5:4) is the SOURCE lane
+     * size, 8 << ss, and the result is a Q register, so d must be even. The
+     * narrowing HN forms (0100, 0110) use ss as the RESULT lane size instead,
+     * the sources being 16 << ss: Dd is a D register and may be odd, and Qn
+     * and Qm must be even. ss = 11 is not this group: it is the 1111 space of
+     * VEXT, VMOVN and the rest, all of which have bits 5:4 set. Bits 6 and 4
+     * of h2 are clear here, which keeps it apart from the scalar group (bit 6
+     * set) and the shift and one-register immediate groups (bit 4 set). The
+     * opc values not claimed return 0: 1001, 1011 and 1101 (VQDMLAL, VQDMLSL
+     * and VQDMULL), and 1111, which is undefined. The polynomial VMULL (1110)
+     * is claimed only for U clear and ss 00: U set and ss 01 are UNDEFINED,
+     * and ss 10 is VMULL.P64, which needs the Crypto extension the Vita
+     * lacks. The W forms (0001, 0011) take a Q register for vn as well, so n
+     * must be even. */
     if ((h1 & 0x0080) && (h1 & 0x0030) != 0x0030 && (h2 & 0x0050) == 0) {
         int opc = (h2 >> 8) & 0xF, size = (h1 >> 4) & 3;
+
+        /* Narrowing add and subtract: opc 0100 (VADDHN, VRADDHN) and 0110
+         * (VSUBHN, VRSUBHN). U picks the rounding form, not the signedness,
+         * so vfp_unsigned is left clear. Size is the result lane, so the
+         * mnemonic suffix is the source lane, 16 << size. Qn and Qm are Q
+         * registers and must be even; Dd is not checked, since it may be odd.
+         * Size 3 is excluded by the group. */
+        if (opc == 0x4 || opc == 0x6) {
+            static const arm_op ops[4] = {
+                OP_NEON_ADDHN, OP_NEON_RADDHN, OP_NEON_SUBHN, OP_NEON_RSUBHN,
+            };
+            static const char *const nm[4][3] = {
+                { "vaddhn.i16", "vaddhn.i32", "vaddhn.i64" },
+                { "vraddhn.i16", "vraddhn.i32", "vraddhn.i64" },
+                { "vsubhn.i16", "vsubhn.i32", "vsubhn.i64" },
+                { "vrsubhn.i16", "vrsubhn.i32", "vrsubhn.i64" },
+            };
+            int k = (opc == 0x6 ? 2 : 0) + U;
+            if ((n | m) & 1) return 0;
+            o->op = ops[k];
+            o->vd = (int8_t)d; o->vn = (int8_t)n; o->vm = (int8_t)m;
+            o->neon_size = (uint8_t)size;
+            set(o, A_SIMD, nm[k][size]);
+            return 1;
+        }
+
+        /* Absolute difference long: opc 0101 (VABAL, which accumulates into
+         * Qd) and 0111 (VABDL). Here size is the SOURCE lane and U the
+         * signedness of the difference. Qd is the wide result, so d must be
+         * even; Dn and Dm are D registers and may be any. */
+        if (opc == 0x5 || opc == 0x7) {
+            static const char *const nm[2][2][3] = {
+                { { "vabal.s8", "vabal.s16", "vabal.s32" },
+                  { "vabal.u8", "vabal.u16", "vabal.u32" } },
+                { { "vabdl.s8", "vabdl.s16", "vabdl.s32" },
+                  { "vabdl.u8", "vabdl.u16", "vabdl.u32" } },
+            };
+            int k = opc == 0x5 ? 0 : 1;
+            if (d & 1) return 0;
+            o->op = k ? OP_NEON_ABDL : OP_NEON_ABAL;
+            o->vd = (int8_t)d; o->vn = (int8_t)n; o->vm = (int8_t)m;
+            o->neon_size = (uint8_t)size;
+            o->vfp_unsigned = (uint8_t)U;
+            set(o, A_SIMD, nm[k][U][size]);
+            return 1;
+        }
+
+        /* Polynomial multiply long: opc 1110 with U clear and size 00 is
+         * VMULL.P8, the carry-less product of 8-bit lanes into 16-bit lanes.
+         * Everything else with opc 1110 is refused: U set and size 01 are
+         * UNDEFINED, and size 10 is VMULL.P64, which needs the Crypto
+         * extension. Qd is the wide result, so d must be even. */
+        if (opc == 0xE) {
+            if (U || size != 0 || (d & 1)) return 0;
+            o->op = OP_NEON_PMULL;
+            o->vd = (int8_t)d; o->vn = (int8_t)n; o->vm = (int8_t)m;
+            o->neon_size = 0;
+            set(o, A_SIMD, "vmull.p8");
+            return 1;
+        }
+
         int kind, wide = 0;
         switch (opc) {
             case 0x0: kind = 0; break;                     /* VADDL */

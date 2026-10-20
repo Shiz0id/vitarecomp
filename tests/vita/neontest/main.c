@@ -289,6 +289,23 @@ int main(void) {
     T("vpmin.u8 d",          "vpmin.u8 d0, d1, d2");
     T("vpmin.s16 d",         "vpmin.s16 d0, d1, d2");
     T("vpmin.u32 d=n",       "vpmin.u32 d0, d0, d1");
+    /* No VADDHN/VRADDHN/VSUBHN/VRSUBHN: dynarmic does not implement them, so
+     * stock has no result to compare. They are checked against an
+     * independent reference instead. */
+    T("vabal.s8 q",          "vabal.s8 q0, d2, d3");
+    T("vabal.u8 overlap",    "vabal.u8 q0, d0, d1");
+    T("vabal.u16 q",         "vabal.u16 q2, d6, d7");
+    T("vabal.s32 q",         "vabal.s32 q1, d4, d5");
+    T("vabdl.u8 q",          "vabdl.u8 q0, d1, d2");
+    T("vabdl.u8 overlap",    "vabdl.u8 q0, d0, d1");
+    T("vabdl.s8 q",          "vabdl.s8 q2, d6, d7");
+    T("vabdl.s16 q",         "vabdl.s16 q1, d4, d5");
+    T("vabdl.u32 q",         "vabdl.u32 q2, d0, d1");
+    T("vmull.p8 q",          "vmull.p8 q0, d1, d2");
+    T("vmull.p8 overlap",    "vmull.p8 q1, d2, d3");
+    T("vmul.p8 d",           "vmul.p8 d0, d1, d2");
+    T("vmul.p8 q",           "vmul.p8 q0, q1, q2");
+    T("vmul.p8 q overlap",   "vmul.p8 q0, q0, q1");
     sceClibPrintf("NT done\n");
     sceKernelExitProcess(0);
     return 0;

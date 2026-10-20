@@ -1526,6 +1526,60 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             break;
         }
 
+        /* VADDHN and friends: the Q sources are read in full and the one D
+         * result is stored after the call, so a Dd that is also a source (d2
+         * in vaddhn.i16 d2, q1, q2) reads its old value. */
+        case OP_NEON_ADDHN: case OP_NEON_RADDHN: case OP_NEON_SUBHN: case OP_NEON_RSUBHN: {
+            int sub = in->op == OP_NEON_SUBHN || in->op == OP_NEON_RSUBHN;
+            int round = in->op == OP_NEON_RADDHN || in->op == OP_NEON_RSUBHN;
+            fprintf(f, "    { uint64_t n[2] = {neon_getd(%d), neon_getd(%d)};",
+                    in->vn, in->vn + 1);
+            fprintf(f, " uint64_t m[2] = {neon_getd(%d), neon_getd(%d)};",
+                    in->vm, in->vm + 1);
+            fprintf(f, " neon_setd(%d, neon_addhn(n, m, %d, %d, %d)); }\n",
+                    in->vd, in->neon_size, sub, round);
+            break;
+        }
+
+        /* VABAL and VABDL: a Q pair result. VABAL reads the old Qd as its
+         * accumulator; VABDL starts from zero. The D sources are read as
+         * arguments before the pair is stored, so vabdl.u8 q0, d0, d1 reads d0
+         * before it is overwritten. */
+        case OP_NEON_ABAL: case OP_NEON_ABDL: {
+            int acc = in->op == OP_NEON_ABAL;
+            if (acc)
+                fprintf(f, "    { uint64_t r[2] = {neon_getd(%d), neon_getd(%d)};",
+                        in->vd, in->vd + 1);
+            else
+                fprintf(f, "    { uint64_t r[2] = {0, 0};");
+            fprintf(f, " neon_abdl(r, neon_getd(%d), neon_getd(%d), %d, %d, %d);",
+                    in->vn, in->vm, in->neon_size, in->vfp_unsigned, acc);
+            fprintf(f, " neon_setd(%d, r[0]); neon_setd(%d, r[1]); }\n", in->vd, in->vd + 1);
+            break;
+        }
+
+        /* VMULL.P8 and VMUL.P8, the polynomial multiplies (neon.h). VMUL.P8 is
+         * per D word. A Q form computes both halves into r before it stores
+         * either, so a Qd that overlaps a source reads the old value. */
+        case OP_NEON_PMULL: {
+            fprintf(f, "    { uint64_t r[2];");
+            fprintf(f, " neon_pmull8(r, neon_getd(%d), neon_getd(%d));",
+                    in->vn, in->vm);
+            fprintf(f, " neon_setd(%d, r[0]); neon_setd(%d, r[1]); }\n", in->vd, in->vd + 1);
+            break;
+        }
+
+        case OP_NEON_PMUL: {
+            int regs = in->neon_q ? 2 : 1;
+            fprintf(f, "    { uint64_t r[2] = {0, 0};");
+            for (int k = 0; k < regs; k++)
+                fprintf(f, " r[%d] = neon_pmul8(neon_getd(%d), neon_getd(%d));",
+                        k, in->vn + k, in->vm + k);
+            emit_neon_store(f, "r", in->vd, regs);
+            fprintf(f, " }\n");
+            break;
+        }
+
         /* VSHLL and VMOVL: the D source widened and shifted into the Q pair. */
         case OP_NEON_SHLL:
             fprintf(f, "    { uint64_t r[2]; neon_widen(r, neon_getd(%d), %d, %u, %d);",

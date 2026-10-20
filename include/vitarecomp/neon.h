@@ -876,6 +876,71 @@ static inline void neon_wide_mac(uint64_t r[2], uint64_t n, uint64_t m, int size
     neon_wadd(r, r, p, size, sub);
 }
 
+/* VADDHN and VSUBHN (round = 0), VRADDHN and VRSUBHN (round = 1), which add
+ * 1 << (w - 1) before taking the high half. size is the RESULT lane, w = 8 <<
+ * size, and the sources have 2w-bit lanes: wide lane i of the Q pair n:m is in
+ * word i / (32 / w) at lane i % (32 / w) of that word. Each wide lane is formed
+ * at the wide size, so a carry or borrow stays inside its own lane, and the
+ * result is bits 2w-1..w of it. For size 2 the wide lanes are 64 bits and the
+ * uint64_t sum wraps at 2^64 as the architecture does. n and m are copied in,
+ * so a D destination that overlaps them is written only after both are read. */
+static inline uint64_t neon_addhn(const uint64_t n[2], const uint64_t m[2], int size,
+                                  int sub, int round) {
+    int w = 8 << size, per = 32 / w;
+    uint64_t r = 0;
+    for (int i = 0; i < 64 / w; i++) {
+        int k = i / per, j = i % per;
+        uint64_t a = neon_lane_of(n[k], size + 1, j), b = neon_lane_of(m[k], size + 1, j);
+        uint64_t s = sub ? neon_sub(a, b, size + 1) : neon_add(a, b, size + 1);
+        if (round) s = neon_add(s, 1ull << (w - 1), size + 1);
+        r |= ((s >> w) & neon_lmask(size)) << (i * w);
+    }
+    return r;
+}
+
+/* VABDL (acc = 0) and VABAL (acc = 1): |n - m| per lane of the D words n and
+ * m, zero-extended into the 2w-bit lanes of r. The difference of two w-bit
+ * lanes is at most 2^w - 1, so neon_abd holds it exactly as an unsigned w-bit
+ * value, and it is zero-extended whatever U is. Sign-extending it would turn
+ * the 255 of s8 (0x80 against 0x7F) into 0xFFFF.
+ * For VABAL, r is the old Qd on input and the difference is added to it, the
+ * wide sum wrapping at 2^(2w) per lane. */
+static inline void neon_abdl(uint64_t r[2], uint64_t n, uint64_t m, int size,
+                             int is_unsigned, int acc) {
+    uint64_t d[2];
+    neon_widen(d, neon_abd(n, m, size, is_unsigned), size, 0, 1);
+    if (acc) neon_wadd(r, r, d, size, 0);
+    else     { r[0] = d[0]; r[1] = d[1]; }
+}
+
+/* The carry-less product of two 8-bit values, 15 bits wide: each set bit k of
+ * b adds a copy of a shifted by k, and the copies are XORed, not added, which
+ * is what makes it polynomial (GF(2)) multiplication. */
+static inline uint64_t neon_pmul_lane(uint64_t a, uint64_t b) {
+    uint64_t p = 0;
+    for (int k = 0; k < 8; k++)
+        if ((b >> k) & 1) p ^= a << k;
+    return p;
+}
+
+/* VMUL.P8: the low 8 bits of each lane's carry-less product. Only the low bits
+ * are kept, as VMUL keeps them for the integer lanes. */
+static inline uint64_t neon_pmul8(uint64_t n, uint64_t m) {
+    uint64_t r = 0;
+    for (int i = 0; i < 8; i++)
+        r |= (neon_pmul_lane(neon_lane_of(n, 0, i), neon_lane_of(m, 0, i)) & 0xFF) << (i * 8);
+    return r;
+}
+
+/* VMULL.P8: the whole 15-bit product of each 8-bit lane, in a 16-bit lane of
+ * the Q result. Lane i is at bit 16 i, so lanes 0-3 are r[0] and lanes 4-7
+ * are r[1]. */
+static inline void neon_pmull8(uint64_t r[2], uint64_t n, uint64_t m) {
+    r[0] = r[1] = 0;
+    for (int i = 0; i < 8; i++)
+        r[i / 4] |= neon_pmul_lane(neon_lane_of(n, 0, i), neon_lane_of(m, 0, i)) << ((i % 4) * 16);
+}
+
 /* --- Advanced SIMD shuffles, table lookup and lane duplicate ----------------
  *
  * The array helpers take one or two D words (a[0], a[1] for a Q pair) and

@@ -179,6 +179,16 @@ typedef enum {
     OP_NEON_ADDW, OP_NEON_SUBW, /* as ADDL/SUBL, but vn is a Q pair (even)    */
     OP_NEON_MULL,               /* vd = vn ext * vm ext                       */
     OP_NEON_MLAL, OP_NEON_MLSL, /* vd = vd +/- vn ext * vm ext                */
+    OP_NEON_ADDHN, OP_NEON_RADDHN, OP_NEON_SUBHN, OP_NEON_RSUBHN,
+                                /* narrowing: vd (a D) = high half of vn +/- vm,
+                                   vn and vm Q, neon_size the RESULT lane; the R
+                                   forms add 1 << (w - 1) first                */
+    OP_NEON_ABAL, OP_NEON_ABDL, /* vd (a Q pair) = |vn - vm| ext, and ABAL adds it
+                                   to the old vd. vn and vm are D registers,
+                                   neon_size the SOURCE lane, vfp_unsigned the
+                                   signedness of the difference                */
+    OP_NEON_PMULL,              /* vd (a Q pair) = vn * vm carry-less, 8-bit lanes */
+    OP_NEON_PMUL,               /* vd = vn * vm carry-less, low 8 bits of each lane */
     OP_NEON_SHLL,               /* vd = vm ext << imm, imm 0 is VMOVL. The
                                    widening ops write the pair vd, vd+1 and
                                    do not use neon_q, as MOVN does            */

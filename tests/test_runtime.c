@@ -1436,6 +1436,170 @@ static void test_neon_halving_c(void) {
     printf("ok   neon halving add and subtract, pairwise max and min: every size, signedness and overflow\n");
 }
 
+/* The narrowing add and subtract, VABDL and VABAL, and the polynomial
+ * multiplies, against values worked out by hand. Each Q source is two D words,
+ * lanes 0-3 in the first and 4-7 in the second, so a result lane read from the
+ * wrong word shows. Each case is one where a carry, a borrow or a wrap reaches
+ * the result lane. */
+static void test_neon_hn_poly_c(void) {
+    uint64_t r[2];
+
+    /* VADDHN.I16, size 0: the high byte of each 16-bit sum. Lane 0 is 0xFFFF
+     * + 1, whose carry leaves the wide lane, so 0x00. Lane 1 is 0x00FF + 1 = 0x0100,
+     * where the carry out of the low byte lands in the high, so 0x01. Lane 5
+     * wraps the same way as lane 0. Lanes 4-7 come from the second words. */
+    const uint64_t an16[8] = { 0xFFFF, 0x00FF, 0x1234, 0x0000, 0x0080, 0x0100, 0x7FFF, 0x8000 };
+    const uint64_t bn16[8] = { 0x0001, 0x0001, 0x4321, 0x0000, 0x0000, 0xFF00, 0x0001, 0x8000 };
+    const uint64_t qa16[2] = { pack_lanes(an16, 16, 4), pack_lanes(an16 + 4, 16, 4) };
+    const uint64_t qb16[2] = { pack_lanes(bn16, 16, 4), pack_lanes(bn16 + 4, 16, 4) };
+    const uint64_t e_add16[8] = { 0x00, 0x01, 0x55, 0x00, 0x00, 0x00, 0x80, 0x00 };
+    assert(neon_addhn(qa16, qb16, 0, 0, 0) == pack_lanes(e_add16, 8, 8));
+
+    /* VRADDHN.I16: the rounding constant 0x80 is added before the high byte.
+     * 0x0080 + 0 gives 0x0100 (0x01), and 0x007F + 0 gives 0x00FF (0x00). Lane
+     * 2 carries out of the wide lane (0xFF80 + 0x80), so 0x00. Lane 4 rounds
+     * 0x7F00 + 0x80 up to 0x8000, 0x80. */
+    const uint64_t rn16[8] = { 0x0080, 0x007F, 0xFF80, 0x0000, 0x7F00, 0x00FF, 0x1234, 0xFFFF };
+    const uint64_t rm16[8] = { 0x0000, 0x0000, 0x0000, 0x0000, 0x0080, 0x0001, 0x4321, 0x0001 };
+    const uint64_t qr16[2] = { pack_lanes(rn16, 16, 4), pack_lanes(rn16 + 4, 16, 4) };
+    const uint64_t qs16[2] = { pack_lanes(rm16, 16, 4), pack_lanes(rm16 + 4, 16, 4) };
+    const uint64_t e_radd16[8] = { 0x01, 0x00, 0x00, 0x00, 0x80, 0x01, 0x55, 0x00 };
+    assert(neon_addhn(qr16, qs16, 0, 0, 1) == pack_lanes(e_radd16, 8, 8));
+
+    /* VSUBHN.I16: the borrow. 0x0000 - 0x0001 is 0xFFFF, so 0xFF, and lane 3
+     * wraps 0 - 0xFFFF to 0x0001, so 0x00. Lane 2 is 0x1000 - 1 = 0x0FFF. */
+    const uint64_t sn16[8] = { 0x0000, 0x0100, 0x1000, 0x0000, 0x0080, 0x8000, 0x00FF, 0x0000 };
+    const uint64_t sm16[8] = { 0x0001, 0x0001, 0x0001, 0xFFFF, 0x0081, 0x8001, 0x0100, 0x0000 };
+    const uint64_t qsn16[2] = { pack_lanes(sn16, 16, 4), pack_lanes(sn16 + 4, 16, 4) };
+    const uint64_t qsm16[2] = { pack_lanes(sm16, 16, 4), pack_lanes(sm16 + 4, 16, 4) };
+    const uint64_t e_sub16[8] = { 0xFF, 0x00, 0x0F, 0x00, 0xFF, 0xFF, 0xFF, 0x00 };
+    assert(neon_addhn(qsn16, qsm16, 0, 1, 0) == pack_lanes(e_sub16, 8, 8));
+
+    /* VRSUBHN.I16: n - m + 0x80. Lane 0 is 0 - 1 + 0x80 = 0x7F, so 0x00. Lane 1
+     * is 0x017F and lane 2 is 0x107F, so 0x01 and 0x10. Lane 7 is 0x0200 - 0x0080
+     * + 0x80 = 0x0200, so 0x02. */
+    const uint64_t tn16[8] = { 0x0000, 0x0100, 0x1000, 0x0000, 0x0100, 0x8000, 0x00FF, 0x0200 };
+    const uint64_t tm16[8] = { 0x0001, 0x0001, 0x0001, 0xFFFF, 0x0000, 0x8001, 0x0100, 0x0080 };
+    const uint64_t qtn16[2] = { pack_lanes(tn16, 16, 4), pack_lanes(tn16 + 4, 16, 4) };
+    const uint64_t qtm16[2] = { pack_lanes(tm16, 16, 4), pack_lanes(tm16 + 4, 16, 4) };
+    const uint64_t e_rsub16[8] = { 0x00, 0x01, 0x10, 0x00, 0x01, 0x00, 0x00, 0x02 };
+    assert(neon_addhn(qtn16, qtm16, 0, 1, 1) == pack_lanes(e_rsub16, 8, 8));
+
+    /* 32-bit sources, 16-bit results. VADDHN.I32: 0xFFFFFFFF + 1 wraps to 0;
+     * 0x0000FFFF + 1 carries into the high half, 0x0001; 0x7FFF8000 + 0 keeps
+     * its high half 0x7FFF. VRADDHN.I32 adds 0x8000, so 0x7FFF8000 becomes
+     * 0x80000000, high half 0x8000, and the 0x80000000 + 0x80000000 of lane 2
+     * wraps to 0 at 2^32 again. */
+    const uint64_t an32[4] = { 0xFFFFFFFF, 0x0000FFFF, 0x80000000, 0x7FFF8000 };
+    const uint64_t bn32[4] = { 0x00000001, 0x00000001, 0x80000000, 0x00000000 };
+    const uint64_t qa32[2] = { pack_lanes(an32, 32, 2), pack_lanes(an32 + 2, 32, 2) };
+    const uint64_t qb32[2] = { pack_lanes(bn32, 32, 2), pack_lanes(bn32 + 2, 32, 2) };
+    const uint64_t e_add32[4] = { 0x0000, 0x0001, 0x0000, 0x7FFF };
+    const uint64_t e_radd32[4] = { 0x0000, 0x0001, 0x0000, 0x8000 };
+    assert(neon_addhn(qa32, qb32, 1, 0, 0) == pack_lanes(e_add32, 16, 4));
+    assert(neon_addhn(qa32, qb32, 1, 0, 1) == pack_lanes(e_radd32, 16, 4));
+
+    /* VSUBHN.I32 and VRSUBHN.I32: 0 - 1 = 0xFFFFFFFF gives 0xFFFF; 0x00010000 - 1
+     * gives 0x0000; 0 - 0xFFFFFFFF is 1, high half 0. VRSUBHN adds 0x8000 to
+     * each: 0xFFFFFFFF + 0x8000 is 0x00007FFF, high half 0. */
+    const uint64_t sn32[4] = { 0x00000000, 0x00010000, 0x00000000, 0x80000000 };
+    const uint64_t sm32[4] = { 0x00000001, 0x00000001, 0xFFFFFFFF, 0x00000000 };
+    const uint64_t qsn32[2] = { pack_lanes(sn32, 32, 2), pack_lanes(sn32 + 2, 32, 2) };
+    const uint64_t qsm32[2] = { pack_lanes(sm32, 32, 2), pack_lanes(sm32 + 2, 32, 2) };
+    const uint64_t e_sub32[4] = { 0xFFFF, 0x0000, 0x0000, 0x8000 };
+    const uint64_t e_rsub32[4] = { 0x0000, 0x0001, 0x0000, 0x8000 };
+    assert(neon_addhn(qsn32, qsm32, 1, 1, 0) == pack_lanes(e_sub32, 16, 4));
+    assert(neon_addhn(qsn32, qsm32, 1, 1, 1) == pack_lanes(e_rsub32, 16, 4));
+
+    /* 64-bit sources, 32-bit results. Lane 0 of VADDHN.I64 is 0xFFFFFFFF_FFFFFFFF
+     * + 1, which wraps to 0, so 0. Lane 1 is 0x00000001_80000000 after the add,
+     * high half 1. VRADDHN.I64 adds 0x80000000 to each lane: lane 1 becomes
+     * 0x00000002_00000000, high half 2. The lone 0x80000000 + 0 + 0x80000000 is
+     * 0x1_00000000, high half 1. VSUBHN.I64 of 0 - 1 borrows out of the whole
+     * 64-bit lane, so the high half is 0xFFFFFFFF. VRSUBHN.I64 of 0 - 1 +
+     * 0x80000000 is 0x7FFFFFFF, high half 0; lane 1 is 0x1_00000000 + 0x80000000,
+     * high half 1. */
+    const uint64_t qa64[2] = { 0xFFFFFFFFFFFFFFFFull, 0x0000000080000000ull };
+    const uint64_t qb64[2] = { 0x0000000000000001ull, 0x0000000100000000ull };
+    const uint64_t e_add64[2] = { 0x00000000ull, 0x00000001ull };
+    const uint64_t e_radd64[2] = { 0x00000000ull, 0x00000002ull };
+    assert(neon_addhn(qa64, qb64, 2, 0, 0) == pack_lanes(e_add64, 32, 2));
+    assert(neon_addhn(qa64, qb64, 2, 0, 1) == pack_lanes(e_radd64, 32, 2));
+    const uint64_t lone[2] = { 0x0000000080000000ull, 0x0ull }, zero[2] = { 0x0ull, 0x0ull };
+    const uint64_t e_radd64_a[2] = { 0x00000001ull, 0x00000000ull };
+    assert(neon_addhn(lone, zero, 2, 0, 1) == pack_lanes(e_radd64_a, 32, 2));
+    const uint64_t one_b[2] = { 0x1ull, 0x0ull };
+    const uint64_t e_sub64[2] = { 0xFFFFFFFFull, 0x00000000ull };
+    assert(neon_addhn(zero, one_b, 2, 1, 0) == pack_lanes(e_sub64, 32, 2));
+    const uint64_t rs_a[2] = { 0x0ull, 0x0000000100000000ull };
+    const uint64_t e_rsub64[2] = { 0x00000000ull, 0x00000001ull };
+    assert(neon_addhn(rs_a, one_b, 2, 1, 1) == pack_lanes(e_rsub64, 32, 2));
+
+    /* VABDL.S8 and VABDL.U8 on 0x80 against 0x7F. Signed, 0x80 is -128 and
+     * 0x7F is 127, so the difference is 255 (0x00FF, not a sign-extended
+     * 0xFFFF). Unsigned, 128 - 127 is 1. The other lanes cover the rest of
+     * the byte range. Lanes 0-3 are r[0] and 4-7 are r[1]. */
+    const uint64_t ad[8] = { 0x80, 0x7F, 0x00, 0xFF, 0x10, 0x80, 0x01, 0x7F };
+    const uint64_t bd[8] = { 0x7F, 0x80, 0x00, 0x01, 0x20, 0x00, 0xFF, 0x80 };
+    const uint64_t dn = pack_lanes(ad, 8, 8), dm = pack_lanes(bd, 8, 8);
+    const uint64_t es8[8] = { 0x00FF, 0x00FF, 0x0000, 0x0002, 0x0010, 0x0080, 0x0002, 0x00FF };
+    const uint64_t eu8[8] = { 0x0001, 0x0001, 0x0000, 0x00FE, 0x0010, 0x0080, 0x00FE, 0x0001 };
+    neon_abdl(r, dn, dm, 0, 0, 0); check_q(r, es8, 16);
+    neon_abdl(r, dn, dm, 0, 1, 0); check_q(r, eu8, 16);
+
+    /* VABDL.S16 and VABDL.S32, signed against unsigned on 0x8000 and 0x7FFF,
+     * and on 0x80000000 and 0x7FFFFFFF. The 32-bit signed difference is
+     * 0xFFFFFFFF, zero-extended into a 64-bit lane (not 0xFFFFFFFF_FFFFFFFF). */
+    const uint64_t a16[4] = { 0x8000, 0x7FFF, 0x0001, 0x0000 };
+    const uint64_t b16[4] = { 0x7FFF, 0x8000, 0xFFFF, 0x0001 };
+    const uint64_t a16d = pack_lanes(a16, 16, 4), b16d = pack_lanes(b16, 16, 4);
+    const uint64_t es16[4] = { 0xFFFF, 0xFFFF, 0x0002, 0x0001 };
+    const uint64_t eu16[4] = { 0x0001, 0x0001, 0xFFFE, 0x0001 };
+    neon_abdl(r, a16d, b16d, 1, 0, 0); check_q(r, es16, 32);
+    neon_abdl(r, a16d, b16d, 1, 1, 0); check_q(r, eu16, 32);
+    const uint64_t a32[2] = { 0x80000000, 0x00000005 }, b32[2] = { 0x7FFFFFFF, 0x00000007 };
+    const uint64_t a32d = pack_lanes(a32, 32, 2), b32d = pack_lanes(b32, 32, 2);
+    neon_abdl(r, a32d, b32d, 2, 0, 0);
+    assert(r[0] == 0xFFFFFFFFull && r[1] == 2);
+    neon_abdl(r, a32d, b32d, 2, 1, 0);
+    assert(r[0] == 1 && r[1] == 2);
+
+    /* VABAL.U8: the old Qd is the accumulator, and the wide lanes wrap. Lane 0
+     * is 0xFFFF + 1 = 0x10000, which leaves the 16-bit lane as 0x0000 and must
+     * not carry into lane 1. Lane 5 is 0x00FF + 128 = 0x017F. */
+    const uint64_t old8[8] = { 0xFFFF, 0x0001, 0x1000, 0x0000, 0x0000, 0x00FF, 0x0000, 0x7FFF };
+    const uint64_t eacc8[8] = { 0x0000, 0x0002, 0x1000, 0x00FE, 0x0010, 0x017F, 0x00FE, 0x8000 };
+    uint64_t qold[2] = { pack_lanes(old8, 16, 4), pack_lanes(old8 + 4, 16, 4) };
+    neon_abdl(qold, dn, dm, 0, 1, 1);
+    check_q(qold, eacc8, 16);
+    /* VABAL.S8 from a zero accumulator is the signed difference, es8, with the
+     * 255 of the 0x80 lanes. */
+    uint64_t qz[2] = { 0, 0 };
+    neon_abdl(qz, dn, dm, 0, 0, 1);
+    check_q(qz, es8, 16);
+
+    /* Polynomial multiply. 0xFF x 0xFF is 0x5555, the square of 1 + x + ... +
+     * x^7 with the cross terms cancelling in pairs, so bits 0, 2, ..., 14.
+     * 0x80 x 0x80 = x^14 = 0x4000. 0x03 x 0x03 = (x + 1)^2 = x^2 + 1 = 0x05.
+     * 0x7F x 0x7F = 0x1555 (the even bits 0-12). 0x01 x 0x80 = 0x0080, and
+     * 0x02 x 0x03 = x^2 + x = 0x06. 0xAB x 0x5A = 0x247E (bits 1-6, 10, 13),
+     * worked by XOR of the four shifted copies of 0xAB. Zero times anything is
+     * zero. The lanes are mixed, so a product in one lane cannot hide in
+     * another. */
+    const uint64_t pn[8] = { 0xFF, 0x80, 0x03, 0x00, 0x01, 0x02, 0xAB, 0x7F };
+    const uint64_t pm[8] = { 0xFF, 0x80, 0x03, 0xFF, 0x80, 0x03, 0x5A, 0x7F };
+    const uint64_t pnd = pack_lanes(pn, 8, 8), pmd = pack_lanes(pm, 8, 8);
+    const uint64_t epl[8] = { 0x5555, 0x4000, 0x0005, 0x0000, 0x0080, 0x0006, 0x247E, 0x1555 };
+    neon_pmull8(r, pnd, pmd);
+    check_q(r, epl, 16);
+    /* VMUL.P8 keeps the low byte of each product: 0x55, 0x00, 0x05, 0x00,
+     * 0x80, 0x06, 0x7E, 0x55. */
+    const uint64_t epm[8] = { 0x55, 0x00, 0x05, 0x00, 0x80, 0x06, 0x7E, 0x55 };
+    assert(neon_pmul8(pnd, pmd) == pack_lanes(epm, 8, 8));
+
+    printf("ok   neon narrowing add/subtract, vabdl/vabal, vmull.p8 and vmul.p8: edges and mixed lanes\n");
+}
+
 /* The widening helpers, against values worked out by hand from the lanes.
  * Every source has a lane with its sign bit set, so each signed result differs
  * from the unsigned one. The 32-bit products 0x80000000 * 0x80000000 are 2^62
@@ -2179,6 +2343,7 @@ int main(void) {
     test_neon_cmp_c();
     test_neon_shl_reg_c();
     test_neon_halving_c();
+    test_neon_hn_poly_c();
     test_neon_widen();
     test_neon_shuffle();
     test_neon_ldst();
