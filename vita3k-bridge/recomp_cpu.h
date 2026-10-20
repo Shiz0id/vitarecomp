@@ -34,6 +34,8 @@
 #include <cpu/common.h>
 #include <cpu/impl/interface.h>
 
+#include <vitarecomp/mem.h>
+
 #include <atomic>
 #include <csetjmp>
 #include <cstdint>
@@ -84,9 +86,11 @@ public:
     bool get_log_code() override { return false; }
     bool get_log_mem() override { return false; }
 
-    // No exclusive monitor to clear. LDREX/STREX are not translated yet; when
-    // they are, their monitor lives in the runtime, not here.
-    void clear_exclusive() override {}
+    // The monitor is the runtime's, one per host thread (src/excl.c). Vita3K
+    // clears it after every kernel call, as a real exception return does; it
+    // does so on the thread that owns it, so the thread-local one is the
+    // right one to clear.
+    void clear_exclusive() override { vita_clrex(); }
 
     std::size_t processor_id() const override { return core; }
 

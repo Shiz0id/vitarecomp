@@ -712,6 +712,8 @@ static int cmd_discover(const char *path) {
            r.insns_total ? 100.0 * r.simd_insns / r.insns_total : 0.0);
     printf("  indirect sites      %u  (unresolved computed transfers)\n",
            r.indirect_sites);
+    printf("  jump tables         %u followed, %u unbounded\n",
+           r.jump_tables, r.jump_tables_unbounded);
 
     printf("\nimports:              %u functions across %d libraries\n",
            vm.total_func_imports, vm.import_count);

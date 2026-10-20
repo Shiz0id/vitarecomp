@@ -63,6 +63,14 @@ void vita_write32(uint32_t addr, uint32_t v);
 void vita_write16(uint32_t addr, uint16_t v);
 void vita_write8 (uint32_t addr, uint8_t  v);
 
+/* Exclusive access (src/excl.c). `size` is 1, 2, 4 or 8; the 8-byte value is
+ * the register pair, low word first. vita_strex returns STREX's status: 0 if
+ * the store happened, 1 if the monitor was lost. */
+uint64_t vita_ldrex(uint32_t addr, uint32_t size);
+uint32_t vita_strex(uint32_t addr, uint64_t v, uint32_t size);
+void     vita_clrex(void);
+void     vita_barrier(void);
+
 #ifdef __cplusplus
 }
 #endif

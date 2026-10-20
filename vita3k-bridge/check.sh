@@ -10,7 +10,9 @@
 #   VITA3K_EXTERNAL=$PWD/Vita3K/external vita3k-bridge/check.sh
 #
 # Runs the RecompCPU test plain, under ASan+UBSan, and under TSan, and
-# syntax-checks bridge.cpp against the vendored (patched) Vita3K tree.
+# syntax-checks bridge.cpp against the vendored (patched) Vita3K tree. C++23,
+# as Vita3K is: its kernel headers use std::expected. Set CXX to choose the
+# compiler (GCC 13 or later, or clang with a matching standard library).
 set -euo pipefail
 
 : "${VITA3K_EXTERNAL:?set VITA3K_EXTERNAL to the external/ directory of a Vita3K checkout}"
@@ -23,11 +25,11 @@ for d in third_party/Vita3K/vita3k/*/include; do inc+=("-I$d"); done
 inc+=(-Ithird_party/Vita3K/vita3k "-I$VITA3K_EXTERNAL/fmt/include"
       "-I$VITA3K_EXTERNAL/spdlog/include" "-I$VITA3K_EXTERNAL/boost"
       -Iinclude -Ivita3k-bridge)
-rt=(src/cpu.c src/mem.c src/trap.c src/loader.c src/dispatch.c src/vfp.c src/hle_libc.c)
+rt=(src/cpu.c src/mem.c src/trap.c src/loader.c src/dispatch.c src/vfp.c src/hle_libc.c src/excl.c)
 warn=(-Wall -Wextra -Wno-unused-parameter)
 
 echo "== syntax: bridge.cpp"
-g++ -std=c++20 -fsyntax-only "${warn[@]}" -DVITARECOMP_THREADED "${inc[@]}" vita3k-bridge/bridge.cpp
+"${CXX:-g++}" -std=c++23 -fsyntax-only "${warn[@]}" -DVITARECOMP_THREADED "${inc[@]}" vita3k-bridge/bridge.cpp
 
 for san in none address,undefined thread; do
     obj="$out/obj-${san//,/-}"
@@ -37,7 +39,7 @@ for san in none address,undefined thread; do
     for c in "${rt[@]}"; do
         gcc -std=c11 "${flags[@]}" "${warn[@]}" -Iinclude -c "$c" -o "$obj/$(basename "$c").o"
     done
-    g++ -std=c++20 "${flags[@]}" "${warn[@]}" -UNDEBUG "${inc[@]}" \
+    "${CXX:-g++}" -std=c++23 "${flags[@]}" "${warn[@]}" -UNDEBUG "${inc[@]}" \
         vita3k-bridge/test_recomp_cpu.cpp vita3k-bridge/recomp_cpu.cpp "$obj"/*.o \
         -lpthread -o "$obj/test_recomp_cpu"
     echo "== test_recomp_cpu (sanitizer: $san)"

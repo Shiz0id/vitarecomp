@@ -66,6 +66,10 @@ typedef struct {
     uint32_t seeds_arm_refused;
     uint32_t simd_insns;
     uint32_t indirect_sites;
+    /* TBB/TBH switches followed through their table, and those whose size
+     * could not be proven from the guarding compare (left as indirect). */
+    uint32_t jump_tables;
+    uint32_t jump_tables_unbounded;
 } vf_result;
 
 /* Discover functions in the image's executable segment. Returns 0 on success.

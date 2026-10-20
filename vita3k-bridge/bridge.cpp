@@ -17,6 +17,7 @@
 #include <cpu/functions.h>
 #include <cpu/state.h>
 #include <emuenv/state.h>
+#include <kernel/state.h>
 #include <modules/module_parent.h>
 #include <util/log.h>
 
@@ -52,7 +53,14 @@ static int service_import(uint32_t stub, uint32_t nid, const char *name) {
             name ? name : "import", log_hex(nid), log_hex(after_pc));
     write_pc(*cpu, saved_pc);
 
-    static_cast<RecompCPU &>(*cpu->cpu).unwind_if_stopped();
+    // An import can end its own thread — sceKernelExitProcess, sceKernelExitThread,
+    // sceKernelExitDeleteThread. The JIT notices at its run loop; here the import returns into
+    // guest code, so leave instead of running on past an exit.
+    RecompCPU &rc = static_cast<RecompCPU &>(*cpu->cpu);
+    if (const ThreadStatePtr thread = bridge_env->kernel.get_thread(cpu->thread_id);
+        thread && thread->ending_requested())
+        rc.stop();
+    rc.unwind_if_stopped();
     return 1;
 }
 

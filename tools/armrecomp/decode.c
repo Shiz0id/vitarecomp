@@ -853,9 +853,26 @@ static void decode_t32(uint16_t h1, uint16_t h2, arm_insn *o) {
             return;
         }
 
-        /* Conditional B.W, or a system instruction when the condition field is
-         * 111x. */
-        if (((h1 >> 7) & 0xE) == 0xE) { set(o, A_SYS, "sys"); return; }
+        /* Conditional B.W, or a system instruction when the condition field
+         * (h1 bits 9:6) is 111x. This test once read bits 10:7, so hints and
+         * barriers decoded as branches: `nop.w` became a jump to a bogus
+         * address and `dmb` vanished into a conditional branch. */
+        if (((h1 >> 6) & 0xE) == 0xE) {
+            if ((h1 & 0xFFF0) == 0xF3A0 && (h2 & 0xFF00) == 0x8000 && (h2 & 0xFF) <= 4) {
+                o->op = OP_NOP;                 /* nop/yield/wfe/wfi/sev */
+                set(o, A_ALU, "nop.w");
+                return;
+            }
+            if ((h1 & 0xFFF0) == 0xF3B0 && (h2 & 0xFF00) == 0x8F00) {
+                switch ((h2 >> 4) & 0xF) {
+                case 0x2: o->op = OP_CLREX; set(o, A_SYS, "clrex"); return;
+                case 0x4: case 0x5: case 0x6:
+                    o->op = OP_DMB; set(o, A_SYS, "dmb/dsb/isb"); return;
+                }
+            }
+            set(o, A_SYS, "sys");
+            return;
+        }
         o->op = OP_B;
         o->cond = (uint8_t)((h1 >> 6) & 0xF);
         set(o, A_BRANCH, "b<cond>.w");
@@ -871,6 +888,41 @@ static void decode_t32(uint16_t h1, uint16_t h2, arm_insn *o) {
             o->target = o->addr + 4 + sign_extend(imm, 21);
         }
         return;
+    }
+
+    /* Exclusive access: LDREX/STREX and their byte, halfword and doubleword
+     * forms. These are how every lock-free primitive and every mutex fast path
+     * is built, so a threaded game reaches them constantly. STREX writes its
+     * status (0 = stored) to rd. */
+    if ((h1 & 0xFFF0) == 0xE850 && ((h2 >> 8) & 0xF) == 0xF) {
+        o->op = OP_LDREX; o->xsize = 4;
+        o->rn = h1 & 0xF; o->rt = (h2 >> 12) & 0xF;
+        o->imm = (uint32_t)(h2 & 0xFF) * 4u; o->has_imm = 1;
+        set(o, A_LOAD, "ldrex");
+        return;
+    }
+    if ((h1 & 0xFFF0) == 0xE840) {
+        o->op = OP_STREX; o->xsize = 4;
+        o->rn = h1 & 0xF; o->rt = (h2 >> 12) & 0xF; o->rd = (h2 >> 8) & 0xF;
+        o->imm = (uint32_t)(h2 & 0xFF) * 4u; o->has_imm = 1;
+        set(o, A_STORE, "strex");
+        return;
+    }
+    if ((h1 & 0xFFE0) == 0xE8C0) {
+        static const uint8_t sz[8] = { 0, 0, 0, 0, 1, 2, 0, 8 };
+        const uint8_t x = sz[(h2 >> 4) & 7];
+        const int load = (h1 & 0x0010) != 0;
+        if (x && (h2 & 0x0080) == 0) {
+            o->op = load ? OP_LDREX : OP_STREX; o->xsize = x;
+            o->rn = h1 & 0xF; o->rt = (h2 >> 12) & 0xF;
+            if (x == 8) o->rt2 = (h2 >> 8) & 0xF;
+            if (!load)  o->rd  = h2 & 0xF;
+            o->imm = 0; o->has_imm = 1;
+            set(o, load ? A_LOAD : A_STORE,
+                load ? (x == 1 ? "ldrexb" : x == 2 ? "ldrexh" : "ldrexd")
+                     : (x == 1 ? "strexb" : x == 2 ? "strexh" : "strexd"));
+            return;
+        }
     }
 
     /* Load/store DUAL. Bit 6 separates these from the multiple forms below, and
@@ -972,7 +1024,7 @@ static void decode_t32(uint16_t h1, uint16_t h2, arm_insn *o) {
                        && (opf == 0x0 || opf == 0x4 || opf == 0x8 || opf == 0xD);
             if (compare) {
                 if (opf == 0x0) o->op = OP_TST;
-                if (opf == 0x4) o->op = OP_TST;   /* teq: same shape for us */
+                if (opf == 0x4) o->op = OP_TEQ;
                 if (opf == 0x8) o->op = OP_CMN;
                 if (opf == 0xD) o->op = OP_CMP;
                 o->rd = ARM_NO_REG;
@@ -1133,13 +1185,14 @@ static void decode_t32(uint16_t h1, uint16_t h2, arm_insn *o) {
     }
 
     /* Table branch: a jump table in one instruction, indexing a byte or
-     * halfword array to compute a forward branch. It is a computed transfer
-     * that discovery cannot follow, and is named here rather than left unknown
-     * so its cost is visible. */
+     * halfword array to compute a forward branch. Classed indirect here;
+     * arm_decode, which can see the bytes around it, bounds the table and
+     * makes it followable when the guarding compare proves its size. */
     if ((h1 & 0xFFF0) == 0xE8D0 && (h2 & 0xFFE0) == 0xF000) {
+        o->op = (h2 & 0x10) ? OP_TBH : OP_TBB;
         o->rn = h1 & 0xF;
         o->rm = h2 & 0xF;
-        set(o, A_INDIRECT, "tbb/tbh");
+        set(o, A_INDIRECT, (h2 & 0x10) ? "tbh" : "tbb");
         return;
     }
 
@@ -1325,6 +1378,101 @@ static void decode_a32(uint32_t w, arm_insn *o) {
     }
 }
 
+/* --- IT blocks ---------------------------------------------------------------- */
+
+void arm_it_step(uint8_t *itstate, arm_insn *in) {
+    if (in->mode != ARM_T32) return;
+    if (in->op == OP_IT) {
+        *itstate = (uint8_t)((in->cond << 4) | (in->it_mask & 0xF));
+        return;
+    }
+    if ((*itstate & 0xF) == 0) return;
+
+    const uint8_t cond = *itstate >> 4;
+    if (cond != ARM_COND_AL) {
+        in->cond = cond;
+        in->conditional = 1;
+    }
+    if (in->width == 2 && in->sets_flags &&
+        in->op != OP_CMP && in->op != OP_CMN && in->op != OP_TST && in->op != OP_TEQ)
+        in->sets_flags = 0;
+
+    /* ITAdvance: the low five bits shift left until the mask runs out. */
+    if ((*itstate & 0x7) == 0) *itstate = 0;
+    else *itstate = (uint8_t)((*itstate & 0xE0) | ((*itstate << 1) & 0x1F));
+}
+
+/* --- jump tables ------------------------------------------------------------ */
+/*
+ * A compiled switch is `cmp rI, #k ; bhi default ; tbb [pc, rI]` with the
+ * table immediately after. Nothing in the TBB says how long the table is; the
+ * compare does. Reading on until something "looks like code" would be a
+ * guess, and a wrong guess translates table bytes as branch targets — so the
+ * size is taken only from that exact guard, and a table without one stays an
+ * indirect transfer that traps by name.
+ *
+ * Matching backwards is safe here in a way it is not in general: the guard
+ * must decode as a compare of the SAME index register immediately followed by
+ * an unsigned-greater (or carry-set) branch, which data does not do by
+ * accident often enough to matter, and every resulting target is checked. */
+static int t32_bcc(uint16_t h1, uint16_t h2, uint8_t *cond) {
+    if ((h1 & 0xF800) != 0xF000 || (h2 & 0xD000) != 0x8000) return 0;
+    *cond = (h1 >> 6) & 0xF;
+    return *cond < 0xE;
+}
+
+static uint32_t table_bound(const uint8_t *code, uint32_t code_addr,
+                            uint32_t addr, int rm) {
+    uint32_t off = addr - code_addr;
+    uint8_t cond = 0xF;
+    uint32_t b_at;                         /* offset of the guarding branch */
+    if (off >= 2 && (rd16le(code + off - 2) & 0xF000) == 0xD000) {
+        cond = (rd16le(code + off - 2) >> 8) & 0xF;
+        b_at = off - 2;
+    } else if (off >= 4 && t32_bcc(rd16le(code + off - 4), rd16le(code + off - 2), &cond)) {
+        b_at = off - 4;
+    } else {
+        return 0;
+    }
+    if (cond != 0x8 && cond != 0x2) return 0;      /* HI: n = k+1, CS: n = k */
+
+    int k = -1;
+    if (b_at >= 2) {                               /* cmp rI, #imm8 (16-bit) */
+        uint16_t c = rd16le(code + b_at - 2);
+        if ((c & 0xF800) == 0x2800 && ((c >> 8) & 7) == rm) k = c & 0xFF;
+    }
+    if (k < 0 && b_at >= 4) {                      /* cmp.w rI, #imm8 */
+        uint16_t c1 = rd16le(code + b_at - 4), c2 = rd16le(code + b_at - 2);
+        if ((c1 & 0xFBF0) == 0xF1B0 && (c1 & 0xF) == rm &&
+            (c2 & 0xFF00) == 0x0F00 && !(c1 & 0x0400))
+            k = c2 & 0xFF;
+    }
+    if (k < 0) return 0;
+    return cond == 0x8 ? (uint32_t)k + 1 : (uint32_t)k;
+}
+
+uint32_t arm_table_target(const uint8_t *code, uint32_t code_addr,
+                          const arm_insn *in, uint32_t i) {
+    const uint32_t tab = in->addr + 4 - code_addr;
+    const uint32_t e = in->op == OP_TBH ? rd16le(code + tab + 2 * i)
+                                        : code[tab + i];
+    return in->addr + 4 + 2 * e;
+}
+
+static void bound_table(const uint8_t *code, uint32_t code_addr,
+                        uint32_t code_len, arm_insn *o) {
+    if (o->rn != 15 || o->rm < 0 || o->rm > 14) return;
+    uint32_t n = table_bound(code, code_addr, o->addr, o->rm);
+    if (n == 0 || n > 4096) return;
+    const uint32_t tab_end = o->addr + 4 + n * (o->op == OP_TBH ? 2 : 1);
+    if (tab_end - code_addr > code_len) return;
+    o->table_n = (uint16_t)n;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t t = arm_table_target(code, code_addr, o, i);
+        if (t < tab_end || t - code_addr >= code_len) { o->table_n = 0; return; }
+    }
+}
+
 /* --- entry point ------------------------------------------------------------ */
 
 int arm_decode(const uint8_t *code, uint32_t code_addr, uint32_t code_len,
@@ -1369,5 +1517,7 @@ int arm_decode(const uint8_t *code, uint32_t code_addr, uint32_t code_len,
     if (off + 4 > code_len) return 0;
     out->width = 4;
     decode_t32(h1, rd16le(code + off + 2), out);
+    if (out->op == OP_TBB || out->op == OP_TBH)
+        bound_table(code, code_addr, code_len, out);
     return 4;
 }

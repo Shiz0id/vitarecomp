@@ -68,6 +68,10 @@ typedef enum {
     OP_SBFX, OP_UBFX, OP_BFI, OP_BFC,
     OP_CLZ,
     OP_UADD8, OP_USUB8, OP_UADD16, OP_USUB16, OP_SEL,   /* GE-setting / reading */
+    OP_TBB, OP_TBH,             /* table branch; table_n entries follow    */
+    OP_TEQ,                     /* flags from rn ^ op2; NOT TST's rn & op2   */
+    OP_LDREX, OP_STREX,         /* xsize bytes; STREX status in rd          */
+    OP_CLREX, OP_DMB,           /* DMB stands for DMB/DSB/ISB: a full fence */
     OP_MLA, OP_MLS,                     /* rd = ra +/- rn * rm; ra in rt          */
     OP_UMULL, OP_SMULL, OP_UMLAL, OP_SMLAL, /* rt = RdLo, rt2 = RdHi            */
     OP_LDM, OP_STM,                     /* general base; `decrement` for DB       */
@@ -147,6 +151,8 @@ typedef struct {
     uint64_t   imm64;           /* NEON: expanded modified immediate       */
     uint8_t    mem_add;         /* U bit: offset added rather than subtracted */
     uint8_t    it_mask;         /* IT: which of the next 4 are conditional */
+    uint16_t   table_n;         /* TBB/TBH: entries, 0 when not bounded    */
+    uint8_t    xsize;           /* LDREX/STREX: 1, 2, 4, or 8 (the D form)  */
 
     /* Bitfield ops. Kept out of `imm`/`shift_amt` because a field named for
      * something else is how a reader ends up trusting the wrong one. */
@@ -166,5 +172,23 @@ const char *arm_class_name(arm_class c);
  * is no reliable way to infer it from a single instruction. */
 int arm_decode(const uint8_t *code, uint32_t code_addr, uint32_t code_len,
                uint32_t addr, arm_mode mode, arm_insn *out);
+
+/* Apply an IT block to the instructions it covers.
+ *
+ * IT makes up to the next four instructions conditional, but each of them
+ * decodes on its own as unconditional — the condition lives in the processor's
+ * ITSTATE, not in the instruction. So anything that decodes a straight run of
+ * Thumb code keeps one `itstate` byte, zeroed at the start of each block, and
+ * passes every decoded instruction through here in order. A covered
+ * instruction gets its condition and `conditional` set, and the 16-bit ALU
+ * forms lose their flag update: outside an IT block `movs`/`adds` set flags,
+ * inside one the same encodings do not (CMP, CMN and TST still do). */
+void arm_it_step(uint8_t *itstate, arm_insn *in);
+
+/* Entry `i` of a TBB/TBH's table: the address it branches to. Only valid
+ * for i < in->table_n, which the decoder sets only when the table's size is
+ * proven by the bounds check guarding it and every entry lands inside `code`. */
+uint32_t arm_table_target(const uint8_t *code, uint32_t code_addr,
+                          const arm_insn *in, uint32_t i);
 
 #endif /* ARMRECOMP_DECODE_H */

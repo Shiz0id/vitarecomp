@@ -358,6 +358,42 @@ static void test_memory(void) {
 
 /* --- CLZ ----------------------------------------------------------------------- */
 
+/* STREX succeeds only against the monitor its own LDREX opened, and only
+ * while the word still holds what was loaded. */
+static void test_exclusive(void) {
+    assert(vita_mem_init(0x81000000u, 4096) == 0);
+    const uint32_t a = 0x81000100u;
+    vita_write32(a, 41);
+
+    assert(vita_ldrex(a, 4) == 41);
+    assert(vita_strex(a, 42, 4) == 0 && vita_read32(a) == 42);
+    assert(vita_strex(a, 43, 4) == 1 && vita_read32(a) == 42);   /* monitor spent */
+
+    (void)vita_ldrex(a, 4);
+    vita_write32(a, 7);                                         /* another writer */
+    assert(vita_strex(a, 99, 4) == 1 && vita_read32(a) == 7);
+
+    (void)vita_ldrex(a, 4);
+    vita_clrex();
+    assert(vita_strex(a, 99, 4) == 1);
+
+    (void)vita_ldrex(a, 4);
+    assert(vita_strex(a + 4, 99, 4) == 1);                      /* other address */
+
+    vita_write8(a + 8, 0xAB);
+    assert(vita_ldrex(a + 8, 1) == 0xAB);
+    assert(vita_strex(a + 8, 0x1CD, 1) == 0 && vita_read8(a + 8) == 0xCD && vita_read8(a + 9) == 0);
+
+    vita_write32(a + 16, 1); vita_write32(a + 20, 2);
+    assert(vita_ldrex(a + 16, 8) == 0x0000000200000001ull);
+    assert(vita_strex(a + 16, 0x0000000400000003ull, 8) == 0);
+    assert(vita_read32(a + 16) == 3 && vita_read32(a + 20) == 4);
+
+    vita_barrier();
+    vita_mem_free();
+    printf("  exclusive monitor             ok\n");
+}
+
 static void test_clz(void) {
     /* Zero is 32 by ARM's definition; __builtin_clz(0) is undefined. */
     assert(vita_clz(0u) == 32u);
@@ -468,6 +504,7 @@ int main(void) {
     test_hle_libc();
     test_memory();
     test_clz();
+    test_exclusive();
     test_parallel_and_lanes();
     test_vfp_d32();
     test_mem_attach();

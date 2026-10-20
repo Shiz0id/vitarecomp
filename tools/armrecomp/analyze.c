@@ -136,6 +136,7 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
          * join could have come from either side. */
         uint32_t movw_lo[16];
         uint16_t movw_valid = 0;
+        uint8_t  itstate = 0;
 
         for (;;) {
             if (a < base || a >= base + len) break;
@@ -145,6 +146,7 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
             arm_insn in;
             int n = arm_decode(text, base, len, a, s.mode, &in);
             if (n == 0) break;
+            arm_it_step(&itstate, &in);
 
             seen_set(r, off);
             r->insns_total++;
@@ -225,11 +227,36 @@ static void walk(const vm_image *img, const vm_module *mod, vf_result *r,
                 continue;
             }
 
-            if (in.cls == A_RETURN) break;
+            /* UDF is __builtin_trap(): newlib's "cannot happen" paths end in
+             * one, and what follows it is the literal pool, not code. */
+            if ((in.cls == A_RETURN || in.cls == A_UNDEF) && !in.conditional) break;
 
-            if (in.cls == A_INDIRECT) { r->indirect_sites++; break; }
+            /* A switch. Its table was bounded by the decoder from the guard
+             * in front of it, so each entry is a block of this function. */
+            if (in.table_n) {
+                for (uint32_t i = 0; i < in.table_n; i++)
+                    sq_push(&local, arm_table_target(text, base, &in, i), s.mode, 0);
+                r->jump_tables++;
+                break;
+            }
+            if (in.op == OP_TBB || in.op == OP_TBH) r->jump_tables_unbounded++;
 
-            if (in.cls == A_BRANCH && in.has_target) {
+            if (in.cls == A_INDIRECT) {
+                r->indirect_sites++;
+                if (!in.conditional) break;
+            }
+
+            /* A branch back to before this function's entry is a tail jump
+             * into code some other function owns or shares — a common
+             * epilogue (newlib's strcmp returns through the end of strchr),
+             * or frame_dummy finishing in register_tm_clones. It keeps the
+             * caller's frame and return address, so it is exactly a call
+             * followed by a return, and its target is a function. */
+            if (in.cls == A_BRANCH && in.has_target && in.target < start) {
+                sq_push(q, in.target, s.mode, 0);
+                r->seeds_call++;
+                if (!in.conditional) break;
+            } else if (in.cls == A_BRANCH && in.has_target) {
                 sq_push(&local, in.target, s.mode, 0);
                 if (!in.conditional) break;       /* unconditional: flow ends */
             }

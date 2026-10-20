@@ -675,6 +675,111 @@ static void test_bounds(void) {
  * out from the architecture manual. Three of these were translating WRONGLY
  * rather than trapping, which is why each has an exact operand check. */
 
+/* Found running bridgetest inside Vita3K. */
+static void test_tables_hints_exclusives(void) {
+    memset(code, 0, sizeof(code));
+    arm_insn in;
+
+    /* nop.w and dmb sit in the conditional-branch encoding space with cond
+     * 111x. The test that separated them read the wrong four bits, and both
+     * decoded as branches. */
+    put16(0, 0xF3AF); put16(2, 0x8000);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NOP && in.cls != A_BRANCH && !in.has_target);
+    put16(0, 0xF3BF); put16(2, 0x8F5F);                  /* dmb sy */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_DMB && !in.has_target);
+    put16(0, 0xF3BF); put16(2, 0x8F2F);                  /* clrex */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_CLREX);
+    put16(0, 0xF040); put16(2, 0x8000);                  /* bne.w: still a branch */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_B && in.cond == 1 && in.has_target);
+
+    /* ldrex r2, [r0, #4]; strex r3, r1, [r0]; ldrexb; strexh; ldrexd; strexd */
+    put16(0, 0xE850); put16(2, 0x2F01);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDREX && in.xsize == 4 && in.rn == 0 && in.rt == 2 && in.imm == 4);
+    put16(0, 0xE840); put16(2, 0x1300);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_STREX && in.xsize == 4 && in.rn == 0 && in.rt == 1 && in.rd == 3);
+    put16(0, 0xE8D0); put16(2, 0x2F4F);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDREX && in.xsize == 1 && in.rt == 2);
+    put16(0, 0xE8C0); put16(2, 0x1F53);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_STREX && in.xsize == 2 && in.rt == 1 && in.rd == 3);
+    put16(0, 0xE8D0); put16(2, 0x237F);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDREX && in.xsize == 8 && in.rt == 2 && in.rt2 == 3);
+    put16(0, 0xE8C0); put16(2, 0x2374);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_STREX && in.xsize == 8 && in.rt == 2 && in.rt2 == 3 && in.rd == 4);
+
+    /* A switch: cmp r2, #4; bhi; tbb [pc, r2]; five byte entries. The size
+     * comes only from the guard; without it the table is not followed. */
+    memset(code, 0, sizeof(code));
+    put16(0, 0x2A04);                                    /* cmp r2, #4  */
+    put16(2, 0xD808);                                    /* bhi.n       */
+    put16(4, 0xE8DF); put16(6, 0xF002);                  /* tbb [pc,r2] */
+    code[8] = 3; code[9] = 4; code[10] = 5; code[11] = 3; code[12] = 6;
+    in = dec(ARM_T32, BASE + 4);
+    assert(in.op == OP_TBB && in.table_n == 5);
+    assert(arm_table_target(code, BASE, &in, 0) == BASE + 8 + 6);
+    assert(arm_table_target(code, BASE, &in, 4) == BASE + 8 + 12);
+    put16(0, 0x2B04);                                    /* cmp r3: wrong register */
+    in = dec(ARM_T32, BASE + 4);
+    assert(in.op == OP_TBB && in.table_n == 0 && in.cls == A_INDIRECT);
+    put16(0, 0x2A04); put16(2, 0xD008);                  /* beq: not a bound */
+    in = dec(ARM_T32, BASE + 4);
+    assert(in.table_n == 0);
+    /* An entry pointing back into the table is data, not a switch. */
+    put16(2, 0xD808); code[10] = 0;
+    in = dec(ARM_T32, BASE + 4);
+    assert(in.table_n == 0);
+
+    /* IT blocks. `ite eq; moveq r1,#1; movne r1,#0` from bridgetest's main:
+     * both moves were emitted unconditionally, and both set flags. */
+    {
+        uint8_t it = 0;
+        arm_insn seq[3];
+        memset(code, 0, sizeof(code));
+        put16(0, 0xBF0C); put16(2, 0x2101); put16(4, 0x2100); put16(6, 0x2101);
+        for (int i = 0; i < 3; i++) {
+            seq[i] = dec(ARM_T32, BASE + 2u * (unsigned)i);
+            arm_it_step(&it, &seq[i]);
+        }
+        assert(seq[1].cond == 0x0 && seq[1].conditional && !seq[1].sets_flags);
+        assert(seq[2].cond == 0x1 && seq[2].conditional && !seq[2].sets_flags);
+        in = dec(ARM_T32, BASE + 6);
+        arm_it_step(&it, &in);
+        assert(in.cond == ARM_COND_AL && !in.conditional && in.sets_flags);
+
+        /* itte ne: NE, NE, EQ; a CMP inside still sets flags. */
+        it = 0;
+        put16(0, 0xBF1A); put16(2, 0x2A01); put16(4, 0x2101); put16(6, 0x2100);
+        for (int i = 0; i < 4; i++) {
+            in = dec(ARM_T32, BASE + 2u * (unsigned)i);
+            arm_it_step(&it, &in);
+            if (i == 1) assert(in.cond == 0x1 && in.op == OP_CMP && in.sets_flags);
+            if (i == 2) assert(in.cond == 0x1);
+            if (i == 3) assert(in.cond == 0x0);
+        }
+        assert(it == 0);
+    }
+
+    /* rsb.w r1, r1, #2048 keeps its immediate (only 16-bit NEG has zero), and
+     * teq is its own op: XOR, not TST's AND. */
+    put16(0, 0xF5C1); put16(2, 0x6100);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_RSB && in.has_imm && in.imm == 2048 && in.rn == 1 && in.rd == 1);
+    put16(0, 0xF090); put16(2, 0x0F01);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_TEQ && in.imm == 1 && in.sets_flags);
+
+    printf("  tables, hints and exclusives  ok\n");
+}
+
 static void test_bringup_forms(void) {
     memset(code, 0, sizeof(code));
     arm_insn in;
@@ -808,6 +913,7 @@ int main(void) {
     test_it_block();
     test_bounds();
     test_bringup_forms();
+    test_tables_hints_exclusives();
     printf("all decode tests passed\n");
     return 0;
 }

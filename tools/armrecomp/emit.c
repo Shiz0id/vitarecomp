@@ -148,6 +148,7 @@ static void collect(const vm_image *img, const vf_func *fn, fbody *b) {
 
     while (sp_ > 0 && b->n < MAX_INSNS_PER_FUNC) {
         uint32_t a = stack[--sp_];
+        uint8_t itstate = 0;
 
         for (;;) {
             if (a < base || a >= base + img->seg_len) break;
@@ -157,9 +158,22 @@ static void collect(const vm_image *img, const vf_func *fn, fbody *b) {
             arm_insn in;
             int n = arm_decode(text, base, img->seg_len, a, fn->mode, &in);
             if (n == 0) break;
+            arm_it_step(&itstate, &in);
             fb_push(b, &in);
 
-            if (in.cls == A_RETURN) break;
+            if ((in.cls == A_RETURN || in.cls == A_UNDEF) && !in.conditional) break;
+            if (in.cls == A_INDIRECT && !in.conditional && !in.table_n) break;
+
+            if (in.table_n) {                        /* switch: every case */
+                for (uint32_t i = 0; i < in.table_n; i++) {
+                    uint32_t t = arm_table_target(text, base, &in, i);
+                    if (t < fn->addr || t >= bound) continue;
+                    fb_label(b, t);
+                    if (sp_ < (int)(sizeof(stack) / sizeof(stack[0])))
+                        stack[sp_++] = t;
+                }
+                break;
+            }
 
             /* `bound`, not `fn->end`.
              *
@@ -348,6 +362,33 @@ static void hle_symbol(char *dst, size_t cap, const nid_db *db,
     else   snprintf(dst, cap, "vita_hle_nid_%08X", s->func_nid);
 }
 
+/* Follow a GNU ld Thumb->ARM interworking veneer to where it really goes.
+ *
+ * When Thumb code calls a symbol the linker believes is ARM (VitaSDK's import
+ * stubs are), ld puts a veneer between them:
+ *
+ *     __sceFoo_from_thumb:  bx pc ; b.n .-4       (Thumb, to ARM at +4)
+ *                           ldr ip, [pc]          (ARM)
+ *                           add pc, ip, pc
+ *                           .word  target - (here + 8)
+ *
+ * Nothing about it is worth translating: it is a jump, and its target is
+ * fixed at link time. Returns the target, or `addr` if this is not a veneer. */
+static uint32_t le32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static uint32_t through_veneer(const vm_image *img, uint32_t addr) {
+    const uint32_t base = img->seg_vaddr, len = img->seg_len;
+    if (addr < base || addr + 16 > base + len || (addr & 3)) return addr;
+    const uint8_t *p = img->data + img->seg_file + (addr - base);
+    uint16_t t0 = (uint16_t)(p[0] | p[1] << 8), t1 = (uint16_t)(p[2] | p[3] << 8);
+    uint32_t a0 = le32(p + 4), a1 = le32(p + 8), off = le32(p + 12);
+    if (t0 != 0x4778 || (t1 != 0xE7FD && t1 != 0x46C0)) return addr;
+    if (a0 != 0xE59FC000u || a1 != 0xE08CF00Fu) return addr;
+    return addr + 8 + 8 + off;     /* the add's pc reads as its address + 8 */
+}
+
 static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db,
                      const funcset *fs, const fbody *b,
                      const arm_insn *in, FILE *f, emit_stats *st) {
@@ -365,12 +406,22 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
      * loader overwrites at load time, so recompiling it would translate filler
      * and then "return" into whatever the filler happened to be. */
     if ((in->cls == A_CALL || in->cls == A_BRANCH) && in->has_target) {
-        const vm_stub *s = vm_find_stub(mod, in->target);
+        const vm_stub *s = vm_find_stub(mod, through_veneer(img, in->target));
         if (s) {
             char sym[96];
             hle_symbol(sym, sizeof(sym), db, s);
-            if (in->cls == A_CALL) fprintf(f, "    %s();\n", sym);
-            else                   fprintf(f, "    %s(); return;\n", sym);  /* tail call */
+            /* This path runs before the condition guard below, so it applies
+             * the condition itself: a conditional firmware call is common
+             * (`it ne; blne sceFoo`), and emitting it unconditionally is wrong
+             * only when the condition is false. */
+            const char *open = "", *close = "";
+            char cbuf[32];
+            if (in->cond != ARM_COND_AL) {
+                snprintf(cbuf, sizeof(cbuf), "if (vita_cond(%u)) { ", in->cond);
+                open = cbuf; close = " }";
+            }
+            if (in->cls == A_CALL) fprintf(f, "    %s%s();%s\n", open, sym, close);
+            else                   fprintf(f, "    %s%s(); return;%s\n", open, sym, close);  /* tail call */
             st->import_calls++;
             return 1;
         }
@@ -476,7 +527,11 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
         }
 
         case OP_RSB:
-            fprintf(f, "    { uint32_t _a = 0, _b = %s;\n", src_name(in, in->rn));
+            /* rd = op2 - rn. The 16-bit NEG form decodes with a zero immediate,
+             * which made "always zero" look right: rsb.w r1, r1, #2048 was
+             * emitted as 0 - r1, and bridgetest's snprintf got a size of zero. */
+            operand2(o2, sizeof(o2), in);
+            fprintf(f, "    { uint32_t _a = %s, _b = %s;\n", o2, src_name(in, in->rn));
             fprintf(f, "      %s = _a - _b;\n", reg_name(in->rd));
             if (in->sets_flags)
                 fprintf(f, "      vita_flags_sub(_a, _b, %s);\n", reg_name(in->rd));
@@ -528,10 +583,10 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
                     in->op == OP_CMP ? '-' : '+');
             break;
 
-        case OP_TST:
+        case OP_TST: case OP_TEQ:
             operand2(o2, sizeof(o2), in);
-            fprintf(f, "    vita_flags_nz(%s & %s);\n",
-                    rn_s, o2);
+            fprintf(f, "    vita_flags_nz(%s %s %s);\n",
+                    rn_s, in->op == OP_TEQ ? "^" : "&", o2);
             break;
 
         case OP_ADR:
@@ -772,6 +827,22 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             }
             break;
 
+        case OP_TBB: case OP_TBH: {
+            /* A switch with a proven size becomes one. A case whose block was
+             * not collected traps by name; the default is unreachable after the
+             * guard, and traps rather than falling into the table bytes. */
+            if (!in->table_n) { ok = 0; break; }
+            const uint8_t *text = img->data + img->seg_file;
+            fprintf(f, "    switch (%s) {\n", src_name(in, in->rm));
+            for (uint32_t i = 0; i < in->table_n; i++) {
+                uint32_t t = arm_table_target(text, img->seg_vaddr, in, i);
+                if (fb_has_label(b, t)) fprintf(f, "    case %u: goto L_%08X;\n", i, t);
+                else fprintf(f, "    case %u: vita_trap_indirect(0x%08X, 0x%08X); return;\n", i, in->addr, t);
+            }
+            fprintf(f, "    default: vita_trap_indirect(0x%08X, 0); return;\n    }\n", in->addr);
+            break;
+        }
+
         case OP_BX: case OP_BLX:
             /* An indirect transfer through a register. The destination is a
              * value, so it can only be resolved while running — this is the one
@@ -779,6 +850,13 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
              * translation. BX is a tail transfer and does not come back; BLX is
              * a call and does. */
             if (in->rm == ARM_NO_REG) { ok = 0; break; }
+            /* `bx lr` is a return, and must be emitted as one. The address in
+             * LR is the middle of the caller — never a function entry — so
+             * dispatching to it misses every time; the C call stack already
+             * holds the way back. This includes `pop {r3}; mov lr, r3; bx lr`,
+             * which is how CRT code returns: whatever was loaded into LR, the
+             * caller is the C frame below this one. */
+            if (in->op == OP_BX && in->rm == 14) { fprintf(f, "    return;\n"); break; }
             /* Through reg_operand, not reg_name. `bx pc` is a real (if odd)
              * instruction, and as a SOURCE the PC is a constant this pass
              * knows — resolving it is correct where naming it would not
@@ -1039,6 +1117,40 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
              * mode claimed by the decoder for exactly that reason. */
             fprintf(f, "    vfp_setu(%d, (uint32_t)(%s)vfp_getf(%d));\n",
                     in->vd, in->vfp_unsigned ? "uint32_t" : "int32_t", in->vm);
+            break;
+
+        case OP_LDREX: case OP_STREX: {
+            if (in->rn == ARM_NO_REG || in->rn == 15 || in->rt == 15 ||
+                (in->xsize == 8 && (in->rt2 == ARM_NO_REG || in->rt2 == 15)) ||
+                (in->op == OP_STREX && (in->rd == ARM_NO_REG || in->rd == 15))) {
+                ok = 0; break;
+            }
+            char a[48];
+            if (in->imm) snprintf(a, sizeof(a), "%s + %uu", src_name(in, in->rn), in->imm);
+            else         snprintf(a, sizeof(a), "%s", src_name(in, in->rn));
+            if (in->op == OP_LDREX) {
+                if (in->xsize == 8)
+                    fprintf(f, "    { uint64_t _x = vita_ldrex(%s, 8); %s = (uint32_t)_x; %s = (uint32_t)(_x >> 32); }\n",
+                            a, reg_name(in->rt), reg_name(in->rt2));
+                else
+                    fprintf(f, "    %s = (uint32_t)vita_ldrex(%s, %u);\n", reg_name(in->rt), a, in->xsize);
+            } else {
+                if (in->xsize == 8)
+                    fprintf(f, "    %s = vita_strex(%s, ((uint64_t)%s << 32) | %s, 8);\n",
+                            reg_name(in->rd), a, src_name(in, in->rt2), src_name(in, in->rt));
+                else
+                    fprintf(f, "    %s = vita_strex(%s, %s, %u);\n",
+                            reg_name(in->rd), a, src_name(in, in->rt), in->xsize);
+            }
+            break;
+        }
+
+        case OP_CLREX:
+            fprintf(f, "    vita_clrex();\n");
+            break;
+
+        case OP_DMB:
+            fprintf(f, "    vita_barrier();\n");
             break;
 
         case OP_NOP:

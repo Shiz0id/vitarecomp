@@ -188,6 +188,12 @@ struct ThreadState {
     // suspend holds it.
     SceInt32 get_vm_context(CPUContext &context, uint32_t &tpidrurw, bool &in_kernel_call);
 
+    // vita3krecomp: whether this thread has been asked to end. The JIT's run loop checks this
+    // between runs, after every kernel call; recompiled code returns to its caller rather than
+    // to the loop, so the bridge checks it after each import itself. Read by the thread itself,
+    // which is the one that requested its own exit; another thread ending it also stops its CPU.
+    bool ending_requested() const { return exiting(); }
+
 private:
     // How a thread ends, each value stronger than the ones before it
     enum class Ending : uint8_t {
