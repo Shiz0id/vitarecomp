@@ -1313,6 +1313,51 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
                     in->vd, in->vm, in->vm + 1, in->neon_size);
             break;
 
+        /* Widening (neon.h). Each helper takes its sources as arguments, which
+         * are read before the result is stored, so a Q destination that is also
+         * a source reads its old value (vsubw q0, q0, d2; vmull.s16 q0, d0,
+         * d1). MLAL and MLSL read the old vd as the accumulator, and a W form
+         * reads its Q vn in full. */
+        case OP_NEON_ADDL: case OP_NEON_SUBL: case OP_NEON_ADDW: case OP_NEON_SUBW: {
+            int wide = in->op == OP_NEON_ADDW || in->op == OP_NEON_SUBW;
+            int sub = in->op == OP_NEON_SUBL || in->op == OP_NEON_SUBW;
+            /* n is the D word for the L forms and the Q pair for the W forms. */
+            if (wide)
+                fprintf(f, "    { uint64_t n[2] = {neon_getd(%d), neon_getd(%d)}, r[2];",
+                        in->vn, in->vn + 1);
+            else
+                fprintf(f, "    { uint64_t n[2] = {neon_getd(%d), 0}, r[2];", in->vn);
+            fprintf(f, " neon_wide_addsub(r, n, neon_getd(%d), %d, %d, %d, %d);",
+                    in->vm, in->neon_size, in->vfp_unsigned, wide, sub);
+            fprintf(f, " neon_setd(%d, r[0]); neon_setd(%d, r[1]); }\n", in->vd, in->vd + 1);
+            break;
+        }
+
+        case OP_NEON_MULL: {
+            fprintf(f, "    { uint64_t r[2];");
+            fprintf(f, " neon_wide_mul(r, neon_getd(%d), neon_getd(%d), %d, %d);",
+                    in->vn, in->vm, in->neon_size, in->vfp_unsigned);
+            fprintf(f, " neon_setd(%d, r[0]); neon_setd(%d, r[1]); }\n", in->vd, in->vd + 1);
+            break;
+        }
+
+        case OP_NEON_MLAL: case OP_NEON_MLSL: {
+            fprintf(f, "    { uint64_t r[2] = {neon_getd(%d), neon_getd(%d)};",
+                    in->vd, in->vd + 1);
+            fprintf(f, " neon_wide_mac(r, neon_getd(%d), neon_getd(%d), %d, %d, %d);",
+                    in->vn, in->vm, in->neon_size, in->vfp_unsigned,
+                    in->op == OP_NEON_MLSL);
+            fprintf(f, " neon_setd(%d, r[0]); neon_setd(%d, r[1]); }\n", in->vd, in->vd + 1);
+            break;
+        }
+
+        /* VSHLL and VMOVL: the D source widened and shifted into the Q pair. */
+        case OP_NEON_SHLL:
+            fprintf(f, "    { uint64_t r[2]; neon_widen(r, neon_getd(%d), %d, %u, %d);",
+                    in->vm, in->neon_size, (unsigned)in->imm, in->vfp_unsigned);
+            fprintf(f, " neon_setd(%d, r[0]); neon_setd(%d, r[1]); }\n", in->vd, in->vd + 1);
+            break;
+
         /* Byte and element shuffles, and table lookup (neon.h). The Q forms
          * are the two D words of each pair, and the helpers work on them as
          * the architecture defines for each op. */

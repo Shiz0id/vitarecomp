@@ -901,6 +901,160 @@ static void test_neon_int_c(void) {
     printf("ok   neon int: wrapping mul/mla/mls, vqadd/vqsub clamp at both ends, shifts by immediate, vsra wrap\n");
 }
 
+/* Pack n lanes of w bits, lane 0 lowest, from v. */
+static uint64_t pack_lanes(const uint64_t *v, int w, int n) {
+    uint64_t r = 0;
+    for (int i = 0; i < n; i++) {
+        assert(w == 64 || (v[i] >> w) == 0);
+        r |= v[i] << (i * w);
+    }
+    return r;
+}
+
+/* Check a Q result against its lanes, lane 0 first: 128 / w of them, w the
+ * result lane width. */
+static void check_q(const uint64_t *r, const uint64_t *lanes, int w) {
+    int per = 64 / w;
+    assert(r[0] == pack_lanes(lanes, w, per));
+    assert(r[1] == pack_lanes(lanes + per, w, per));
+}
+
+/* The widening helpers, against values worked out by hand from the lanes.
+ * Every source has a lane with its sign bit set, so each signed result differs
+ * from the unsigned one. The 32-bit products 0x80000000 * 0x80000000 are 2^62
+ * either way; the lane 0xFFFFFFFF * 2 is not, and it tells them apart. The
+ * helpers take the D words as the emitter passes them, so these tests cover
+ * the operand handling as well as the arithmetic. */
+static void test_neon_widen(void) {
+    uint64_t r[2];
+
+    /* 8-bit source, 16-bit results. N is -128, -1, 1, 127, 0, 16, -16, 5 and M
+     * is 1, -128, -1, 127, 2, 1, -128, 16 signed; the unsigned reading of the
+     * same bytes is 128, 255, 1, 127, 0, 16, 240, 5 and 1, 128, 255, 127, 2, 1,
+     * 128, 16. */
+    const uint64_t N8[8] = { 0x80, 0xFF, 0x01, 0x7F, 0x00, 0x10, 0xF0, 0x05 };
+    const uint64_t M8[8] = { 0x01, 0x80, 0xFF, 0x7F, 0x02, 0x01, 0x80, 0x10 };
+    const uint64_t dn8 = pack_lanes(N8, 8, 8), dm8 = pack_lanes(M8, 8, 8);
+    const uint64_t nl8[2] = { dn8, 0 };                 /* L form: n is one D word */
+    const uint64_t add_s[8] = { 0xFF81, 0xFF7F, 0x0000, 0x00FE, 0x0002, 0x0011, 0xFF70, 0x0015 };
+    const uint64_t add_u[8] = { 0x0081, 0x017F, 0x0100, 0x00FE, 0x0002, 0x0011, 0x0170, 0x0015 };
+    const uint64_t sub_s[8] = { 0xFF7F, 0x007F, 0x0002, 0x0000, 0xFFFE, 0x000F, 0x0070, 0xFFF5 };
+    const uint64_t sub_u[8] = { 0x007F, 0x007F, 0xFF02, 0x0000, 0xFFFE, 0x000F, 0x0070, 0xFFF5 };
+    neon_wide_addsub(r, nl8, dm8, 0, 0, 0, 0); check_q(r, add_s, 16);
+    neon_wide_addsub(r, nl8, dm8, 0, 1, 0, 0); check_q(r, add_u, 16);
+    neon_wide_addsub(r, nl8, dm8, 0, 0, 0, 1); check_q(r, sub_s, 16);
+    neon_wide_addsub(r, nl8, dm8, 0, 1, 0, 1); check_q(r, sub_u, 16);
+
+    /* VMULL, and VMLAL/VMLSL. VMLAL adds the products to 100 in every lane.
+     * VMLSL subtracts them from 0, so the lanes wrap below zero. */
+    const uint64_t mul_s[8] = { 0xFF80, 0x0080, 0xFFFF, 0x3F01, 0x0000, 0x0010, 0x0800, 0x0050 };
+    const uint64_t mul_u[8] = { 0x0080, 0x7F80, 0x00FF, 0x3F01, 0x0000, 0x0010, 0x7800, 0x0050 };
+    const uint64_t acc_s[8] = { 0xFFE4, 0x00E4, 0x0063, 0x3F65, 0x0064, 0x0074, 0x0864, 0x00B4 };
+    const uint64_t mls_u[8] = { 0xFF80, 0x8080, 0xFF01, 0xC0FF, 0x0000, 0xFFF0, 0x8800, 0xFFB0 };
+    const uint64_t hundred[2] = { 0x0064006400640064ull, 0x0064006400640064ull };
+    neon_wide_mul(r, dn8, dm8, 0, 0); check_q(r, mul_s, 16);
+    neon_wide_mul(r, dn8, dm8, 0, 1); check_q(r, mul_u, 16);
+    r[0] = hundred[0]; r[1] = hundred[1];
+    neon_wide_mac(r, dn8, dm8, 0, 0, 0); check_q(r, acc_s, 16);
+    r[0] = 0; r[1] = 0;
+    neon_wide_mac(r, dn8, dm8, 0, 1, 1); check_q(r, mls_u, 16);
+
+    /* VADDW and VSUBW: the wide operand is the Q pair, taken as it is, and
+     * only M is widened. W is 0x0100, 0xFFFF, 0, 0x8000, 0x7FFF, 1, 0xFF00,
+     * 0x1234 as 16-bit lanes. */
+    const uint64_t W8[8] = { 0x0100, 0xFFFF, 0x0000, 0x8000, 0x7FFF, 0x0001, 0xFF00, 0x1234 };
+    const uint64_t nq8[2] = { pack_lanes(W8, 16, 4), pack_lanes(W8 + 4, 16, 4) };
+    const uint64_t addw_s[8] = { 0x0101, 0xFF7F, 0xFFFF, 0x807F, 0x8001, 0x0002, 0xFE80, 0x1244 };
+    const uint64_t addw_u[8] = { 0x0101, 0x007F, 0x00FF, 0x807F, 0x8001, 0x0002, 0xFF80, 0x1244 };
+    const uint64_t subw_s[8] = { 0x00FF, 0x007F, 0x0001, 0x7F81, 0x7FFD, 0x0000, 0xFF80, 0x1224 };
+    const uint64_t subw_u[8] = { 0x00FF, 0xFF7F, 0xFF01, 0x7F81, 0x7FFD, 0x0000, 0xFE80, 0x1224 };
+    neon_wide_addsub(r, nq8, dm8, 0, 0, 1, 0); check_q(r, addw_s, 16);
+    neon_wide_addsub(r, nq8, dm8, 0, 1, 1, 0); check_q(r, addw_u, 16);
+    neon_wide_addsub(r, nq8, dm8, 0, 0, 1, 1); check_q(r, subw_s, 16);
+    neon_wide_addsub(r, nq8, dm8, 0, 1, 1, 1); check_q(r, subw_u, 16);
+
+    /* 16-bit source, 32-bit results. N is -32768, -1, 1, 32767 and M is 1,
+     * -32768, -1, 32767 signed; unsigned, N is 32768, 65535, 1, 32767 and M
+     * is 1, 32768, 65535, 32767. */
+    const uint64_t N16[4] = { 0x8000, 0xFFFF, 0x0001, 0x7FFF };
+    const uint64_t M16[4] = { 0x0001, 0x8000, 0xFFFF, 0x7FFF };
+    const uint64_t dn16 = pack_lanes(N16, 16, 4), dm16 = pack_lanes(M16, 16, 4);
+    const uint64_t nl16[2] = { dn16, 0 };
+    const uint64_t addl16_s[4] = { 0xFFFF8001, 0xFFFF7FFF, 0x00000000, 0x0000FFFE };
+    const uint64_t addl16_u[4] = { 0x00008001, 0x00017FFF, 0x00010000, 0x0000FFFE };
+    const uint64_t subl16_s[4] = { 0xFFFF7FFF, 0x00007FFF, 0x00000002, 0x00000000 };
+    const uint64_t subl16_u[4] = { 0x00007FFF, 0x00007FFF, 0xFFFF0002, 0x00000000 };
+    const uint64_t mull16_s[4] = { 0xFFFF8000, 0x00008000, 0xFFFFFFFF, 0x3FFF0001 };
+    const uint64_t mull16_u[4] = { 0x00008000, 0x7FFF8000, 0x0000FFFF, 0x3FFF0001 };
+    const uint64_t mlsl16_s[4] = { 0x00008000, 0xFFFF8000, 0x00000001, 0xC000FFFF };
+    neon_wide_addsub(r, nl16, dm16, 1, 0, 0, 0); check_q(r, addl16_s, 32);
+    neon_wide_addsub(r, nl16, dm16, 1, 0, 0, 1); check_q(r, subl16_s, 32);
+    neon_wide_mul(r, dn16, dm16, 1, 0);          check_q(r, mull16_s, 32);
+    r[0] = 0; r[1] = 0;
+    neon_wide_mac(r, dn16, dm16, 1, 0, 1);       check_q(r, mlsl16_s, 32);
+    neon_wide_addsub(r, nl16, dm16, 1, 1, 0, 0); check_q(r, addl16_u, 32);
+    neon_wide_addsub(r, nl16, dm16, 1, 1, 0, 1); check_q(r, subl16_u, 32);
+    neon_wide_mul(r, dn16, dm16, 1, 1);          check_q(r, mull16_u, 32);
+
+    /* 16-bit W form: the wide operand is 32-bit lanes. Lane 0 0x00010000 + 1,
+     * lane 1 5 - 32768 (wraps below zero), lane 2 0xFFFF0000 - 1, lane 3
+     * 0x7FFFFFFF + 32767 (carries into bit 31). */
+    const uint64_t W16[4] = { 0x00010000, 0x00000005, 0xFFFF0000, 0x7FFFFFFF };
+    const uint64_t nq16[2] = { pack_lanes(W16, 32, 2), pack_lanes(W16 + 2, 32, 2) };
+    const uint64_t addw16_s[4] = { 0x00010001, 0xFFFF8005, 0xFFFEFFFF, 0x80007FFE };
+    neon_wide_addsub(r, nq16, dm16, 1, 0, 1, 0); check_q(r, addw16_s, 32);
+
+    /* 32-bit source, 64-bit results. N is 0x80000000 and 0xFFFFFFFF, M is
+     * 0x80000000 and 2. */
+    const uint64_t N32[2] = { 0x80000000, 0xFFFFFFFF };
+    const uint64_t M32[2] = { 0x80000000, 0x00000002 };
+    const uint64_t dn32 = pack_lanes(N32, 32, 2), dm32 = pack_lanes(M32, 32, 2);
+    const uint64_t nl32[2] = { dn32, 0 };
+    const uint64_t addl32_s[2] = { 0xFFFFFFFF00000000ull, 0x0000000000000001ull };
+    const uint64_t addl32_u[2] = { 0x0000000100000000ull, 0x0000000100000001ull };
+    const uint64_t mull32_s[2] = { 0x4000000000000000ull, 0xFFFFFFFFFFFFFFFEull };
+    const uint64_t mull32_u[2] = { 0x4000000000000000ull, 0x00000001FFFFFFFEull };
+    const uint64_t mlal32_s[2] = { 0x4000000000000001ull, 0x0000000000000000ull };
+    const uint64_t mlsl32_u[2] = { 0xC000000000000000ull, 0xFFFFFFFE00000002ull };
+    neon_wide_addsub(r, nl32, dm32, 2, 0, 0, 0); check_q(r, addl32_s, 64);
+    neon_wide_mul(r, dn32, dm32, 2, 0);          check_q(r, mull32_s, 64);
+    r[0] = 1; r[1] = 2;
+    neon_wide_mac(r, dn32, dm32, 2, 0, 0);       check_q(r, mlal32_s, 64);
+    neon_wide_addsub(r, nl32, dm32, 2, 1, 0, 0); check_q(r, addl32_u, 64);
+    neon_wide_mul(r, dn32, dm32, 2, 1);          check_q(r, mull32_u, 64);
+    r[0] = 0; r[1] = 0;
+    neon_wide_mac(r, dn32, dm32, 2, 1, 1);       check_q(r, mlsl32_u, 64);
+
+    /* 32-bit W form. W is 2^63 and 5; M is -2^31 and 2 signed. The signed
+     * subtract gives 2^63 + 2^31 in lane 0 and the unsigned one 2^63 - 2^31. */
+    const uint64_t nq32[2] = { 0x8000000000000000ull, 0x0000000000000005ull };
+    const uint64_t addw32_s[2] = { 0x7FFFFFFF80000000ull, 0x0000000000000007ull };
+    const uint64_t subw32_s[2] = { 0x8000000080000000ull, 0x0000000000000003ull };
+    const uint64_t subw32_u[2] = { 0x7FFFFFFF80000000ull, 0x0000000000000003ull };
+    neon_wide_addsub(r, nq32, dm32, 2, 0, 1, 0); check_q(r, addw32_s, 64);
+    neon_wide_addsub(r, nq32, dm32, 2, 0, 1, 1); check_q(r, subw32_s, 64);
+    neon_wide_addsub(r, nq32, dm32, 2, 1, 1, 1); check_q(r, subw32_u, 64);
+
+    /* VSHLL by esize - 1, and VMOVL (shift 0). Each shifted lane keeps its
+     * wide width: the sign bits shifted out of a source lane are masked. */
+    const uint64_t shll8_u7[8] = { 0x4000, 0x7F80, 0x0080, 0x3F80, 0x0000, 0x0800, 0x7800, 0x0280 };
+    const uint64_t shll8_s7[8] = { 0xC000, 0xFF80, 0x0080, 0x3F80, 0x0000, 0x0800, 0xF800, 0x0280 };
+    const uint64_t shll16_s15[4] = { 0xC0000000, 0xFFFF8000, 0x00008000, 0x3FFF8000 };
+    const uint64_t movl16_s[4] = { 0xFFFF8000, 0xFFFFFFFF, 0x00000001, 0x00007FFF };
+    const uint64_t movl16_u[4] = { 0x00008000, 0x0000FFFF, 0x00000001, 0x00007FFF };
+    const uint64_t shll32_u31[2] = { 0x4000000000000000ull, 0x7FFFFFFF80000000ull };
+    const uint64_t shll32_s31[2] = { 0xC000000000000000ull, 0xFFFFFFFF80000000ull };
+    neon_widen(r, dn8, 0, 7, 1);   check_q(r, shll8_u7, 16);
+    neon_widen(r, dn8, 0, 7, 0);   check_q(r, shll8_s7, 16);
+    neon_widen(r, dn16, 1, 15, 0); check_q(r, shll16_s15, 32);
+    neon_widen(r, dn16, 1, 0, 0);  check_q(r, movl16_s, 32);
+    neon_widen(r, dn16, 1, 0, 1);  check_q(r, movl16_u, 32);
+    neon_widen(r, dn32, 2, 31, 1); check_q(r, shll32_u31, 64);
+    neon_widen(r, dn32, 2, 31, 0); check_q(r, shll32_s31, 64);
+
+    printf("ok   neon widening: vaddl/vsubl/vaddw/vsubw/vmull/vmlal/vmlsl at 8/16/32, vshll/vmovl\n");
+}
+
 static void test_neon_shuffle(void) {
     /* A holds bytes 0x00..0x07 and B bytes 0x08..0x0F, so byte j of the pair
      * is j. X and Y continue the count at 0x10 and 0x18. Every expected value
@@ -1181,6 +1335,7 @@ int main(void) {
     test_neon_f32();
     test_neon_f32_b();
     test_neon_int_c();
+    test_neon_widen();
     test_neon_shuffle();
     test_neon_ldst();
     test_neon_narrow();

@@ -428,6 +428,79 @@ static inline uint64_t neon_sra(uint64_t d, uint64_t m, int amt, int size, int i
     return neon_add(d, neon_shr(m, amt, size, is_unsigned), size);
 }
 
+/* --- Advanced SIMD widening ------------------------------------------------
+ *
+ * The three-registers-of-different-lengths group and VSHLL/VMOVL. A source
+ * lane is w = 8 << size bits and the result lane is 2w bits, so a Q result
+ * is two D words r[0] (the low D) and r[1]: lane i of the 128 bits sits at
+ * bit i * 2w. The helpers work on the Q word pairs directly, so a Q operand
+ * that overlaps the destination is read in full before the emitter stores r.
+ * Each lane is extended by hand (neon_sext for signed), and the sums and
+ * products wrap modulo 2^(2w) by working at the wide lane size. */
+
+/* Widen each lane of the D word src into r, zero-extended if is_unsigned and
+ * sign-extended otherwise, then shifted left by shift. shift is below the
+ * source lane width (VSHLL takes 0 to w - 1), and the shifted bits are masked
+ * to the wide lane. VMOVL is shift 0. size is the SOURCE lane size. */
+static inline void neon_widen(uint64_t r[2], uint64_t src, int size, int shift, int is_unsigned) {
+    int w = 8 << size, ww = 2 * w;
+    uint64_t mask = neon_lmask(size), wmask = neon_lmask(size + 1);
+    r[0] = r[1] = 0;
+    for (int i = 0; i < 64 / w; i++) {
+        uint64_t v = (src >> (i * w)) & mask;
+        uint64_t e = is_unsigned ? v : (uint64_t)neon_sext(v, w);
+        r[(i * ww) / 64] |= ((e << shift) & wmask) << ((i * ww) % 64);
+    }
+}
+
+/* r = a +/- b, wrapping at the wide lane size, for VADDL/VSUBL and the W forms
+ * VADDW/VSUBW. size is the source size, so the lanes here are size + 1. r may
+ * be a, since each word is read before it is written. */
+static inline void neon_wadd(uint64_t r[2], const uint64_t a[2], const uint64_t b[2], int size, int sub) {
+    for (int k = 0; k < 2; k++)
+        r[k] = sub ? neon_sub(a[k], b[k], size + 1) : neon_add(a[k], b[k], size + 1);
+}
+
+/* r = a * b at the wide lane size, the low wide bits kept. The operands are
+ * widened and so below 2^(2w) already. A product of two 32-bit values can need
+ * 64 bits, and the uint64_t product keeps exactly those, since the signed one
+ * fits too. */
+static inline void neon_wmul(uint64_t r[2], const uint64_t a[2], const uint64_t b[2], int size) {
+    r[0] = neon_mul(a[0], b[0], size + 1);
+    r[1] = neon_mul(a[1], b[1], size + 1);
+}
+
+/* VADDL, VSUBL (wide = 0) and VADDW, VSUBW (wide = 1): r = n +/- m. n is the
+ * D word n[0] for the L forms, and the Q pair n[0], n[1] for the W forms,
+ * which is taken as it is, since its lanes are already wide. m is a D word
+ * either way and is widened by the signedness. */
+static inline void neon_wide_addsub(uint64_t r[2], const uint64_t n[2], uint64_t m,
+                                    int size, int is_unsigned, int wide, int sub) {
+    uint64_t wn[2], wm[2];
+    if (wide) { wn[0] = n[0]; wn[1] = n[1]; }
+    else      neon_widen(wn, n[0], size, 0, is_unsigned);
+    neon_widen(wm, m, size, 0, is_unsigned);
+    neon_wadd(r, wn, wm, size, sub);
+}
+
+/* VMULL: r = n ext * m ext, both D words widened by the signedness. */
+static inline void neon_wide_mul(uint64_t r[2], uint64_t n, uint64_t m, int size, int is_unsigned) {
+    uint64_t wn[2], wm[2];
+    neon_widen(wn, n, size, 0, is_unsigned);
+    neon_widen(wm, m, size, 0, is_unsigned);
+    neon_wmul(r, wn, wm, size);
+}
+
+/* VMLAL (sub = 0) and VMLSL (sub = 1): r = r +/- n ext * m ext, with r the old
+ * Qd on input. The product is formed first, so r may be read as the
+ * accumulator without anything being overwritten early. */
+static inline void neon_wide_mac(uint64_t r[2], uint64_t n, uint64_t m, int size,
+                                 int is_unsigned, int sub) {
+    uint64_t p[2];
+    neon_wide_mul(p, n, m, size, is_unsigned);
+    neon_wadd(r, r, p, size, sub);
+}
+
 /* --- Advanced SIMD shuffles, table lookup and lane duplicate ----------------
  *
  * The array helpers take one or two D words (a[0], a[1] for a Q pair) and

@@ -134,6 +134,15 @@ typedef enum {
     OP_NEON_SHL, OP_NEON_SHR, OP_NEON_SRA, /* by immediate: imm is the amount,
                                    neon_size the lane; SHR and SRA use
                                    vfp_unsigned for the signedness            */
+    OP_NEON_ADDL, OP_NEON_SUBL, /* widening: vd (a Q pair) = vn ext +/- vm ext,
+                                   vn and vm D registers, neon_size the SOURCE
+                                   lane, vfp_unsigned the signedness           */
+    OP_NEON_ADDW, OP_NEON_SUBW, /* as ADDL/SUBL, but vn is a Q pair (even)    */
+    OP_NEON_MULL,               /* vd = vn ext * vm ext                       */
+    OP_NEON_MLAL, OP_NEON_MLSL, /* vd = vd +/- vn ext * vm ext                */
+    OP_NEON_SHLL,               /* vd = vm ext << imm, imm 0 is VMOVL. The
+                                   widening ops write the pair vd, vd+1 and
+                                   do not use neon_q, as MOVN does            */
     OP_NEON_EXT,                /* vd = bytes imm.. of vn:vm, imm a byte offset */
     OP_NEON_REV,                /* reverse elements in each imm-bit container  */
     OP_NEON_SWP, OP_NEON_TRN, OP_NEON_UZP, OP_NEON_ZIP, /* permutes, neon_size lane */

@@ -936,6 +936,55 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
         return 0;
     }
 
+    /* Three registers of different lengths: h1 111U 1111 1D ss nnnn, h2 dddd
+     * opc(4) N 0 M 0 mmmm. ss (h1 bits 5:4) is the SOURCE lane size, 8 << ss,
+     * and the result is a Q register, so d must be even. ss = 11 is not this
+     * group: it is the 1111 space of VEXT, VMOVN and the rest, all of which
+     * have bits 5:4 set. Bits 6 and 4 of h2 are clear here, which keeps it
+     * apart from the scalar group (bit 6 set) and the shift and one-register
+     * immediate groups (bit 4 set). The opc values not claimed return 0:
+     * 0100 VADDHN, 0101 VABAL, 0110 VSUBHN, 0111 VABDL, 1001, 1011 and 1101
+     * (VQDML*), 1110, the polynomial VMULL, and 1111, which is undefined. The
+     * W forms (0001, 0011) take a Q register for vn as well, so n must be
+     * even. */
+    if ((h1 & 0x0080) && (h1 & 0x0030) != 0x0030 && (h2 & 0x0050) == 0) {
+        int opc = (h2 >> 8) & 0xF, size = (h1 >> 4) & 3;
+        int kind, wide = 0;
+        switch (opc) {
+            case 0x0: kind = 0; break;                     /* VADDL */
+            case 0x1: kind = 1; wide = 1; break;           /* VADDW */
+            case 0x2: kind = 2; break;                     /* VSUBL */
+            case 0x3: kind = 3; wide = 1; break;           /* VSUBW */
+            case 0xC: kind = 4; break;                     /* VMULL */
+            case 0x8: kind = 5; break;                     /* VMLAL */
+            case 0xA: kind = 6; break;                     /* VMLSL */
+            default:  return 0;
+        }
+        if (d & 1) return 0;
+        if (wide && (n & 1)) return 0;
+        /* Names by kind, then U (0 signed, 1 unsigned), then the source size.
+         * The suffix is the source element, as the assembler writes it. */
+        static const char *const nm[7][2][3] = {
+            { { "vaddl.s8", "vaddl.s16", "vaddl.s32" }, { "vaddl.u8", "vaddl.u16", "vaddl.u32" } },
+            { { "vaddw.s8", "vaddw.s16", "vaddw.s32" }, { "vaddw.u8", "vaddw.u16", "vaddw.u32" } },
+            { { "vsubl.s8", "vsubl.s16", "vsubl.s32" }, { "vsubl.u8", "vsubl.u16", "vsubl.u32" } },
+            { { "vsubw.s8", "vsubw.s16", "vsubw.s32" }, { "vsubw.u8", "vsubw.u16", "vsubw.u32" } },
+            { { "vmull.s8", "vmull.s16", "vmull.s32" }, { "vmull.u8", "vmull.u16", "vmull.u32" } },
+            { { "vmlal.s8", "vmlal.s16", "vmlal.s32" }, { "vmlal.u8", "vmlal.u16", "vmlal.u32" } },
+            { { "vmlsl.s8", "vmlsl.s16", "vmlsl.s32" }, { "vmlsl.u8", "vmlsl.u16", "vmlsl.u32" } },
+        };
+        static const arm_op wop[7] = {
+            OP_NEON_ADDL, OP_NEON_ADDW, OP_NEON_SUBL, OP_NEON_SUBW,
+            OP_NEON_MULL, OP_NEON_MLAL, OP_NEON_MLSL,
+        };
+        o->op = wop[kind];
+        o->vd = (int8_t)d; o->vn = (int8_t)n; o->vm = (int8_t)m;
+        o->neon_size = (uint8_t)size;
+        o->vfp_unsigned = (uint8_t)U;
+        set(o, A_SIMD, nm[kind][U][size]);
+        return 1;
+    }
+
     /* Three registers and a scalar: h1 bit 7 set, bits 5:4 = 10 for F32.
      * h2 is dddd opc(4) N 1 M 0 mmmm, so bit 6 and bit 4 are fixed. The scalar
      * is a 32-bit lane: M selects the lane and Vm[3:0] the D register, so unlike
@@ -1025,6 +1074,20 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
             o->op = OP_NEON_SHL;
             o->imm = (uint32_t)(v - esize);
             set(o, A_SIMD, "vshl.i");
+        } else if (opc == 0xA && !Q && !(v & 0x40)) {      /* VSHLL, VMOVL at 0 */
+            /* The shared Q check only rejects an odd d when Q is set, and Q
+             * here is h2 bit 6, which must be clear for VSHLL, so d is checked
+             * here: the result is the Q pair. L (h2 bit 7, bit 6 of v) must
+             * also be clear: with L set the source would be 64-bit, which
+             * VSHLL does not have. */
+            if (d & 1) return 0;
+            static const char *const nm[2][2][3] = {
+                { { "vshll.s8", "vshll.s16", "vshll.s32" }, { "vmovl.s8", "vmovl.s16", "vmovl.s32" } },
+                { { "vshll.u8", "vshll.u16", "vshll.u32" }, { "vmovl.u8", "vmovl.u16", "vmovl.u32" } },
+            };
+            o->op = OP_NEON_SHLL;
+            o->imm = (uint32_t)(v - esize);
+            set(o, A_SIMD, nm[U][o->imm == 0][size]);
         } else {
             return 0;
         }
