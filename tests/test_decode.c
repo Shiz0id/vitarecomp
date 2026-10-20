@@ -897,6 +897,123 @@ static void test_bringup_forms(void) {
 /* Shift amounts of zero that do not mean zero, the immediate carry-out, and
  * load/store indexing. Each of these decoded to a plausible instruction that
  * did something else. */
+/* What newlib and the VitaSDK samples needed, each with the encoding the
+ * toolchain actually emitted. */
+static void test_homebrew_forms(void) {
+    arm_insn in;
+
+    /* orn: opcode 0011 is MVN only when Rn is r15. Decoding every ORN as MVN
+     * dropped Rn, and newlib's strlen then lost strings at 4 mod 8. */
+    put16(0, 0xEA62); put16(2, 0x0205);                  /* orn r2, r2, r5 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_ORN && in.rd == 2 && in.rn == 2 && in.rm == 5);
+    put16(0, 0xF061); put16(2, 0x00FF);                  /* orn r0, r1, #255 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_ORN && in.rd == 0 && in.rn == 1 && in.has_imm && in.imm == 0xFF);
+    put16(0, 0xF06F); put16(2, 0x0C00);                  /* mvn.w ip, #0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_MVN && in.rd == 12 && in.rn == ARM_NO_REG);
+
+    put16(0, 0xF921); put16(2, 0x223D);                  /* vld1.8 {d2-d5}, [r1 :256]! */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VLD1 && in.vd == 2 && in.imm == 4 && in.writeback && in.rm == ARM_NO_REG);
+    put16(0, 0xF943); put16(2, 0x0A8D);                  /* vst1.32 {d16-d17}, [r3]! */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VST1 && in.vd == 16 && in.imm == 2 && in.writeback);
+    put16(0, 0xF943); put16(2, 0x0A82);                  /* vst1.32 {d16-d17}, [r3], r2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VST1 && in.writeback && in.rm == 2);
+
+    put16(0, 0xEEE0); put16(2, 0x1B10);                  /* vdup.8 q0, r1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_DUP && in.vd == 0 && in.neon_q && in.neon_size == 0 && in.rt == 1);
+    put16(0, 0xEEA0); put16(2, 0x3B90);                  /* vdup.32 q8, r3 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_DUP && in.vd == 16 && in.neon_q && in.neon_size == 2 && in.rt == 3);
+
+    /* vmov.32 r0, d2[0]: once decoded as VNMLS. */
+    put16(0, 0xEE12); put16(2, 0x0B10);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FROM_SCALAR && in.vn == 2 && in.rt == 0 && in.neon_size == 2 && in.imm == 0);
+
+    put16(0, 0xEEF3); put16(2, 0x1B30);                  /* vmov.u8 r1, d3[5] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FROM_SCALAR && in.vn == 3 && in.neon_size == 0 && in.imm == 5 && in.vfp_unsigned);
+    put16(0, 0xEE24); put16(2, 0x2B70);                  /* vmov.16 d4[3], r2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_TO_SCALAR && in.vd == 4 && in.neon_size == 1 && in.imm == 3 && in.rt == 2);
+
+    put16(0, 0xEC4C); put16(2, 0x3B16);                  /* vmov d6, r3, ip */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_VMOV_V_RR && in.vm == 6 && in.rt == 3 && in.rt2 == 12 && in.vfp_dp);
+    put16(0, 0xEC53); put16(2, 0x0B18);                  /* vmov r0, r3, d8 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_VMOV_RR_V && in.vm == 8 && in.rt == 0 && in.rt2 == 3);
+
+    put16(0, 0xFF02); put16(2, 0x2850);                  /* vceq.i8 q1, q1, q0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_CEQ && in.vd == 2 && in.vn == 2 && in.vm == 0 && in.neon_q);
+    put16(0, 0xEF02); put16(2, 0x2B13);                  /* vpadd.i8 d2, d2, d3 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_PADD && in.vd == 2 && in.vn == 2 && in.vm == 3 && in.neon_size == 0);
+    put16(0, 0xFFF6); put16(2, 0x6220);                  /* vmovn.i32 d22, q8 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MOVN && in.vd == 22 && in.vm == 16 && in.neon_size == 1);
+
+    put16(0, 0xEEF7); put16(2, 0x7BC0);                  /* vcvt.f32.f64 s15, d0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_VCVT_F2F && in.vfp_dp && in.vd == 15 && in.vm == 0);
+    put16(0, 0xEEB7); put16(2, 0x0AC7);                  /* vcvt.f64.f32 d0, s14 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_VCVT_F2F && !in.vfp_dp && in.vd == 0 && in.vm == 14);
+
+    put16(0, 0xFA90); put16(2, 0xF0A0);                  /* rbit r0, r0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_RBIT && in.rd == 0 && in.rm == 0);
+    put16(0, 0xFA90); put16(2, 0xF890);                  /* rev16.w r8, r0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_REV16 && in.rd == 8);
+    put16(0, 0xBA52);                                    /* rev16 r2, r2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_REV16);
+    put16(0, 0xBAD1);                                    /* revsh r1, r2: once REV */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_REVSH && in.rd == 1 && in.rm == 2);
+
+    /* The wide extends: once indexed by two bits of a three-bit field. */
+    put16(0, 0xFA5F); put16(2, 0xF880);                  /* uxtb.w r8, r0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_UXTB && in.rd == 8 && in.rn == ARM_NO_REG && in.shift_amt == 0);
+    put16(0, 0xFA4F); put16(2, 0xF390);                  /* sxtb.w r3, r0, ror #8 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_SXTB && in.shift_amt == 8);
+    put16(0, 0xFA13); put16(2, 0xF381);                  /* uxtah r3, r3, r1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_UXTH && in.rn == 3 && in.rm == 1 && in.rd == 3);
+    put16(0, 0xFA55); put16(2, 0xF680);                  /* uxtab r6, r5, r0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_UXTB && in.rn == 5 && in.rm == 0 && in.rd == 6);
+
+    put16(0, 0xFB15); put16(2, 0xF204);                  /* smulbb r2, r5, r4 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_SMULXY && in.rd == 2 && in.rn == 5 && in.rm == 4 && in.half_sel == 0);
+    put16(0, 0xFB17); put16(2, 0x1202);                  /* smlabb r2, r7, r2, r1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_SMLAXY && in.rt == 1);
+
+    put16(0, 0xEC90); put16(2, 0x0B20);                  /* vldmia r0, {d0-d15}: no writeback */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_VLDM && in.vd == 0 && in.imm == 16 && !in.writeback && in.mem_add);
+    put16(0, 0xECC0); put16(2, 0x0B20);                  /* vstmia r0, {d16-d31} */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_VSTM && in.vd == 16 && in.imm == 16 && !in.writeback);
+    put16(0, 0xEC90); put16(2, 0x0B21);                  /* fldmiax r0, {d0-d15} */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_VLDM && in.imm == 16);
+
+    printf("ok   homebrew forms: vld1/vst1, vdup, lane and pair moves, vceq, vpadd, vmovn, vcvt, rev/rbit, extends, smulxy\n");
+}
+
 static void test_shifts_and_indexing(void) {
     memset(code, 0, sizeof(code));
     arm_insn in;
@@ -947,10 +1064,10 @@ static void test_shifts_and_indexing(void) {
 
     put16(0, 0xF941); put16(2, 0x078F);                  /* vst1.32 {d16}, [r1] */
     in = dec(ARM_T32, BASE);
-    assert(in.cls == A_SIMD && in.op == OP_NONE);
+    assert(in.cls == A_SIMD && in.op == OP_NEON_VST1 && in.vd == 16 && in.imm == 1 && !in.writeback);
     put16(0, 0xF961); put16(2, 0x078F);                  /* vld1.32 {d16}, [r1] */
     in = dec(ARM_T32, BASE);
-    assert(in.cls == A_SIMD && in.op == OP_NONE);
+    assert(in.cls == A_SIMD && in.op == OP_NEON_VLD1 && in.rn == 1);
     put16(0, 0xF911); put16(2, 0x0004);                  /* ldrsb.w r0, [r1, r4] */
     in = dec(ARM_T32, BASE);
     assert(in.op == OP_LDRSB);
@@ -997,6 +1114,7 @@ int main(void) {
     test_bounds();
     test_bringup_forms();
     test_shifts_and_indexing();
+    test_homebrew_forms();
     test_tables_hints_exclusives();
     printf("all decode tests passed\n");
     return 0;

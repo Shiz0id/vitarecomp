@@ -617,13 +617,15 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             fprintf(f, "    }\n");
             break;
 
-        case OP_AND: case OP_ORR: case OP_EOR: case OP_BIC: {
+        case OP_AND: case OP_ORR: case OP_EOR: case OP_BIC: case OP_ORN: {
             operand2_ex(o2, sizeof(o2), in, in->sets_flags);
             shifter_carry_imm(f, in);
             const char *rn = rn_s;
             const char *ops = in->op == OP_AND ? "&" : in->op == OP_ORR ? "|" : "^";
             if (in->op == OP_BIC)
                 fprintf(f, "    %s = %s & ~(%s);\n", reg_name(in->rd), rn, o2);
+            else if (in->op == OP_ORN)
+                fprintf(f, "    %s = %s | ~(%s);\n", reg_name(in->rd), rn, o2);
             else
                 fprintf(f, "    %s = %s %s %s;\n", reg_name(in->rd), rn, ops, o2);
             if (in->sets_flags) fprintf(f, "    vita_flags_nz(%s);\n", reg_name(in->rd));
@@ -866,16 +868,42 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             break;
         }
 
-        case OP_SXTB: case OP_SXTH: case OP_UXTB: case OP_UXTH: {
+        case OP_SXTB: case OP_SXTH: case OP_UXTB: case OP_UXTH:
+        case OP_SXTB16: case OP_UXTB16: {
             const char *fn3 = in->op == OP_SXTB ? "vita_sxtb"
                             : in->op == OP_SXTH ? "vita_sxth"
-                            : in->op == OP_UXTB ? "vita_uxtb" : "vita_uxth";
-            fprintf(f, "    %s = %s(%s);\n", reg_name(in->rd), fn3, src_name(in, in->rm));
+                            : in->op == OP_UXTB ? "vita_uxtb"
+                            : in->op == OP_UXTH ? "vita_uxth"
+                            : in->op == OP_SXTB16 ? "vita_sxtb16" : "vita_uxtb16";
+            int b16 = in->op == OP_SXTB16 || in->op == OP_UXTB16;
+            char v[96];
+            if (in->shift_amt) snprintf(v, sizeof(v), "%s(vita_ror(%s, %u))", fn3,
+                                        src_name(in, in->rm), in->shift_amt);
+            else               snprintf(v, sizeof(v), "%s(%s)", fn3, src_name(in, in->rm));
+            if (in->rn == ARM_NO_REG)
+                fprintf(f, "    %s = %s;\n", reg_name(in->rd), v);
+            else if (b16)
+                fprintf(f, "    %s = vita_add16(%s, %s);\n", reg_name(in->rd), src_name(in, in->rn), v);
+            else
+                fprintf(f, "    %s = %s + %s;\n", reg_name(in->rd), src_name(in, in->rn), v);
             break;
         }
 
-        case OP_REV:
-            fprintf(f, "    %s = vita_rev(%s);\n", reg_name(in->rd), src_name(in, in->rm));
+        case OP_REV: case OP_REV16: case OP_REVSH: case OP_RBIT:
+            fprintf(f, "    %s = %s(%s);\n", reg_name(in->rd),
+                    in->op == OP_REV ? "vita_rev" : in->op == OP_REV16 ? "vita_rev16"
+                    : in->op == OP_REVSH ? "vita_revsh" : "vita_rbit",
+                    src_name(in, in->rm));
+            break;
+
+        case OP_SMULXY: case OP_SMLAXY:
+            if (in->op == OP_SMULXY)
+                fprintf(f, "    %s = vita_smulxy(%s, %s, %d);\n", reg_name(in->rd),
+                        src_name(in, in->rn), src_name(in, in->rm), in->half_sel);
+            else
+                fprintf(f, "    %s = vita_smulxy(%s, %s, %d) + %s;\n", reg_name(in->rd),
+                        src_name(in, in->rn), src_name(in, in->rm), in->half_sel,
+                        src_name(in, in->rt));
             break;
 
         case OP_SBFX: case OP_UBFX:
@@ -1050,10 +1078,12 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             if (!in->mem_add) fprintf(f, "    %s -= %u;\n", rn, words * 4);
             for (uint32_t k = 0; k < words; k++) {
                 int reg = (in->vfp_dp ? in->vd * 2 : in->vd) + (int)k;
+                /* & 63, the whole file: & 31 folded `vstmia r0, {d16-d31}`
+                 * onto d0-d15, the same mistake vfp_getd once made. */
                 if (in->op == OP_VLDM)
-                    fprintf(f, "    vfp_s[%d].u = vita_read32(%s + %u);\n", reg & 31, rn, k * 4);
+                    fprintf(f, "    vfp_s[%d].u = vita_read32(%s + %u);\n", reg & 63, rn, k * 4);
                 else
-                    fprintf(f, "    vita_write32(%s + %u, vfp_s[%d].u);\n", rn, k * 4, reg & 31);
+                    fprintf(f, "    vita_write32(%s + %u, vfp_s[%d].u);\n", rn, k * 4, reg & 63);
             }
             if (in->mem_add && in->writeback)
                 fprintf(f, "    %s += %u;\n", rn, words * 4);
@@ -1137,6 +1167,83 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             }
             break;
         }
+
+        case OP_NEON_CEQ: case OP_NEON_TST: {
+            int regs = in->neon_q ? 2 : 1;
+            for (int k = 0; k < regs; k++)
+                fprintf(f, "    neon_setd(%d, neon_%s(neon_getd(%d), neon_getd(%d), %d));\n",
+                        in->vd + k, in->op == OP_NEON_CEQ ? "ceq" : "tst",
+                        in->vn + k, in->vm + k, in->neon_size);
+            break;
+        }
+
+        case OP_NEON_PADD:
+            fprintf(f, "    neon_setd(%d, neon_padd(neon_getd(%d), neon_getd(%d), %d));\n",
+                    in->vd, in->vn, in->vm, in->neon_size);
+            break;
+
+        case OP_NEON_MOVN:
+            fprintf(f, "    neon_setd(%d, neon_movn(neon_getd(%d), neon_getd(%d), %d));\n",
+                    in->vd, in->vm, in->vm + 1, in->neon_size);
+            break;
+
+        case OP_NEON_DUP: {
+            int regs = in->neon_q ? 2 : 1;
+            for (int k = 0; k < regs; k++)
+                fprintf(f, "    neon_setd(%d, neon_dup(%s, %d));\n",
+                        in->vd + k, reg_name(in->rt), in->neon_size);
+            break;
+        }
+
+        case OP_NEON_TO_SCALAR:
+            fprintf(f, "    neon_setd(%d, neon_set_lane(neon_getd(%d), %s, %d, %u));\n",
+                    in->vd, in->vd, reg_name(in->rt), in->neon_size, in->imm);
+            break;
+
+        case OP_NEON_FROM_SCALAR:
+            fprintf(f, "    %s = neon_get_lane(neon_getd(%d), %d, %u, %d);\n",
+                    reg_name(in->rt), in->vn, in->neon_size, in->imm, in->vfp_unsigned);
+            break;
+
+        case OP_NEON_VLD1: case OP_NEON_VST1: {
+            /* Whole D registers at ascending addresses from the base, read
+             * once so a base that is also the increment register is used
+             * before either changes. */
+            const char *rn = reg_name(in->rn);
+            fprintf(f, "    { uint32_t _a = %s;\n", rn);
+            for (uint32_t k = 0; k < in->imm; k++) {
+                int d = in->vd + (int)k;
+                if (in->op == OP_NEON_VLD1)
+                    fprintf(f, "      vfp_s[%d].u = vita_read32(_a + %u); vfp_s[%d].u = vita_read32(_a + %u);\n",
+                            d * 2, k * 8, d * 2 + 1, k * 8 + 4);
+                else
+                    fprintf(f, "      vita_write32(_a + %u, vfp_s[%d].u); vita_write32(_a + %u, vfp_s[%d].u);\n",
+                            k * 8, d * 2, k * 8 + 4, d * 2 + 1);
+            }
+            if (in->writeback) {
+                if (in->rm != ARM_NO_REG) fprintf(f, "      %s = _a + %s;\n", rn, src_name(in, in->rm));
+                else                      fprintf(f, "      %s = _a + %u;\n", rn, in->imm * 8);
+            }
+            fprintf(f, "    }\n");
+            break;
+        }
+
+        case OP_VMOV_V_RR: case OP_VMOV_RR_V: {
+            int w = in->vfp_dp ? in->vm * 2 : in->vm;     /* first word of the pair */
+            if (in->op == OP_VMOV_V_RR)
+                fprintf(f, "    vfp_s[%d].u = %s; vfp_s[%d].u = %s;\n",
+                        w, reg_name(in->rt), w + 1, reg_name(in->rt2));
+            else
+                fprintf(f, "    %s = vfp_s[%d].u; %s = vfp_s[%d].u;\n",
+                        reg_name(in->rt), w, reg_name(in->rt2), w + 1);
+            break;
+        }
+
+        case OP_VCVT_F2F:
+            if (in->vd == ARM_NO_REG || in->vm == ARM_NO_REG) { ok = 0; break; }
+            if (in->vfp_dp) fprintf(f, "    vfp_setf(%d, (float)vfp_getd(%d));\n", in->vd, in->vm);
+            else            fprintf(f, "    vfp_setd(%d, (double)vfp_getf(%d));\n", in->vd, in->vm);
+            break;
 
         case OP_VMOV_IMM:
             if (in->vd == ARM_NO_REG) { ok = 0; break; }

@@ -54,7 +54,7 @@ typedef enum {
 typedef enum {
     OP_NONE = 0,
     OP_MOV, OP_MOVT, OP_MVN, OP_ADD, OP_ADC, OP_SUB, OP_SBC, OP_RSB,
-    OP_AND, OP_ORR, OP_EOR, OP_BIC,
+    OP_AND, OP_ORR, OP_EOR, OP_BIC, OP_ORN,
     OP_CMP, OP_CMN, OP_TST,
     OP_LSL, OP_LSR, OP_ASR, OP_ROR,
     OP_MUL,
@@ -98,6 +98,23 @@ typedef enum {
     OP_NEON_ADD, OP_NEON_SUB,   /* integer, lanes of 8 << neon_size bits   */
     OP_NEON_LOGIC,              /* neon_fn: an arm_neon_logic              */
     OP_NEON_IMM,                /* neon_fn: an arm_neon_logic; imm64 below */
+    OP_NEON_CEQ, OP_NEON_TST,   /* lanes all-ones where equal / where n&m != 0 */
+    OP_NEON_PADD,               /* pairwise add, D registers only           */
+    OP_NEON_MOVN,               /* narrow: Dd lanes = low halves of Qm lanes */
+    OP_NEON_DUP,                /* every lane of vd = core rt               */
+    OP_NEON_TO_SCALAR,          /* vd[imm] = rt, lane of 8 << neon_size bits */
+    OP_NEON_FROM_SCALAR,        /* rt = vn[imm], zero/sign by vfp_unsigned   */
+    OP_NEON_VLD1, OP_NEON_VST1, /* imm D registers from vd, at [rn]; rm is the
+                                   post-increment register, writeback alone
+                                   means "by the transfer size"              */
+    OP_VMOV_V_RR,               /* two core regs (rt, rt2) -> a D register or
+                                   an S pair, vm naming it                   */
+    OP_VMOV_RR_V,               /* the reverse                              */
+    OP_VCVT_F2F,                /* between precisions; vfp_dp: source is double */
+    OP_REV16, OP_REVSH, OP_RBIT,
+    OP_SXTB16, OP_UXTB16,       /* the extends: rotate by shift_amt first,
+                                   then add rn when it is a register         */
+    OP_SMULXY, OP_SMLAXY,       /* 16x16 multiply, halves by half_sel; rt = Ra */
 } arm_op;
 
 typedef enum {
@@ -166,6 +183,9 @@ typedef struct {
      * something else is how a reader ends up trusting the wrong one. */
     uint8_t    bf_lsb;
     uint8_t    bf_width;
+
+    /* SMULxy/SMLAxy: bit 1 takes rn's top half, bit 0 rm's. */
+    uint8_t    half_sel;
 } arm_insn;
 
 const char *arm_cond_name(uint8_t cond);

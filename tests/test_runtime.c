@@ -517,6 +517,72 @@ static void test_shifter_carry(void) {
     printf("  shifter carry-out, rrx: ok\n");
 }
 
+/* The lane helpers against the obvious per-lane loop, on values chosen to
+ * hit every lane boundary: equal, differing only in a lane's top bit, and
+ * differing only in its bottom bit. */
+static uint64_t ref_ceq(uint64_t a, uint64_t b, int size) {
+    int w = 8 << size;
+    uint64_t lane = w == 64 ? ~0ull : (1ull << w) - 1, r = 0;
+    for (int i = 0; i < 64 / w; i++)
+        if (((a >> (i * w)) & lane) == ((b >> (i * w)) & lane)) r |= lane << (i * w);
+    return r;
+}
+
+static void test_neon_lanes(void) {
+    static const uint64_t v[] = {
+        0, ~0ull, 0x0123456789ABCDEFull, 0x8000800080008000ull, 0x0100010001000100ull,
+        0x8080808080808080ull, 0x0101010101010101ull, 0x00FF00FF00FF00FFull,
+        0x7F7F7F7F7F7F7F7Full, 0xFFFFFFFF00000000ull,
+    };
+    int nv = (int)(sizeof(v) / sizeof(v[0]));
+    for (int size = 0; size < 4; size++)
+        for (int i = 0; i < nv; i++)
+            for (int j = 0; j < nv; j++) {
+                assert(neon_ceq(v[i], v[j], size) == ref_ceq(v[i], v[j], size));
+                assert(neon_ceq(v[i], v[i] ^ (1ull << ((8 << size) - 1)), size) != ~0ull);   /* a top bit */
+                assert(neon_ceq(v[i], v[i] ^ 1ull, size) != ~0ull);                          /* a bottom bit */
+                assert(neon_tst(v[i], v[j], size) == ~ref_ceq(v[i] & v[j], 0, size));
+            }
+
+    /* memchr's reduction: a byte mask, weighted 1,2,4..128 by a vand, then
+     * three vpadds fold 32 bytes into a 32-bit bitmap of matches. */
+    assert(neon_padd(0x0807060504030201ull, 0x100F0E0D0C0B0A09ull, 0) == 0x1F1B17130F0B0703ull);
+    assert(neon_padd(0x0004000300020001ull, 0x0008000700060005ull, 1) == 0x000F000B00070003ull);
+    assert(neon_padd(0x0000000200000001ull, 0x0000000400000003ull, 2) == 0x0000000700000003ull);
+
+    assert(neon_movn(0x0000000200000001ull, 0x0000000400000003ull, 1) == 0x0004000300020001ull);
+    assert(neon_movn(0x00AA00BB00CC00DDull, 0x0011002200330044ull, 0) == 0x11223344AABBCCDDull);
+
+    assert(neon_dup(0x1234ABCDu, 0) == 0xCDCDCDCDCDCDCDCDull);
+    assert(neon_dup(0x1234ABCDu, 1) == 0xABCDABCDABCDABCDull);
+    assert(neon_dup(0x1234ABCDu, 2) == 0x1234ABCD1234ABCDull);
+
+    uint64_t d = 0x0011223344556677ull;
+    assert(neon_set_lane(d, 0xEE, 0, 5) == 0x0011EE3344556677ull);
+    assert(neon_set_lane(d, 0xBEEF, 1, 3) == 0xBEEF223344556677ull);
+    assert(neon_set_lane(d, 0xCAFEF00Du, 2, 0) == 0x00112233CAFEF00Dull);
+    assert(neon_get_lane(0x00000000000000F0ull, 0, 0, 0) == 0xFFFFFFF0u);
+    assert(neon_get_lane(0x00000000000000F0ull, 0, 0, 1) == 0xF0u);
+    assert(neon_get_lane(0x8001000000000000ull, 1, 3, 0) == 0xFFFF8001u);
+    assert(neon_get_lane(0x8001000000000000ull, 1, 3, 1) == 0x8001u);
+    printf("ok   neon lanes: ceq/tst on every lane size, padd, movn, dup, lane moves\n");
+}
+
+static void test_bit_ops(void) {
+    assert(vita_rbit(1u) == 0x80000000u);
+    assert(vita_rbit(0x12345678u) == 0x1E6A2C48u);
+    assert(vita_rev16(0x11223344u) == 0x22114433u);
+    assert(vita_revsh(0x000080FFu) == 0xFFFFFF80u);
+    assert(vita_revsh(0x12340180u) == 0xFFFF8001u);
+    assert(vita_uxtb16(0x12345678u) == 0x00340078u);
+    assert(vita_sxtb16(0x0080007Fu) == 0xFF80007Fu);
+    assert(vita_add16(0x0001FFFFu, 0x00010001u) == 0x00020000u);   /* no carry across */
+    assert(vita_smulxy(0xFFFF0003u, 0x0002FFFEu, 0) == (uint32_t)-6);
+    assert(vita_smulxy(0xFFFF0003u, 0x0002FFFEu, 3) == (uint32_t)-2);
+    assert(vita_smulxy(0x80000000u, 0x80000000u, 3) == 0x40000000u);
+    printf("ok   rbit, rev16, revsh, b16 extends, smulxy\n");
+}
+
 int main(void) {
     printf("runtime:\n");
     test_shifts();
@@ -532,6 +598,8 @@ int main(void) {
     test_clz();
     test_exclusive();
     test_shifter_carry();
+    test_neon_lanes();
+    test_bit_ops();
     test_parallel_and_lanes();
     test_vfp_d32();
     test_mem_attach();

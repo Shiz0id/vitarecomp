@@ -343,11 +343,16 @@ static void decode_t16(uint16_t h, arm_insn *o) {
                 set(o, A_ALU, "extend");
                 return;
             }
-            if ((h & 0xFF00) == 0xBA00 && ((h >> 6) & 3) != 1) {
-                o->op = OP_REV;
+            /* REV / REV16 / REVSH by bits 7:6; 10 is UNDEFINED. This once
+             * took everything but REV16 as REV, so REVSH byte-swapped without
+             * sign-extending. */
+            if ((h & 0xFF00) == 0xBA00 && ((h >> 6) & 3) != 2) {
+                static const arm_op rv[4] = { OP_REV, OP_REV16, OP_NONE, OP_REVSH };
+                static const char *const nm[4] = { "rev", "rev16", "?", "revsh" };
+                o->op = rv[(h >> 6) & 3];
                 o->rd = h & 7;
                 o->rm = (h >> 3) & 7;
-                set(o, A_ALU, "rev");
+                set(o, A_ALU, nm[(h >> 6) & 3]);
                 return;
             }
             if ((h & 0xF600) == 0xB400) {
@@ -462,11 +467,19 @@ static int decode_vfp(uint16_t h1, uint16_t h2, arm_insn *o) {
          * and re-decoded them as register lists. Translation went DOWN. Worth
          * recording: a change that claims more encodings can still be a
          * regression if it claims the wrong ones. */
-        if (W) {
+        /* ...and also P=0 U=1 W=0: VLDMIA/VSTMIA with no writeback, which
+         * the C++ unwinder uses to save and restore the whole file. P=0 U=0
+         * W=0 is the 64-bit transfer below. */
+        if (W || (!P && U)) {
             int vd_first = dp ? vfp_dreg(vd, D) : vfp_sreg(vd, D);
             uint32_t n = (uint32_t)(h2 & 0xFF);
+            /* An odd count with sz=1 is FLDMX/FSTMX: n doubles plus a format
+             * word the base steps over. Without writeback the extra word is
+             * invisible; with it the step is wrong, so that form is left. */
+            if (dp && (n & 1) && W) return 0;
             if (dp) n /= 2;
             if (n == 0 || n > 32) return 0;
+            if (vd_first + (int)n > 32) return 0;
 
             o->op = L ? OP_VLDM : OP_VSTM;
             o->rn = h1 & 0xF;
@@ -476,6 +489,23 @@ static int decode_vfp(uint16_t h1, uint16_t h2, arm_insn *o) {
             o->writeback = (uint8_t)W;
             o->mem_add = (uint8_t)U;          /* 0 = decrement before (VPUSH) */
             set(o, L ? A_LOADM : A_STOREM, L ? "vldm/vpop" : "vstm/vpush");
+            return 1;
+        }
+        /* P=0 W=0: two core registers to or from a D register (sz=1) or a
+         * pair of singles. GCC moves every double argument this way under
+         * the soft-float ABI: `vmov d0, r0, r1` on the way in, `vmov r0, r1,
+         * d0` on the way out. */
+        if (!P && (h1 & 0xFFE0) == 0xEC40 && (h2 & 0x00D0) == 0x0010) {
+            int M = (h2 >> 5) & 1, vm = h2 & 0xF;
+            int to_core = (h1 >> 4) & 1;
+            o->rt  = (h2 >> 12) & 0xF;
+            o->rt2 = h1 & 0xF;
+            o->vm  = (int8_t)(dp ? vfp_dreg(vm, M) : vfp_sreg(vm, M));
+            if (o->rt == 15 || o->rt2 == 15 || o->rt == 13 || o->rt2 == 13) return 0;
+            if (to_core && o->rt == o->rt2) return 0;          /* UNPREDICTABLE */
+            if (!dp && o->vm == 31) return 0;
+            o->op = to_core ? OP_VMOV_RR_V : OP_VMOV_V_RR;
+            set(o, A_ALU, to_core ? "vmov r,r,v" : "vmov v,r,r");
             return 1;
         }
         if (!P || W) return 0;
@@ -521,6 +551,59 @@ static int decode_vfp(uint16_t h1, uint16_t h2, arm_insn *o) {
         o->vn = (int8_t)vfp_sreg(vn, N);          /* always single here */
         o->vfp_dp = 0;
         set(o, A_ALU, to_vfp ? "vmov s,r" : "vmov r,s");
+        return 1;
+    }
+
+    /* Bit 4 set is the core<->extension transfer group, never data
+     * processing. Without this test `vmov.32 r0, d2[0]` — memchr's result —
+     * fell into the switch below and came out as VNMLS: silently, a float
+     * multiply-subtract in place of a register move. */
+    if (h2 & 0x0010) {
+        if (!dp || (h2 & 0x000F)) return 0;
+        int rt = (h2 >> 12) & 0xF;
+        if (rt == 15 || rt == 13) return 0;
+        int reg = vfp_dreg(vn, N);           /* Vd:D or Vn:N, same position */
+
+        /* VDUP from a core register: h1 bit 7 set, bit 4 clear. B:E pick
+         * the lane: 00 is 32 bits, 01 16, 10 8. */
+        if ((h1 & 0x0090) == 0x0080) {
+            int be = (((h1 >> 6) & 1) << 1) | ((h2 >> 5) & 1);
+            int Q  = (h1 >> 5) & 1;
+            if (be == 3 || (Q && (reg & 1)) || (h2 & 0x0040)) return 0;
+            o->op = OP_NEON_DUP;
+            o->vd = (int8_t)reg;
+            o->rt = (int8_t)rt;
+            o->neon_q = (uint8_t)Q;
+            o->neon_size = (uint8_t)(be == 0 ? 2 : be == 1 ? 1 : 0);
+            set(o, A_SIMD, "vdup");
+            return 1;
+        }
+
+        /* VMOV to or from one lane. opc1 (h1 6:5) and opc2 (h2 6:5) carry
+         * the lane size and index together. */
+        int o1 = (h1 >> 5) & 3, o2 = (h2 >> 5) & 3;
+        int size, idx;
+        if (o1 & 2)      { size = 0; idx = ((o1 & 1) << 2) | o2; }
+        else if (o2 & 1) { size = 1; idx = ((o1 & 1) << 1) | (o2 >> 1); }
+        else if (o2 == 0){ size = 2; idx = o1 & 1; }
+        else return 0;
+        int from = (h1 >> 4) & 1, U = (h1 >> 7) & 1;
+        if (!from && U) return 0;                       /* that is VDUP's space */
+        if (from && size == 2 && U) return 0;
+        o->neon_size = (uint8_t)size;
+        o->imm = (uint32_t)idx;
+        o->has_imm = 1;
+        o->rt = (int8_t)rt;
+        if (from) {
+            o->op = OP_NEON_FROM_SCALAR;
+            o->vn = (int8_t)reg;
+            o->vfp_unsigned = (uint8_t)U;
+            set(o, A_SIMD, "vmov r,d[x]");
+        } else {
+            o->op = OP_NEON_TO_SCALAR;
+            o->vd = (int8_t)reg;
+            set(o, A_SIMD, "vmov d[x],r");
+        }
         return 1;
     }
 
@@ -585,6 +668,15 @@ static int decode_vfp(uint16_t h1, uint16_t h2, arm_insn *o) {
             }
 
             if (opc2 == 0x0 && opc3 == 1) { o->op = OP_VMOV;  set(o, A_ALU, "vmov"); return 1; }
+
+            /* VCVT between precisions. The destination is the OTHER size,
+             * so its register number is read the other way round. */
+            if (opc2 == 0x7 && opc3 == 3) {
+                o->vd = (int8_t)(dp ? vfp_sreg(vd, D) : vfp_dreg(vd, D));
+                o->op = OP_VCVT_F2F;
+                set(o, A_ALU, dp ? "vcvt f32,f64" : "vcvt f64,f32");
+                return 1;
+            }
             if (opc2 == 0x0 && opc3 == 3) { o->op = OP_VABS;  set(o, A_ALU, "vabs"); return 1; }
             if (opc2 == 0x1 && opc3 == 1) { o->op = OP_VNEG;  set(o, A_ALU, "vneg"); return 1; }
             if (opc2 == 0x1 && opc3 == 3) { o->op = OP_VSQRT; set(o, A_ALU, "vsqrt"); return 1; }
@@ -753,8 +845,68 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
             set(o, A_SIMD, U ? "vsub.i" : "vadd.i");
             return 1;
         }
+        if (opc == 0x8 && B == 1 && size != 3) {           /* VTST / VCEQ .I<size> */
+            o->op = U ? OP_NEON_CEQ : OP_NEON_TST;
+            set(o, A_SIMD, U ? "vceq.i" : "vtst");
+            return 1;
+        }
+        if (opc == 0xB && B == 1 && U == 0 && !Q && size != 3) {  /* VPADD.I<size> */
+            o->op = OP_NEON_PADD;
+            set(o, A_SIMD, "vpadd.i");
+            return 1;
+        }
+        return 0;
+    }
+
+    /* Two registers, miscellaneous: h1 1111 1111 1D11 ss10. Only VMOVN
+     * (h2 dddd 0010 00M0 mmmm), which narrows a Q register's lanes to half
+     * width into a D register. */
+    if ((h1 & 0xFFB3) == 0xFFB2 && (h2 & 0x0FD0) == 0x0200) {
+        int size = (h1 >> 2) & 3;
+        if (size == 3 || (m & 1)) return 0;
+        o->op = OP_NEON_MOVN;
+        o->vd = (int8_t)d;
+        o->vm = (int8_t)m;
+        o->neon_size = (uint8_t)size;                      /* of the result */
+        set(o, A_SIMD, "vmovn");
+        return 1;
     }
     return 0;
+}
+
+/* Element and structure loads/stores: h1 1111 1001 AD L0 nnnn, h2 dddd tttt
+ * sszz mmmm. Only VLD1/VST1 of whole registers (A=0, the four "multiple
+ * single elements" types), which is what memcpy, struct copies and every
+ * vectorised zeroing loop use. Lane size is irrelevant to the bytes moved on
+ * a little-endian machine, and the alignment hint only adds a fault the
+ * hardware would raise for a misaligned pointer, so neither changes the
+ * translation. Rm: 15 no writeback, 13 advance by the transfer size, any
+ * other register advance by it. */
+static int decode_neon_ls(uint16_t h1, uint16_t h2, arm_insn *o) {
+    if ((h1 & 0xFF90) != 0xF900) return 0;
+    int L = (h1 >> 5) & 1;
+    int d = (((h1 >> 6) & 1) << 4) | ((h2 >> 12) & 0xF);
+    int type = (h2 >> 8) & 0xF, align = (h2 >> 4) & 3;
+    int n;
+    switch (type) {
+        case 0x7: n = 1; if (align & 2) return 0; break;
+        case 0xA: n = 2; if (align == 3) return 0; break;
+        case 0x6: n = 3; if (align & 2) return 0; break;
+        case 0x2: n = 4; break;
+        default:  return 0;
+    }
+    if (d + n > 32) return 0;
+    o->rn = h1 & 0xF;
+    if (o->rn == 15) return 0;
+    int rm = h2 & 0xF;
+    o->vd  = (int8_t)d;
+    o->imm = (uint32_t)n;
+    o->has_imm = 1;
+    o->writeback = (uint8_t)(rm != 15);
+    o->rm = (rm == 15 || rm == 13) ? ARM_NO_REG : (int8_t)rm;
+    o->op = L ? OP_NEON_VLD1 : OP_NEON_VST1;
+    set(o, A_SIMD, L ? "vld1" : "vst1");
+    return 1;
 }
 
 static void decode_t32(uint16_t h1, uint16_t h2, arm_insn *o) {
@@ -1000,7 +1152,7 @@ static void decode_t32(uint16_t h1, uint16_t h2, arm_insn *o) {
         if (is_imm && (h2 & 0x8000)) { set(o, A_UNKNOWN, "?"); return; }
 
         static const arm_op dp[16] = {
-            OP_AND, OP_BIC, OP_ORR, OP_MVN, OP_EOR, OP_NONE, OP_NONE, OP_NONE,
+            OP_AND, OP_BIC, OP_ORR, OP_ORN, OP_EOR, OP_NONE, OP_NONE, OP_NONE,
             OP_ADD, OP_NONE, OP_ADC, OP_SBC, OP_NONE, OP_SUB, OP_RSB, OP_NONE
         };
         int opf = (h1 >> 5) & 0xF;
@@ -1161,7 +1313,10 @@ static void decode_t32(uint16_t h1, uint16_t h2, arm_insn *o) {
      * (VLD1-4/VST1-4). They sit inside the single load/store space below, and
      * read as one of its forms a `vst1.32 {d16}, [r1]` became an integer
      * store of r0 — no trap, wrong memory. */
-    if ((h1 & 0xFF10) == 0xF900) { set(o, A_SIMD, "vld/vst"); return; }
+    if ((h1 & 0xFF10) == 0xF900) {
+        if (!decode_neon_ls(h1, h2, o)) set(o, A_SIMD, "vld/vst");
+        return;
+    }
 
     if ((h1 & 0xFE00) == 0xF800) {
         int load = (h1 & 0x0010) != 0;
@@ -1229,15 +1384,53 @@ static void decode_t32(uint16_t h1, uint16_t h2, arm_insn *o) {
         return;
     }
 
-    /* The wide sign/zero extends: rn == 15 distinguishes them from the
-     * extend-and-add forms that share the encoding. */
-    if ((h1 & 0xFF80) == 0xFA00 && (h1 & 0x000F) == 0x000F &&
-        (h2 & 0xF080) == 0xF080) {
-        static const arm_op ex[4] = { OP_SXTH, OP_UXTH, OP_SXTB, OP_UXTB };
-        o->op = ex[(h1 >> 4) & 3];
+    /* The wide sign/zero extends, op in h1 bits 6:4, with a rotation of
+     * the source by 0/8/16/24 and — when rn is not 15 — an add of rn.
+     *
+     * This once indexed a four-entry table by bits 5:4 alone, so SXTB.W
+     * (op 4) became SXTH and UXTB.W (op 5) UXTH, the two B16 forms became
+     * SXTB/UXTB, the rotation was dropped and the add forms were decoded as
+     * plain extends. Every one silent. */
+    if ((h1 & 0xFF80) == 0xFA00 && (h2 & 0xF080) == 0xF080) {
+        static const arm_op ex[8] = { OP_SXTH, OP_UXTH, OP_SXTB16, OP_UXTB16,
+                                      OP_SXTB, OP_UXTB, OP_NONE, OP_NONE };
+        static const char *const nm[8] = { "sxth", "uxth", "sxtb16", "uxtb16",
+                                           "sxtb", "uxtb", "?", "?" };
+        int k = (h1 >> 4) & 7;
+        o->op = ex[k];
         o->rd = (h2 >> 8) & 0xF;
         o->rm = h2 & 0xF;
-        set(o, A_ALU, "extend.w");
+        o->rn = (h1 & 0xF) == 0xF ? ARM_NO_REG : (int8_t)(h1 & 0xF);
+        o->shift_type = SH_ROR;
+        o->shift_amt = (uint8_t)(((h2 >> 4) & 3) * 8);
+        set(o, A_ALU, nm[k]);
+        return;
+    }
+
+    /* REV / REV16 / RBIT / REVSH .W. Rm is encoded twice and must agree. */
+    if ((h1 & 0xFFF0) == 0xFA90 && (h2 & 0xF0C0) == 0xF080) {
+        static const arm_op rv[4] = { OP_REV, OP_REV16, OP_RBIT, OP_REVSH };
+        static const char *const nm[4] = { "rev.w", "rev16.w", "rbit", "revsh.w" };
+        int k = (h2 >> 4) & 3;
+        if ((h1 & 0xF) != (h2 & 0xF)) { set(o, A_ALU, "?"); return; }
+        o->op = rv[k];
+        o->rd = (h2 >> 8) & 0xF;
+        o->rm = h2 & 0xF;
+        set(o, A_ALU, nm[k]);
+        return;
+    }
+
+    /* SMULxy / SMLAxy: a 16x16 signed multiply of chosen halves, plus Ra for
+     * SMLA (Ra == 15 is SMUL). The Q flag SMLA sets on overflow is not
+     * modelled; nothing in the corpus reads it. */
+    if ((h1 & 0xFFF0) == 0xFB10 && (h2 & 0x00C0) == 0x0000) {
+        o->rd = (h2 >> 8) & 0xF;
+        o->rn = h1 & 0xF;
+        o->rm = h2 & 0xF;
+        o->rt = (h2 >> 12) & 0xF;
+        o->half_sel = (uint8_t)((h2 >> 4) & 3);
+        if (o->rt == 0xF) { o->op = OP_SMULXY; o->rt = ARM_NO_REG; set(o, A_ALU, "smulxy"); }
+        else              { o->op = OP_SMLAXY; set(o, A_ALU, "smlaxy"); }
         return;
     }
 

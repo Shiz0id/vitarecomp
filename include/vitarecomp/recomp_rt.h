@@ -233,6 +233,41 @@ static inline uint32_t vita_rev(uint32_t v) {
          | ((v >> 8) & 0xFF00) | ((v >> 24) & 0xFF);
 }
 
+/* Bytes swapped within each halfword. */
+static inline uint32_t vita_rev16(uint32_t v) {
+    return ((v & 0x00FF00FFu) << 8) | ((v >> 8) & 0x00FF00FFu);
+}
+
+/* The low halfword byte-swapped, then sign-extended. */
+static inline uint32_t vita_revsh(uint32_t v) {
+    return (uint32_t)(int32_t)(int16_t)(uint16_t)(((v & 0xFF) << 8) | ((v >> 8) & 0xFF));
+}
+
+static inline uint32_t vita_rbit(uint32_t v) {
+    v = ((v >> 1) & 0x55555555u) | ((v & 0x55555555u) << 1);
+    v = ((v >> 2) & 0x33333333u) | ((v & 0x33333333u) << 2);
+    v = ((v >> 4) & 0x0F0F0F0Fu) | ((v & 0x0F0F0F0Fu) << 4);
+    return vita_rev(v);
+}
+
+/* Bytes 0 and 2, each widened to a halfword. */
+static inline uint32_t vita_uxtb16(uint32_t v) { return v & 0x00FF00FFu; }
+static inline uint32_t vita_sxtb16(uint32_t v) {
+    return (vita_sxtb(v) & 0xFFFFu) | (vita_sxtb(v >> 16) << 16);
+}
+/* The B16 extend-and-add: each halfword added on its own, no carry between. */
+static inline uint32_t vita_add16(uint32_t a, uint32_t b) {
+    return ((a + b) & 0xFFFFu) | (((a >> 16) + (b >> 16)) << 16);
+}
+
+/* SMULxy: the chosen signed halves multiplied. `sel` bit 1 takes n's top
+ * half, bit 0 m's. */
+static inline uint32_t vita_smulxy(uint32_t n, uint32_t m, int sel) {
+    int32_t a = (int16_t)(uint16_t)((sel & 2) ? n >> 16 : n);
+    int32_t b = (int16_t)(uint16_t)((sel & 1) ? m >> 16 : m);
+    return (uint32_t)(a * b);
+}
+
 /* --- bitfields ---------------------------------------------------------------
  *
  * The obvious C is wrong in two places. `(1u << width) - 1` is UNDEFINED at
