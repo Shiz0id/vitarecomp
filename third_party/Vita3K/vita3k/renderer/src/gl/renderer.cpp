@@ -716,7 +716,12 @@ void GLState::render_frame(DisplayState &display, const GxmState &gxm, MemState 
             const auto pixels = display_frame.base.cast<void>().get(mem);
 
             glPixelStorei(GL_UNPACK_ROW_LENGTH, display_frame.pitch);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, display_frame.image_size.x, display_frame.image_size.y, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+            {
+                // See the Vulkan renderer: the framebuffer may be freed meanwhile.
+                std::lock_guard<std::mutex> guard(display.display_info_mutex);
+                const bool live = display.next_rendered_frame.base == display_frame.base;
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, display_frame.image_size.x, display_frame.image_size.y, 0, GL_RGBA, GL_UNSIGNED_BYTE, live ? pixels : nullptr);
+            }
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
             glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);

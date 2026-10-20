@@ -1205,7 +1205,14 @@ void VKState::render_frame(DisplayState &display, const GxmState &gxm, MemState 
 
             // copy surface to staging buffer
             const vk::DeviceSize texture_data_size = frame.pitch * frame.image_size.y * 4;
-            memcpy(screen_renderer.vita_surface_staging_info.pMappedData, frame.base.get(mem), texture_data_size);
+            {
+                // Hold the display lock across the raw copy: the app may free the
+                // framebuffer's memblock meanwhile (ksceKernelFreeMemBlock clears
+                // the frame base under this lock before it unmaps).
+                std::lock_guard<std::mutex> guard(display.display_info_mutex);
+                if (display.next_rendered_frame.base == frame.base)
+                    memcpy(screen_renderer.vita_surface_staging_info.pMappedData, frame.base.get(mem), texture_data_size);
+            }
 
             // copy staging buffer to image
             auto &cmd_buffer = screen_renderer.current_cmd_buffer;

@@ -17,6 +17,7 @@
 
 #include "SceSysmemForDriver.h"
 #include <modules/sysmem_state.h>
+#include <display/state.h>
 
 #include <kernel/state.h>
 #include <mem/functions.h>
@@ -269,6 +270,21 @@ EXPORT(int, ksceKernelFreeMemBlock, SceUID uid) {
     if (block == state->blocks.end())
         return RET_ERROR(SCE_KERNEL_ERROR_INVALID_UID);
 
+    // A program that frees its framebuffer on the way out (every VitaSDK
+    // homebrew using debugScreen does) leaves the renderer presenting freed,
+    // now inaccessible memory until the process is gone: a crash on exit
+    // whenever the next vblank lands first. Stop presenting it before it goes.
+    {
+        const Address lo = block->second->mappedBase.address();
+        const Address hi = lo + block->second->mappedSize;
+        std::lock_guard<std::mutex> display_guard(emuenv.display.display_info_mutex);
+        for (DisplayFrameInfo *f : { &emuenv.display.next_rendered_frame, &emuenv.display.sce_frame })
+            if (f->base.address() >= lo && f->base.address() < hi)
+                f->base = Ptr<const void>();
+        for (auto &pred : emuenv.display.predicted_frames)
+            if (pred.frame_info.base.address() >= lo && pred.frame_info.base.address() < hi)
+                pred.frame_info.base = Ptr<const void>();
+    }
     free(emuenv.mem, block->second->mappedBase.address());
     count_block(*state, block->second->type, -static_cast<SceSSize>(block->second->mappedSize));
     state->blocks.erase(block);
