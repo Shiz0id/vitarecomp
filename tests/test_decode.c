@@ -1080,7 +1080,144 @@ static void test_homebrew_forms(void) {
     in = dec(ARM_T32, BASE);
     assert(in.op != OP_NEON_FMUL_SCALAR && in.cls == A_SIMD);
 
-    printf("ok   homebrew forms: vld1/vst1, vdup, lane and pair moves, vceq, vpadd, vmovn, vcvt, rev/rbit, extends, smulxy, f32 vector\n");
+    /* VMLS by scalar is opc 0101 with the same lane fields as VMLA. The lane
+     * index and Vm[3:0] are read the same way, so d2[1] and d7[0] pin them. */
+    put16(0, 0xEFA1); put16(2, 0x0562);                  /* vmls.f32 d0, d1, d2[1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMLS_SCALAR && in.vd == 0 && in.vn == 1 && in.vm == 2 && in.imm == 1 && !in.neon_q);
+    put16(0, 0xFFA2); put16(2, 0x0564);                  /* vmls.f32 q0, q1, d4[1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMLS_SCALAR && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.imm == 1 && in.neon_q);
+    put16(0, 0xEFE1); put16(2, 0x05C7);                  /* vmls.f32 d16, d17, d7[0] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMLS_SCALAR && in.vd == 16 && in.vn == 17 && in.vm == 7 && in.imm == 0 && !in.neon_q);
+    put16(0, 0xFFE2); put16(2, 0x05EF);                  /* vmls.f32 q8, q9, d15[1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMLS_SCALAR && in.vd == 16 && in.vn == 18 && in.vm == 15 && in.imm == 1 && in.neon_q);
+    /* The integer VMLS.I32 by scalar is opc 0100, one bit away from the float. */
+    put16(0, 0xEFA1); put16(2, 0x0442);                  /* vmls.i32 d0, d1, d2[0] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_FMLS_SCALAR && in.cls == A_SIMD);
+
+    /* Float max and min, three registers: U=0, opc 1111, bit 21 picks min. */
+    put16(0, 0xEF01); put16(2, 0x0F02);                  /* vmax.f32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMAX && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.neon_size == 2);
+    put16(0, 0xEF42); put16(2, 0x0FE4);                  /* vmax.f32 q8, q9, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMAX && in.vd == 16 && in.vn == 18 && in.vm == 20 && in.neon_q);
+    put16(0, 0xEF61); put16(2, 0x0FA2);                  /* vmin.f32 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMIN && in.vd == 16 && in.vn == 17 && in.vm == 18 && !in.neon_q);
+    put16(0, 0xEF22); put16(2, 0x0F44);                  /* vmin.f32 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMIN && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.neon_q);
+
+    /* Float compares: VCEQ is U=0, VCGE U=1 bit 21 clear, VCGT U=1 bit 21 set. */
+    put16(0, 0xEF01); put16(2, 0x0E02);                  /* vceq.f32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCEQ && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.neon_size == 2);
+    put16(0, 0xEF42); put16(2, 0x0EE4);                  /* vceq.f32 q8, q9, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCEQ && in.vd == 16 && in.vn == 18 && in.vm == 20 && in.neon_q);
+    put16(0, 0xFF41); put16(2, 0x0EA2);                  /* vcge.f32 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCGE && in.vd == 16 && in.vn == 17 && in.vm == 18 && !in.neon_q);
+    put16(0, 0xFF02); put16(2, 0x0E44);                  /* vcge.f32 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCGE && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.neon_q);
+    put16(0, 0xFF21); put16(2, 0x0E02);                  /* vcgt.f32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCGT && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q);
+    put16(0, 0xFF62); put16(2, 0x0EE4);                  /* vcgt.f32 q8, q9, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCGT && in.vd == 16 && in.vn == 18 && in.vm == 20 && in.neon_q);
+
+    /* Two registers, miscellaneous: VABS and VNEG. Q is h2 bit 6, and the
+     * d16/q8 forms set D (h1 bit 6) and M (h2 bit 5). */
+    put16(0, 0xFFB9); put16(2, 0x0701);                  /* vabs.f32 d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FABS && in.vd == 0 && in.vm == 1 && !in.neon_q && in.neon_size == 2);
+    put16(0, 0xFFB9); put16(2, 0x0742);                  /* vabs.f32 q0, q1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FABS && in.vd == 0 && in.vm == 2 && in.neon_q);
+    put16(0, 0xFFF9); put16(2, 0x0721);                  /* vabs.f32 d16, d17 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FABS && in.vd == 16 && in.vm == 17 && !in.neon_q);
+    put16(0, 0xFFF9); put16(2, 0x0762);                  /* vabs.f32 q8, q9 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FABS && in.vd == 16 && in.vm == 18 && in.neon_q);
+    put16(0, 0xFFB9); put16(2, 0x0781);                  /* vneg.f32 d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FNEG && in.vd == 0 && in.vm == 1 && !in.neon_q);
+    put16(0, 0xFFF9); put16(2, 0x07E2);                  /* vneg.f32 q8, q9 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FNEG && in.vd == 16 && in.vm == 18 && in.neon_q);
+    /* The integer VABS.S32 and VNEG.S32 share h1 but have opc 0110 and 0111. */
+    put16(0, 0xFFB9); put16(2, 0x0301);                  /* vabs.s32 d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_FABS && in.cls == A_SIMD);
+    put16(0, 0xFFB9); put16(2, 0x0381);                  /* vneg.s32 d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_FNEG && in.cls == A_SIMD);
+
+    /* VCVT between F32 and S32/U32, no fixed-point bits. h1 bit 0 is set and
+     * bit 1 separates the conversions from VABS/VNEG; opc 1110 is F32 to S32,
+     * 1111 to U32, 1100 S32 to F32 and 1101 U32 to F32. */
+    put16(0, 0xFFBB); put16(2, 0x0701);                  /* vcvt.s32.f32 d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCVT_TO_INT && in.vd == 0 && in.vm == 1 && !in.vfp_unsigned && !in.neon_q);
+    put16(0, 0xFFBB); put16(2, 0x0781);                  /* vcvt.u32.f32 d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCVT_TO_INT && in.vd == 0 && in.vm == 1 && in.vfp_unsigned);
+    put16(0, 0xFFBB); put16(2, 0x0601);                  /* vcvt.f32.s32 d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCVT_FROM_INT && in.vd == 0 && in.vm == 1 && !in.vfp_unsigned && !in.neon_q);
+    put16(0, 0xFFBB); put16(2, 0x0681);                  /* vcvt.f32.u32 d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCVT_FROM_INT && in.vd == 0 && in.vm == 1 && in.vfp_unsigned);
+    put16(0, 0xFFBB); put16(2, 0x0742);                  /* vcvt.s32.f32 q0, q1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCVT_TO_INT && in.vd == 0 && in.vm == 2 && in.neon_q && !in.vfp_unsigned);
+    put16(0, 0xFFBB); put16(2, 0x06C2);                  /* vcvt.f32.u32 q0, q1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCVT_FROM_INT && in.vd == 0 && in.vm == 2 && in.neon_q && in.vfp_unsigned);
+    put16(0, 0xFFFB); put16(2, 0x0721);                  /* vcvt.s32.f32 d16, d17 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCVT_TO_INT && in.vd == 16 && in.vm == 17 && !in.neon_q);
+    put16(0, 0xFFFB); put16(2, 0x07E2);                  /* vcvt.u32.f32 q8, q9 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCVT_TO_INT && in.vd == 16 && in.vm == 18 && in.neon_q && in.vfp_unsigned);
+    put16(0, 0xFFFB); put16(2, 0x0621);                  /* vcvt.f32.s32 d16, d17 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCVT_FROM_INT && in.vd == 16 && in.vm == 17 && !in.vfp_unsigned);
+
+    /* Negatives. The fixed-point VCVT (#16) is U=0 with a 1 in h2 bit 4, so it
+     * is never the plain conversion. The integer max, min and compares share the
+     * three-register group with other opc values and stay integer. */
+    put16(0, 0xEFB0); put16(2, 0x0F11);                  /* vcvt.s32.f32 d0, d1, #16 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_FCVT_TO_INT && in.op != OP_NEON_FCVT_FROM_INT);
+    put16(0, 0xEF21); put16(2, 0x0602);                  /* vmax.s32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_FMAX && in.op != OP_NEON_FMIN);
+    put16(0, 0xEF21); put16(2, 0x0612);                  /* vmin.s32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_FMAX && in.op != OP_NEON_FMIN);
+    put16(0, 0xEF21); put16(2, 0x0312);                  /* vcge.s32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_FCGE && in.op != OP_NEON_FCEQ && in.op != OP_NEON_FCGT);
+    put16(0, 0xFF21); put16(2, 0x0302);                  /* vcgt.u32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_FCGT && in.op != OP_NEON_FCGE);
+    put16(0, 0xFF21); put16(2, 0x0812);                  /* vceq.i32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_CEQ && in.neon_size == 2 && in.op != OP_NEON_FCEQ);
+    put16(0, 0xEF21); put16(2, 0x0802);                  /* vadd.i32 d0, d1, d2 (guard) */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ADD);
+
+    printf("ok   homebrew forms: vld1/vst1, vdup, lane and pair moves, vceq, vpadd, vmovn, vcvt, rev/rbit, extends, smulxy, f32 vector, f32 max/min/cmp/abs/neg/cvt\n");
 }
 
 static void test_shifts_and_indexing(void) {

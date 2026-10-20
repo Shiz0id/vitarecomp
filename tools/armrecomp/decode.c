@@ -881,6 +881,31 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
                 return 1;
             }
         }
+        /* Float max/min and compares, again with B clear and .F32 only. The
+         * opc and U pick the operation, and bit 21 (size>>1) the variant:
+         *   opc 1111 U=0  VMAX / VMIN   (bit 21 clear / set)
+         *   opc 1110 U=0  VCEQ          (bit 21 clear)
+         *   opc 1110 U=1  VCGE / VCGT   (bit 21 clear / set)
+         * opc 1111 with U=1 is VPMAX and the others are not claimed. */
+        if (B == 0 && !(size & 1)) {
+            int bit21 = size >> 1;
+            o->neon_size = 2;
+            if (opc == 0xF && U == 0) {
+                o->op = bit21 ? OP_NEON_FMIN : OP_NEON_FMAX;
+                set(o, A_SIMD, bit21 ? "vmin.f32" : "vmax.f32");
+                return 1;
+            }
+            if (opc == 0xE && U == 0 && !bit21) {
+                o->op = OP_NEON_FCEQ;
+                set(o, A_SIMD, "vceq.f32");
+                return 1;
+            }
+            if (opc == 0xE && U == 1) {
+                o->op = bit21 ? OP_NEON_FCGT : OP_NEON_FCGE;
+                set(o, A_SIMD, bit21 ? "vcgt.f32" : "vcge.f32");
+                return 1;
+            }
+        }
         return 0;
     }
 
@@ -895,14 +920,15 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
         int reg = h2 & 0xF;                                /* Vm[3:0] only    */
         int Qs = U;                                        /* Q, see above    */
         if (Qs && ((d | n) & 1)) return 0;
-        if (opc == 0x1 || opc == 0x9) {                    /* VMLA / VMUL */
-            o->op = opc == 0x1 ? OP_NEON_FMLA_SCALAR : OP_NEON_FMUL_SCALAR;
+        if (opc == 0x1 || opc == 0x5 || opc == 0x9) {      /* VMLA / VMLS / VMUL */
+            o->op = opc == 0x1 ? OP_NEON_FMLA_SCALAR
+                  : opc == 0x5 ? OP_NEON_FMLS_SCALAR : OP_NEON_FMUL_SCALAR;
             o->vd = (int8_t)d; o->vn = (int8_t)n; o->vm = (int8_t)reg;
             o->imm = (uint32_t)idx;
             o->has_imm = 1;
             o->neon_q = (uint8_t)Qs;
             o->neon_size = 2;
-            set(o, A_SIMD, opc == 0x1 ? "vmla.f32" : "vmul.f32");
+            set(o, A_SIMD, opc == 0x1 ? "vmla.f32" : opc == 0x5 ? "vmls.f32" : "vmul.f32");
             return 1;
         }
         return 0;
@@ -920,6 +946,45 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
         o->neon_size = (uint8_t)size;                      /* of the result */
         set(o, A_SIMD, "vmovn");
         return 1;
+    }
+
+    /* Two registers, miscellaneous, 32-bit lanes (h1 bits 3:2 = 10). Bit 0 of
+     * h1 is set; bit 1 separates VABS/VNEG (0) from the conversions (1). The
+     * opc is h2 bits 10:7, with Q at bit 6 and bits 11 and 4 clear. That is
+     * the difference from the integer forms, which share h1 but have other opc
+     * values (VABS.S32 is 0110, VNEG.S32 0111). The fixed-point VCVT has U=0,
+     * so it does not reach this group. */
+    if ((h1 & 0xFFB1) == 0xFFB1 && ((h1 >> 2) & 3) == 2 && (h2 & 0x0810) == 0) {
+        int cvt = (h1 >> 1) & 1;
+        int opc = (h2 >> 7) & 0xF;
+        if (Q && ((d | m) & 1)) return 0;
+        if (!cvt && (opc == 0xE || opc == 0xF)) {         /* VABS 1110, VNEG 1111 */
+            o->op = opc == 0xE ? OP_NEON_FABS : OP_NEON_FNEG;
+            o->vd = (int8_t)d; o->vm = (int8_t)m;
+            o->neon_q = (uint8_t)Q;
+            o->neon_size = 2;
+            set(o, A_SIMD, opc == 0xE ? "vabs.f32" : "vneg.f32");
+            return 1;
+        }
+        /* The conversions. Bit 1 of opc is set for F32 to integer (1110 signed,
+         * 1111 unsigned) and clear for integer to F32 (1100, 1101), and bit 0
+         * is the unsigned flag in both. The F32 to integer form rounds toward
+         * zero, as the C cast does, and the integer to F32 form rounds to
+         * nearest, as the host's conversion does by default. */
+        if (cvt && opc >= 0xC) {
+            o->vd = (int8_t)d; o->vm = (int8_t)m;
+            o->neon_q = (uint8_t)Q;
+            o->neon_size = 2;
+            o->vfp_unsigned = (uint8_t)(opc & 1);
+            if (opc & 2) {
+                o->op = OP_NEON_FCVT_TO_INT;
+                set(o, A_SIMD, (opc & 1) ? "vcvt.u32.f32" : "vcvt.s32.f32");
+            } else {
+                o->op = OP_NEON_FCVT_FROM_INT;
+                set(o, A_SIMD, (opc & 1) ? "vcvt.f32.u32" : "vcvt.f32.s32");
+            }
+            return 1;
+        }
     }
     return 0;
 }

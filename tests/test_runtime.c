@@ -653,6 +653,127 @@ static void test_neon_f32(void) {
     printf("ok   neon f32: add/sub/mul/mla/mls, scalar forms, denormals, default NaN, unfused mla\n");
 }
 
+/* The second batch: max/min, compares, abs/neg, the conversions, and the VMLS
+ * by scalar. Each rule from the architecture gets its own explicit bit pattern. */
+static void test_neon_f32_b(void) {
+    /* VABS and VNEG touch the sign bit and nothing else: a denormal stays a
+     * denormal, a NaN keeps its payload, and -0 and +0 swap with the sign. */
+    assert(neon_fabs(f32_pair(0x80000001u, 0xFFA00001u)) == f32_pair(0x00000001u, 0x7FA00001u));
+    assert(neon_fabs(f32_pair(0xFF800000u, 0x80000000u)) == f32_pair(0x7F800000u, 0x00000000u));
+    assert(neon_fneg(f32_pair(0x00000001u, 0x7FA00001u)) == f32_pair(0x80000001u, 0xFFA00001u));
+    assert(neon_fneg(f32_pair(0x00000000u, 0x7F800000u)) == f32_pair(0x80000000u, 0xFF800000u));
+    assert(neon_fneg(f32_pair(0x80000000u, 0x7FC00000u)) == f32_pair(0x00000000u, 0xFFC00000u));
+
+    /* VMAX and VMIN on lanes that are ordinary values. */
+    uint64_t X = f32_pair(f32_bits(2.0f), f32_bits(1.5f));
+    uint64_t Y = f32_pair(f32_bits(-3.25f), f32_bits(-7.0f));
+    assert(neon_fmax(X, Y) == f32_pair(f32_bits(2.0f), f32_bits(1.5f)));
+    assert(neon_fmin(X, Y) == f32_pair(f32_bits(-3.25f), f32_bits(-7.0f)));
+
+    /* Signed zeros: max(+0, -0) is +0 and min(+0, -0) is -0, in either order. */
+    assert(neon_f32_minmax(0x80000000u, 0x00000000u, 1) == 0x00000000u);
+    assert(neon_f32_minmax(0x00000000u, 0x80000000u, 1) == 0x00000000u);
+    assert(neon_f32_minmax(0x80000000u, 0x00000000u, 0) == 0x80000000u);
+    assert(neon_f32_minmax(0x00000000u, 0x80000000u, 0) == 0x80000000u);
+
+    /* A denormal input is a zero of its sign, so it takes part in the signed
+     * zero rule: max(-denormal, +0) is +0, min(+denormal, -0) is -0. */
+    assert(neon_f32_minmax(0x80000001u, 0x00000000u, 1) == 0x00000000u);
+    assert(neon_f32_minmax(0x00000001u, 0x80000000u, 0) == 0x80000000u);
+    assert(neon_f32_minmax(0x00000001u, 0x00000002u, 0) == 0x00000000u);
+
+    /* A NaN on either side gives the default NaN, not the operand's sign or
+     * payload. */
+    assert(neon_f32_minmax(0x7FA00001u, 0x3F800000u, 1) == 0x7FC00000u);
+    assert(neon_f32_minmax(0x3F800000u, 0xFFC00000u, 0) == 0x7FC00000u);
+    assert(neon_fmax(f32_pair(0x7FA00001u, 0x3F800000u), f32_pair(0x3F800000u, 0x3F800000u))
+           == f32_pair(0x7FC00000u, 0x3F800000u));
+
+    /* Infinities order as numbers. */
+    assert(neon_f32_minmax(0xFF800000u, f32_bits(5.0f), 1) == f32_bits(5.0f));
+    assert(neon_f32_minmax(0x7F800000u, f32_bits(5.0f), 0) == f32_bits(5.0f));
+    assert(neon_f32_minmax(0xFF800000u, 0x7F800000u, 1) == 0x7F800000u);
+
+    /* VCEQ, VCGE, VCGT: all-ones or zero per lane. +0 == -0 is true. */
+    assert(neon_fceq(f32_pair(0x00000000u, 0x80000000u), f32_pair(0x80000000u, 0x00000000u))
+           == f32_pair(0xFFFFFFFFu, 0xFFFFFFFFu));
+    assert(neon_f32_cmp(0x80000000u, 0x00000000u, 1) == 0xFFFFFFFFu);
+    assert(neon_f32_cmp(0x80000000u, 0x00000000u, 2) == 0);
+
+    /* Denormal inputs flush first, so a denormal compares equal to a zero. */
+    assert(neon_f32_cmp(0x00000001u, 0x00000000u, 0) == 0xFFFFFFFFu);
+    assert(neon_f32_cmp(0x80000001u, 0x00000000u, 0) == 0xFFFFFFFFu);
+    assert(neon_f32_cmp(0x00000001u, 0x00000000u, 2) == 0);
+    assert(neon_f32_cmp(0x80000001u, 0x00000001u, 1) == 0xFFFFFFFFu);
+
+    /* A NaN on either side makes every compare false, including NaN == NaN. */
+    assert(neon_f32_cmp(0x7FC00000u, 0x7FC00000u, 0) == 0);
+    assert(neon_f32_cmp(0x7FA00001u, 0x3F800000u, 0) == 0);
+    assert(neon_f32_cmp(0x7FA00001u, 0x3F800000u, 1) == 0);
+    assert(neon_f32_cmp(0x3F800000u, 0xFFC00000u, 2) == 0);
+    assert(neon_f32_cmp(0xFFC00000u, 0xFF800000u, 1) == 0);
+
+    /* Infinities and ordinary negatives compare as numbers. */
+    assert(neon_f32_cmp(0x7F800000u, 0x7F7FFFFFu, 2) == 0xFFFFFFFFu);
+    assert(neon_f32_cmp(0xFF800000u, 0xFF800000u, 0) == 0xFFFFFFFFu);
+    assert(neon_f32_cmp(0xBF800000u, 0xC0000000u, 1) == 0xFFFFFFFFu);
+    assert(neon_f32_cmp(0xC0000000u, 0xBF800000u, 2) == 0);
+    assert(neon_fcgt(f32_pair(f32_bits(1.0f), f32_bits(0.0f)), f32_pair(f32_bits(0.0f), f32_bits(1.0f)))
+           == f32_pair(0xFFFFFFFFu, 0x00000000u));
+
+    /* VCVT F32 to S32, toward zero, saturating, and never undefined. */
+    assert(neon_f32_to_int(f32_bits(1.9f), 0) == 1);
+    assert(neon_f32_to_int(f32_bits(-1.9f), 0) == 0xFFFFFFFFu);
+    assert(neon_f32_to_int(f32_bits(0.99f), 0) == 0);
+    assert(neon_f32_to_int(f32_bits(-0.99f), 0) == 0);
+    assert(neon_f32_to_int(0x80000000u, 0) == 0);                /* -0 */
+    assert(neon_f32_to_int(0x00000001u, 0) == 0);                /* denormal */
+    assert(neon_f32_to_int(0x80000001u, 0) == 0);                /* -denormal */
+    assert(neon_f32_to_int(0x7FC00000u, 0) == 0);                /* NaN */
+    assert(neon_f32_to_int(0x7FA00001u, 0) == 0);                /* sNaN payload */
+    assert(neon_f32_to_int(0xFFC00000u, 0) == 0);                /* -NaN */
+    assert(neon_f32_to_int(0x4EFFFFFFu, 0) == 0x7FFFFF80u);      /* 2147483520 exact */
+    assert(neon_f32_to_int(0x4F000000u, 0) == 0x7FFFFFFFu);      /* 2147483648 saturates */
+    assert(neon_f32_to_int(0x4F000001u, 0) == 0x7FFFFFFFu);      /* 2147483904 saturates */
+    assert(neon_f32_to_int(0x4F800000u, 0) == 0x7FFFFFFFu);      /* 4294967296 saturates */
+    assert(neon_f32_to_int(0x7F800000u, 0) == 0x7FFFFFFFu);      /* +inf */
+    assert(neon_f32_to_int(0xCF000000u, 0) == 0x80000000u);      /* -2147483648 in range */
+    assert(neon_f32_to_int(0xCF000001u, 0) == 0x80000000u);      /* -2147483904 saturates */
+    assert(neon_f32_to_int(0xFF800000u, 0) == 0x80000000u);      /* -inf */
+
+    /* VCVT F32 to U32: negatives and NaN give 0, large values saturate. */
+    assert(neon_f32_to_int(f32_bits(3.9f), 1) == 3);
+    assert(neon_f32_to_int(f32_bits(0.99f), 1) == 0);
+    assert(neon_f32_to_int(f32_bits(-0.99f), 1) == 0);
+    assert(neon_f32_to_int(0xBF800000u, 1) == 0);                /* -1.0 */
+    assert(neon_f32_to_int(0x80000000u, 1) == 0);                /* -0 */
+    assert(neon_f32_to_int(0x80000001u, 1) == 0);                /* -denormal */
+    assert(neon_f32_to_int(0xFF800000u, 1) == 0);                /* -inf */
+    assert(neon_f32_to_int(0x7FC00000u, 1) == 0);                /* NaN */
+    assert(neon_f32_to_int(0x4F000000u, 1) == 0x80000000u);      /* 2147483648 */
+    assert(neon_f32_to_int(0x4F7FFFFFu, 1) == 0xFFFFFF00u);      /* largest below 2^32 */
+    assert(neon_f32_to_int(0x4F800000u, 1) == 0xFFFFFFFFu);      /* 4294967296 saturates */
+    assert(neon_f32_to_int(0x7F800000u, 1) == 0xFFFFFFFFu);      /* +inf */
+    assert(neon_f2i(f32_pair(f32_bits(-1.0f), f32_bits(2.5f)), 0) == f32_pair(0xFFFFFFFFu, 2u));
+
+    /* VCVT S32 and U32 to F32: round to nearest, ties to even, never denormal. */
+    assert(neon_i32_to_f32(0x7FFFFFFFu, 0) == 0x4F000000u);      /* 2147483647 rounds up to 2^31 */
+    assert(neon_i32_to_f32(16777217u, 0) == 0x4B800000u);       /* tie: even is 16777216 */
+    assert(neon_i32_to_f32(16777219u, 0) == 0x4B800002u);       /* tie: even is 16777220 */
+    assert(neon_i32_to_f32(0xFFFFFFFFu, 0) == 0xBF800000u);     /* -1 */
+    assert(neon_i32_to_f32(0x80000000u, 0) == 0xCF000000u);     /* -2^31 */
+    assert(neon_i32_to_f32(0x80000000u, 1) == 0x4F000000u);     /* 2^31 unsigned */
+    assert(neon_i32_to_f32(0xFFFFFFFFu, 1) == 0x4F800000u);     /* 4294967295 rounds to 2^32 */
+    assert(neon_i32_to_f32(0u, 0) == 0x00000000u);
+    assert(neon_i2f(f32_pair(0xFFFFFFFFu, 3u), 0) == f32_pair(0xBF800000u, 0x40400000u));
+
+    /* VMLS by scalar: d - n * s per lane, with the product rounded first. */
+    assert(neon_fmls_s(f32_pair(f32_bits(1.0f), f32_bits(1.0f)), f32_pair(f32_bits(2.0f), f32_bits(3.0f)), f32_bits(0.5f))
+           == f32_pair(0x00000000u, 0xBF000000u));
+
+    printf("ok   neon f32 b: max/min signed zeros and NaN, compares, abs/neg, vcvt saturation, vmls scalar\n");
+}
+
 static void test_bit_ops(void) {
     assert(vita_rbit(1u) == 0x80000000u);
     assert(vita_rbit(0x12345678u) == 0x1E6A2C48u);
@@ -685,6 +806,7 @@ int main(void) {
     test_shifter_carry();
     test_neon_lanes();
     test_neon_f32();
+    test_neon_f32_b();
     test_bit_ops();
     test_parallel_and_lanes();
     test_vfp_d32();

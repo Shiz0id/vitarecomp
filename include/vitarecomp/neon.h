@@ -218,6 +218,99 @@ static inline uint64_t neon_fmla_s(uint64_t d, uint64_t n, uint32_t s) {
     return neon_fmla(d, n, neon_dup(s, 2));
 }
 
+static inline uint64_t neon_fmls_s(uint64_t d, uint64_t n, uint32_t s) {
+    return neon_fmls(d, n, neon_dup(s, 2));
+}
+
+/* VMAX and VMIN on one lane. The inputs are flushed first, so a denormal
+ * competes as its zero. The zeros are ordered by sign: max(+0, -0) is +0 and
+ * min(+0, -0) is -0, whatever the operand order. Plain float max would give
+ * whichever it met first, since +0 == -0 is true. */
+static inline uint32_t neon_f32_minmax(uint32_t a, uint32_t b, int is_max) {
+    float fa = neon_f32_in(a), fb = neon_f32_in(b);
+    if (fa != fa || fb != fb) return 0x7FC00000u;          /* NaN: default NaN */
+    int pick_a;
+    if (fa == fb)                                           /* equal, or a zero pair */
+        pick_a = is_max ? !(a >> 31) : (a >> 31);
+    else
+        pick_a = is_max ? (fa > fb) : (fa < fb);
+    return neon_f32_out(pick_a ? fa : fb);
+}
+
+/* The compares on one lane: rel 0 is ==, 1 is >=, 2 is >. A NaN on either side
+ * makes every one of them false, which the C operators already do. */
+static inline uint32_t neon_f32_cmp(uint32_t a, uint32_t b, int rel) {
+    float fa = neon_f32_in(a), fb = neon_f32_in(b);
+    int t = rel == 0 ? (fa == fb) : rel == 1 ? (fa >= fb) : (fa > fb);
+    return t ? 0xFFFFFFFFu : 0;
+}
+
+static inline uint64_t neon_fmax(uint64_t a, uint64_t b) {
+    return neon_pack32(neon_f32_minmax(neon_lo32(a), neon_lo32(b), 1),
+                       neon_f32_minmax(neon_hi32(a), neon_hi32(b), 1));
+}
+
+static inline uint64_t neon_fmin(uint64_t a, uint64_t b) {
+    return neon_pack32(neon_f32_minmax(neon_lo32(a), neon_lo32(b), 0),
+                       neon_f32_minmax(neon_hi32(a), neon_hi32(b), 0));
+}
+
+static inline uint64_t neon_fceq(uint64_t a, uint64_t b) {
+    return neon_pack32(neon_f32_cmp(neon_lo32(a), neon_lo32(b), 0),
+                       neon_f32_cmp(neon_hi32(a), neon_hi32(b), 0));
+}
+
+static inline uint64_t neon_fcge(uint64_t a, uint64_t b) {
+    return neon_pack32(neon_f32_cmp(neon_lo32(a), neon_lo32(b), 1),
+                       neon_f32_cmp(neon_hi32(a), neon_hi32(b), 1));
+}
+
+static inline uint64_t neon_fcgt(uint64_t a, uint64_t b) {
+    return neon_pack32(neon_f32_cmp(neon_lo32(a), neon_lo32(b), 2),
+                       neon_f32_cmp(neon_hi32(a), neon_hi32(b), 2));
+}
+
+/* VABS and VNEG clear or flip the sign bit of every lane and nothing else.
+ * A denormal stays denormal and a NaN keeps its payload: the architecture
+ * says so, and it differs from the flushing arithmetic above. */
+static inline uint64_t neon_fabs(uint64_t x) { return x & 0x7FFFFFFF7FFFFFFFull; }
+static inline uint64_t neon_fneg(uint64_t x) { return x ^ 0x8000000080000000ull; }
+
+/* F32 to S32 or U32, round toward zero. The float is checked against the
+ * integer range before the cast: a cast of an out-of-range float is undefined
+ * in C, and the architecture wants saturation there, not a host-dependent
+ * value. NaN gives 0, and a flushed denormal gives 0 like any zero. */
+static inline uint32_t neon_f32_to_int(uint32_t bits, int is_unsigned) {
+    float f = neon_f32_in(bits);
+    if (f != f) return 0;                                   /* NaN */
+    if (is_unsigned) {
+        if (!(f > 0.0f)) return 0;                          /* negatives and -0 */
+        if (f >= 4294967296.0f) return 0xFFFFFFFFu;
+        return (uint32_t)f;
+    }
+    if (f >= 2147483648.0f) return 0x7FFFFFFFu;
+    if (f < -2147483648.0f) return 0x80000000u;             /* -2^31 itself is in range */
+    return (uint32_t)(int32_t)f;
+}
+
+/* S32 or U32 to F32. The host's int-to-float conversion rounds to nearest,
+ * ties to even, which is the rounding the architecture uses here. Every result
+ * is zero or normal, so neon_f32_out has nothing to flush. */
+static inline uint32_t neon_i32_to_f32(uint32_t v, int is_unsigned) {
+    float f = is_unsigned ? (float)v : (float)(int32_t)v;
+    return neon_f32_out(f);
+}
+
+static inline uint64_t neon_f2i(uint64_t x, int is_unsigned) {
+    return neon_pack32(neon_f32_to_int(neon_lo32(x), is_unsigned),
+                       neon_f32_to_int(neon_hi32(x), is_unsigned));
+}
+
+static inline uint64_t neon_i2f(uint64_t x, int is_unsigned) {
+    return neon_pack32(neon_i32_to_f32(neon_lo32(x), is_unsigned),
+                       neon_i32_to_f32(neon_hi32(x), is_unsigned));
+}
+
 #ifdef __cplusplus
 }
 #endif

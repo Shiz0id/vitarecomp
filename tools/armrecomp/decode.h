@@ -112,6 +112,12 @@ typedef enum {
     OP_NEON_FMLA, OP_NEON_FMLS, /* vd = vd +/- round(vn * vm), not fused     */
     OP_NEON_FMUL_SCALAR,        /* vd = vn * vm[imm], vm a D register        */
     OP_NEON_FMLA_SCALAR,        /* vd = vd + vn * vm[imm], vm a D register   */
+    OP_NEON_FMLS_SCALAR,        /* vd = vd - vn * vm[imm], vm a D register   */
+    OP_NEON_FMAX, OP_NEON_FMIN, /* float; a NaN operand gives the default NaN */
+    OP_NEON_FCEQ, OP_NEON_FCGE, OP_NEON_FCGT, /* lanes all-ones where true  */
+    OP_NEON_FABS, OP_NEON_FNEG, /* sign bit only: no flush, NaN payload kept  */
+    OP_NEON_FCVT_TO_INT,        /* F32 to S32 or U32 (vfp_unsigned), toward 0 */
+    OP_NEON_FCVT_FROM_INT,      /* S32 or U32 (vfp_unsigned) to F32           */
     OP_VMOV_V_RR,               /* two core regs (rt, rt2) -> a D register or
                                    an S pair, vm naming it                   */
     OP_VMOV_RR_V,               /* the reverse                              */

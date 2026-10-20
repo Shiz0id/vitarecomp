@@ -1172,7 +1172,7 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             break;
         }
 
-        case OP_NEON_FMUL_SCALAR: case OP_NEON_FMLA_SCALAR: {
+        case OP_NEON_FMUL_SCALAR: case OP_NEON_FMLA_SCALAR: case OP_NEON_FMLS_SCALAR: {
             int regs = in->neon_q ? 2 : 1;
             fprintf(f, "    { uint64_t _s = neon_dup(neon_get_lane(neon_getd(%d), 2, %u, 1), 2);\n",
                     in->vm, (unsigned)in->imm);
@@ -1180,10 +1180,43 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
                 int d = in->vd + k, n = in->vn + k;
                 if (in->op == OP_NEON_FMLA_SCALAR)
                     fprintf(f, "      neon_setd(%d, neon_fmla(neon_getd(%d), neon_getd(%d), _s));\n", d, d, n);
+                else if (in->op == OP_NEON_FMLS_SCALAR)
+                    fprintf(f, "      neon_setd(%d, neon_fmls(neon_getd(%d), neon_getd(%d), _s));\n", d, d, n);
                 else
                     fprintf(f, "      neon_setd(%d, neon_fmul(neon_getd(%d), _s));\n", d, n);
             }
             fprintf(f, "    }\n");
+            break;
+        }
+
+        /* Max, min and compares: one helper per lane pair, as above. The
+         * compare helpers return all-ones or zero in each lane. */
+        case OP_NEON_FMAX: case OP_NEON_FMIN:
+        case OP_NEON_FCEQ: case OP_NEON_FCGE: case OP_NEON_FCGT: {
+            int regs = in->neon_q ? 2 : 1;
+            const char *fn = in->op == OP_NEON_FMAX ? "fmax" : in->op == OP_NEON_FMIN ? "fmin"
+                           : in->op == OP_NEON_FCEQ ? "fceq" : in->op == OP_NEON_FCGE ? "fcge" : "fcgt";
+            for (int k = 0; k < regs; k++)
+                fprintf(f, "    neon_setd(%d, neon_%s(neon_getd(%d), neon_getd(%d)));\n",
+                        in->vd + k, fn, in->vn + k, in->vm + k);
+            break;
+        }
+
+        case OP_NEON_FABS: case OP_NEON_FNEG: {
+            int regs = in->neon_q ? 2 : 1;
+            for (int k = 0; k < regs; k++)
+                fprintf(f, "    neon_setd(%d, neon_%s(neon_getd(%d)));\n",
+                        in->vd + k, in->op == OP_NEON_FABS ? "fabs" : "fneg", in->vm + k);
+            break;
+        }
+
+        /* The integer signedness is the vfp_unsigned flag, as in the VFP forms. */
+        case OP_NEON_FCVT_TO_INT: case OP_NEON_FCVT_FROM_INT: {
+            int regs = in->neon_q ? 2 : 1;
+            for (int k = 0; k < regs; k++)
+                fprintf(f, "    neon_setd(%d, neon_%s(neon_getd(%d), %d));\n",
+                        in->vd + k, in->op == OP_NEON_FCVT_TO_INT ? "f2i" : "i2f",
+                        in->vm + k, in->vfp_unsigned);
             break;
         }
 
