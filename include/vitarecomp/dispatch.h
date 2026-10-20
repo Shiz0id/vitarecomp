@@ -18,6 +18,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef void (*vita_fn)(void);
 
 typedef struct {
@@ -43,5 +47,9 @@ void vita_dispatch(uint32_t from, uint32_t addr);
  * should not have". */
 uint32_t vita_dispatch_hits(void);
 uint32_t vita_dispatch_misses(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* VITARECOMP_DISPATCH_H */

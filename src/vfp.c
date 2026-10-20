@@ -3,8 +3,8 @@
 #include "vitarecomp/vfp.h"
 #include "vitarecomp/cpu.h"
 
-vfp_reg vfp_s[32];
-int fpscr_n, fpscr_z, fpscr_c, fpscr_v;
+VITA_TLS vfp_reg vfp_s[VFP_WORDS];
+VITA_TLS int fpscr_n, fpscr_z, fpscr_c, fpscr_v;
 
 /* ARM's four comparison outcomes, written as the architecture defines them
  * rather than derived from C's operators — C has no way to express "unordered"

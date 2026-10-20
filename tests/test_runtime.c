@@ -356,6 +356,67 @@ static void test_memory(void) {
     printf("  memory, unaligned and bounds   ok\n");
 }
 
+/* --- the VFP register file ---------------------------------------------------- */
+
+static void test_vfp_d32(void) {
+    /* D16-D31 are real registers with no single-precision names. Masking the
+     * double index by the singles' range folded them onto D0-D15, so writing
+     * D16 silently clobbered D0. */
+    vfp_setd(0, 1.5);
+    vfp_setd(16, -2.25);
+    assert(vfp_getd(0) == 1.5);
+    assert(vfp_getd(16) == -2.25);
+    vfp_setd(15, 4.0);
+    vfp_setd(31, 3.0);
+    assert(vfp_getd(31) == 3.0);
+    assert(vfp_getd(15) == 4.0);                    /* D31 is not D15 */
+
+    /* Dn still aliases S(2n), S(2n+1) in the low bank, low word first. */
+    vfp_setu(2, 0x00000000u);
+    vfp_setu(3, 0x3FF00000u);                       /* 1.0 as a double */
+    assert(vfp_getd(1) == 1.0);
+    printf("  vfp, D0-D31 distinct           ok\n");
+}
+
+/* --- attached memory and the import handler ----------------------------------- */
+
+static void test_mem_attach(void) {
+    /* Memory the runtime does not own: it must be addressable, and freeing the
+     * runtime's view of it must leave the owner's buffer alone. */
+    static uint8_t host[256];
+    host[0x10] = 0x7F;
+    assert(vita_mem_attach(host, 0x60000000u, sizeof(host)) == 0);
+    assert(vita_read8(0x60000010u) == 0x7F);
+    vita_write32(0x60000020u, 0xDEADBEEFu);
+    assert(host[0x20] == 0xEF && host[0x23] == 0xDE);
+    vita_mem_free();
+    assert(host[0x10] == 0x7F);                     /* not freed, not zeroed */
+    assert(vita_mem_attach(NULL, 0, 16) != 0);
+    printf("  memory, attach without owning  ok\n");
+}
+
+static uint32_t g_seen_nid;
+static int handle_even(uint32_t stub, uint32_t nid, const char *name) {
+    (void)stub; (void)name;
+    g_seen_nid = nid;
+    if (nid & 1) return 0;                          /* decline odd NIDs */
+    r0 = nid ^ 0xFFFFFFFFu;                         /* the call's result */
+    return 1;
+}
+
+static void test_import_handler(void) {
+    uint32_t before = vita_trap_count();
+    vita_set_import_handler(handle_even);
+    r0 = 0;
+    vita_trap_import(0x81000000u, 0x12345678u, "Lib::fn");
+    assert(g_seen_nid == 0x12345678u);
+    assert(r0 == (0x12345678u ^ 0xFFFFFFFFu));
+    /* Serviced calls are not gaps. */
+    assert(vita_trap_count() == before);
+    vita_set_import_handler(NULL);
+    printf("  import handler services NIDs   ok\n");
+}
+
 int main(void) {
     printf("runtime:\n");
     test_shifts();
@@ -368,6 +429,9 @@ int main(void) {
     test_dispatch();
     test_hle_libc();
     test_memory();
+    test_vfp_d32();
+    test_mem_attach();
+    test_import_handler();
     printf("all runtime tests passed\n");
     return 0;
 }

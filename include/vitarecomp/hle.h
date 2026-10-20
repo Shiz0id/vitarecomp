@@ -28,6 +28,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Give the guest heap a region to allocate from. The runtime cannot pick this
  * itself: where the free space is depends on how the host laid out the module
  * and its stack, which is the host's decision. `malloc` traps until this is
@@ -38,5 +42,9 @@ void vita_heap_init(uint32_t base, uint32_t size);
  * from "the heap was too small". */
 uint32_t vita_heap_used(void);
 uint32_t vita_heap_size(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* VITARECOMP_HLE_H */

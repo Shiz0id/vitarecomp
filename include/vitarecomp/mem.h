@@ -17,10 +17,27 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 extern uint32_t vita_mem_bad_access;
 
 /* Reserve `size` bytes of guest address space starting at `base`. */
 int  vita_mem_init(uint32_t base, size_t size);
+
+/* Use memory someone else owns instead of allocating it: `host` backs guest
+ * address `base` onward for `size` bytes, and vita_mem_free() lets go of it
+ * without freeing it.
+ *
+ * This is how the recompiled code shares an address space with a firmware
+ * layer that already has one. Vita3K reserves the whole 4 GB guest space and
+ * maps pages into it as the game allocates them; attaching at base 0 with that
+ * reservation means a guest pointer the HLE returns is valid in recompiled
+ * code with no copying and no second map. `size` is a size_t because the
+ * whole 32-bit space is 4 GB, one more than a uint32_t holds. */
+int  vita_mem_attach(void *host, uint32_t base, size_t size);
+
 void vita_mem_free(void);
 
 /* Returns NULL rather than a wild pointer when an access would straddle the
@@ -45,5 +62,9 @@ uint8_t  vita_read8 (uint32_t addr);
 void vita_write32(uint32_t addr, uint32_t v);
 void vita_write16(uint32_t addr, uint16_t v);
 void vita_write8 (uint32_t addr, uint8_t  v);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* VITARECOMP_MEM_H */

@@ -16,6 +16,7 @@ uint32_t vita_mem_bad_access;
 static uint8_t *g_mem;
 static uint32_t g_base;
 static size_t   g_size;
+static int      g_owned;    /* 0 when attached: the memory is not ours to free */
 
 int vita_mem_init(uint32_t base, size_t size) {
     vita_mem_free();
@@ -23,11 +24,23 @@ int vita_mem_init(uint32_t base, size_t size) {
     if (!g_mem) return 1;
     g_base = base;
     g_size = size;
+    g_owned = 1;
+    return 0;
+}
+
+int vita_mem_attach(void *host, uint32_t base, size_t size) {
+    vita_mem_free();
+    if (!host || size == 0) return 1;
+    g_mem = (uint8_t *)host;
+    g_base = base;
+    g_size = size;
+    g_owned = 0;
     return 0;
 }
 
 void vita_mem_free(void) {
-    free(g_mem);
+    if (g_owned) free(g_mem);
+    g_owned = 0;
     g_mem = NULL;
     g_base = 0;
     g_size = 0;
@@ -45,7 +58,10 @@ uint32_t vita_mem_avail(uint32_t addr) {
     if (!g_mem || addr < g_base) return 0;
     uint64_t off = (uint64_t)addr - g_base;
     if (off >= g_size) return 0;
-    return (uint32_t)(g_size - off);
+    /* A full 4 GB window at base 0 leaves 2^32 bytes after address 0, which
+     * does not fit the return type. Saturate rather than wrap to zero. */
+    uint64_t left = (uint64_t)g_size - off;
+    return left > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)left;
 }
 
 /* Unaligned access is legal on ARMv7 for ordinary loads and stores, so these

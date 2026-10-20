@@ -81,7 +81,15 @@ void vita_trap_indirect(uint32_t addr, uint32_t target) {
 /* `name` is the resolved "Library::function", or NULL when the NID database did
  * not know it. Naming the function is the entire point of binding imports — a
  * NID is a hash, and "implement 0xBFE02B3A" is not a task anyone can start. */
+static vita_import_handler g_import_handler;
+
+void vita_set_import_handler(vita_import_handler fn) { g_import_handler = fn; }
+
 void vita_trap_import(uint32_t addr, uint32_t nid, const char *name) {
+    /* Not a trap if something can service it. Checked before counting, so
+     * vita_trap_count() keeps meaning "gaps hit", not "imports called". */
+    if (g_import_handler && g_import_handler(addr, nid, name)) return;
+
     g_hits++;
     if (!name) name = "(unresolved NID)";
     if (trace_on()) {

@@ -17,6 +17,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* --- shifts ----------------------------------------------------------------
  *
  * C leaves a shift by >= the operand width UNDEFINED. ARM defines it: shifting
@@ -167,9 +171,28 @@ void vita_trap_unimpl(uint32_t addr, uint32_t raw, const char *what);
 void vita_trap_indirect(uint32_t addr, uint32_t target);
 void vita_trap_import(uint32_t addr, uint32_t nid, const char *name);
 
+/* A firmware layer that can answer import calls by NID.
+ *
+ * The generated default for every import calls vita_trap_import. With a
+ * handler installed, that call is offered to the handler first, and a nonzero
+ * return means the call was serviced — arguments read from r0-r3 and the
+ * stack, the result left in r0 — so the trap does not fire. Zero falls through
+ * to the trap exactly as before, so a handler that knows only some NIDs is
+ * still incrementally useful.
+ *
+ * A `vita_hle_*` defined in C still wins: it is linked in instead of the
+ * default and never reaches this path. So the order of precedence is a
+ * hand-written HLE body, then the handler, then the named trap. */
+typedef int (*vita_import_handler)(uint32_t stub, uint32_t nid, const char *name);
+void vita_set_import_handler(vita_import_handler fn);
+
 /* Total traps hit. Only meaningful under VITARECOMP_TRACE=1, where execution
  * continues past them; otherwise the first one ends the program. */
 uint32_t vita_trap_count(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* VITARECOMP_RECOMP_RT_H */
 

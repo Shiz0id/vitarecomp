@@ -17,6 +17,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
     uint32_t lowest;      /* lowest p_vaddr seen           */
     uint32_t highest;     /* highest p_vaddr + p_memsz     */
@@ -30,5 +34,9 @@ int vita_load_elf(const char *path, vita_load_info *info);
 /* Determine the address range an ELF needs, without loading it. Lets a host
  * size its guest memory from the file rather than from a guess. */
 int vita_probe_elf(const char *path, vita_load_info *info);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* VITARECOMP_LOADER_H */
