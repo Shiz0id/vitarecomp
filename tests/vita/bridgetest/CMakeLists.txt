@@ -24,7 +24,12 @@ set(VITA_TITLEID  "VRBT00001")
 set(VITA_VERSION  "01.00")
 
 add_executable(bridgetest main.c)
-target_compile_options(bridgetest PRIVATE -O2 -Wall)
+# -fno-tree-vectorize keeps GCC from turning main's framebuffer loop into
+# wide NEON (vmul/vshr/widening forms) the emitter does not translate yet. The
+# point of this module is to exercise the bridge end to end; NEON coverage is
+# measured on its own. newlib still brings its own NEON (vmov.i32, vadd.i32,
+# vorr in the allocator), which IS translated and so is still exercised.
+target_compile_options(bridgetest PRIVATE -O2 -Wall -fno-tree-vectorize)
 target_link_libraries(bridgetest
     SceDisplay_stub
     SceLibKernel_stub

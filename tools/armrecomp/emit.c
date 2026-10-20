@@ -511,8 +511,11 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
         }
 
         case OP_MUL:
+            /* rn, not rd: the 16-bit form has rn == rd, but MUL.W names three
+             * registers, and using rd as the first source gave rd * rm
+             * whenever they differed. */
             fprintf(f, "    %s = %s * %s;\n", reg_name(in->rd),
-                    reg_name(in->rd), src_name(in, in->rm));
+                    src_name(in, in->rn), src_name(in, in->rm));
             if (in->sets_flags) fprintf(f, "    vita_flags_nz(%s);\n", reg_name(in->rd));
             break;
 
@@ -630,6 +633,82 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             }
             fprintf(f, "    sp += %d;\n", slot * 4);
             if (in->reglist & 0x8000) fprintf(f, "    return;\n");
+            break;
+        }
+
+        case OP_UADD8: case OP_USUB8: case OP_UADD16: case OP_USUB16: case OP_SEL: {
+            const char *fn = in->op == OP_UADD8 ? "vita_uadd8" : in->op == OP_USUB8 ? "vita_usub8"
+                           : in->op == OP_UADD16 ? "vita_uadd16" : in->op == OP_USUB16 ? "vita_usub16"
+                           : "vita_sel";
+            fprintf(f, "    %s = %s(%s, %s);\n", reg_name(in->rd), fn,
+                    src_name(in, in->rn), src_name(in, in->rm));
+            break;
+        }
+
+        case OP_CLZ:
+            fprintf(f, "    %s = vita_clz(%s);\n", reg_name(in->rd), src_name(in, in->rm));
+            break;
+
+        case OP_MLA: case OP_MLS:
+            fprintf(f, "    %s = %s %c %s * %s;\n", reg_name(in->rd), src_name(in, in->rt),
+                    in->op == OP_MLA ? '+' : '-', src_name(in, in->rn), src_name(in, in->rm));
+            break;
+
+        case OP_UMULL: case OP_SMULL: case OP_UMLAL: case OP_SMLAL: {
+            /* Every source is read before either half is written: RdLo and
+             * RdHi may name the sources, and the accumulate forms read both
+             * halves as the 64-bit addend. */
+            int sgn = in->op == OP_SMULL || in->op == OP_SMLAL;
+            int acc = in->op == OP_UMLAL || in->op == OP_SMLAL;
+            if (sgn)
+                fprintf(f, "    { uint64_t _p = (uint64_t)((int64_t)(int32_t)%s * (int64_t)(int32_t)%s);\n",
+                        src_name(in, in->rn), src_name(in, in->rm));
+            else
+                fprintf(f, "    { uint64_t _p = (uint64_t)%s * (uint64_t)%s;\n",
+                        src_name(in, in->rn), src_name(in, in->rm));
+            if (acc)
+                fprintf(f, "      _p += ((uint64_t)%s << 32) | %s;\n",
+                        src_name(in, in->rt2), src_name(in, in->rt));
+            fprintf(f, "      %s = (uint32_t)_p; %s = (uint32_t)(_p >> 32); }\n",
+                    reg_name(in->rt), reg_name(in->rt2));
+            break;
+        }
+
+        case OP_LDM: case OP_STM: {
+            /* The base is captured once, before anything is loaded: a base
+             * register that is also in the list must address every slot from
+             * its original value. Ascending registers to ascending addresses,
+             * starting at rn (IA) or rn - 4n (DB). */
+            int count = 0;
+            for (int i = 0; i < 16; i++) if (in->reglist & (1u << i)) count++;
+            int load = in->op == OP_LDM;
+            if (count == 0) { ok = 0; break; }
+            /* Writing back to the PC is UNPREDICTABLE, and an assignment to
+             * a constant would not compile: it traps, like any PC destination. */
+            if (in->rn == 15 && in->writeback) { ok = 0; break; }
+            fprintf(f, "    { uint32_t _b = %s;\n", src_name(in, in->rn));
+            if (in->decrement) fprintf(f, "      _b -= %d;\n", count * 4);
+            int slot = 0;
+            for (int i = 0; i < 16; i++) {
+                if (!(in->reglist & (1u << i))) continue;
+                if (load) {
+                    if (i != 15)    /* PC: the return, handled below */
+                        fprintf(f, "      %s = vita_read32(_b + %d);\n", reg_name(i), slot * 4);
+                } else {
+                    char rv[64]; reg_operand(rv, sizeof(rv), i, in);
+                    fprintf(f, "      vita_write32(_b + %d, %s);\n", slot * 4, rv);
+                }
+                slot++;
+            }
+            /* Writeback leaves the base at the far end of the block: below it
+             * for DB (where _b already is), above it for IA. A base that was
+             * itself loaded keeps the loaded value. */
+            if (in->writeback && !(load && (in->reglist & (1u << in->rn)))) {
+                if (in->decrement) fprintf(f, "      %s = _b;\n", reg_name(in->rn));
+                else               fprintf(f, "      %s = _b + %d;\n", reg_name(in->rn), count * 4);
+            }
+            fprintf(f, "    }\n");
+            if (load && (in->reglist & 0x8000)) fprintf(f, "    return;\n");
             break;
         }
 
@@ -822,6 +901,76 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
                 fprintf(f, "    vfp_setd(%d, -(vfp_getd(%d) * vfp_getd(%d)));\n", in->vd, in->vn, in->vm);
             else
                 fprintf(f, "    vfp_setf(%d, -(vfp_getf(%d) * vfp_getf(%d)));\n", in->vd, in->vn, in->vm);
+            break;
+
+        case OP_VNMLA: case OP_VNMLS: {
+            if (in->vd == ARM_NO_REG || in->vn == ARM_NO_REG || in->vm == ARM_NO_REG) { ok = 0; break; }
+            char c = (in->op == OP_VNMLA) ? '-' : '+';
+            if (in->vfp_dp)
+                fprintf(f, "    vfp_setd(%d, -vfp_getd(%d) %c (vfp_getd(%d) * vfp_getd(%d)));\n",
+                        in->vd, in->vd, c, in->vn, in->vm);
+            else
+                fprintf(f, "    vfp_setf(%d, -vfp_getf(%d) %c (vfp_getf(%d) * vfp_getf(%d)));\n",
+                        in->vd, in->vd, c, in->vn, in->vm);
+            break;
+        }
+
+        /* --- Advanced SIMD ---------------------------------------------------
+         *
+         * One statement per D register: a Q operation is the same thing done
+         * to the pair d, d+1 (and n, n+1, m, m+1). Sources are read into
+         * temporaries first, because the destination may also be a source. */
+        case OP_NEON_ADD: case OP_NEON_SUB: case OP_NEON_LOGIC: {
+            int regs = in->neon_q ? 2 : 1;
+            for (int k = 0; k < regs; k++) {
+                int d = in->vd + k, n = in->vn + k, m = in->vm + k;
+                fprintf(f, "    { uint64_t _n = neon_getd(%d), _m = neon_getd(%d), _d = neon_getd(%d);\n", n, m, d);
+                const char *expr = "_d";
+                char buf[96];
+                if (in->op == OP_NEON_ADD) { snprintf(buf, sizeof(buf), "neon_add(_n, _m, %d)", in->neon_size); expr = buf; }
+                else if (in->op == OP_NEON_SUB) { snprintf(buf, sizeof(buf), "neon_sub(_n, _m, %d)", in->neon_size); expr = buf; }
+                else switch (in->neon_fn) {
+                    case NL_AND: expr = "_n & _m"; break;
+                    case NL_BIC: expr = "_n & ~_m"; break;
+                    case NL_ORR: expr = "_n | _m"; break;
+                    case NL_ORN: expr = "_n | ~_m"; break;
+                    case NL_EOR: expr = "_n ^ _m"; break;
+                    case NL_BSL: expr = "(_d & _n) | (~_d & _m)"; break;   /* d is the selector */
+                    case NL_BIT: expr = "(_n & _m) | (_d & ~_m)"; break;   /* insert where m set */
+                    case NL_BIF: expr = "(_d & _m) | (_n & ~_m)"; break;   /* insert where m clear */
+                    default: break;
+                }
+                fprintf(f, "      (void)_d; neon_setd(%d, %s); }\n", d, expr);
+            }
+            break;
+        }
+
+        case OP_NEON_IMM: {
+            int regs = in->neon_q ? 2 : 1;
+            for (int k = 0; k < regs; k++) {
+                int d = in->vd + k;
+                unsigned long long v = (unsigned long long)in->imm64;
+                switch (in->neon_fn) {
+                    case NL_MOV: fprintf(f, "    neon_setd(%d, 0x%016llXull);\n", d, v); break;
+                    case NL_MVN: fprintf(f, "    neon_setd(%d, 0x%016llXull);\n", d, ~v); break;
+                    case NL_ORR: fprintf(f, "    neon_setd(%d, neon_getd(%d) | 0x%016llXull);\n", d, d, v); break;
+                    case NL_BIC: fprintf(f, "    neon_setd(%d, neon_getd(%d) & 0x%016llXull);\n", d, d, ~v); break;
+                    default: ok = 0; break;
+                }
+            }
+            break;
+        }
+
+        case OP_VMOV_IMM:
+            if (in->vd == ARM_NO_REG) { ok = 0; break; }
+            /* Bits, not a float literal: the decoder already expanded the
+             * constant exactly as the hardware does. A double's low word is
+             * always zero. */
+            if (in->vfp_dp)
+                fprintf(f, "    vfp_s[%d].u = 0u; vfp_s[%d].u = 0x%08Xu;\n",
+                        in->vd * 2, in->vd * 2 + 1, in->imm);
+            else
+                fprintf(f, "    vfp_setu(%d, 0x%08Xu);\n", in->vd, in->imm);
             break;
 
         case OP_VMOV:

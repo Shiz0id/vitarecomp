@@ -383,10 +383,16 @@ int vf_discover(const vm_image *img, const vm_module *mod, vf_result *out) {
     seedq q = {0};
     const uint32_t base = img->seg_vaddr;
 
-    /* 1. module_start. The offset carries no Thumb bit, and the corpus is
-     *    overwhelmingly Thumb, so it is seeded as Thumb. */
+    /* 1. module_start, seeded as Thumb: the corpus is overwhelmingly Thumb.
+     *
+     *    The offset MAY carry the Thumb bit. The launch-window titles store it
+     *    clear; a VitaSDK module stores it set, as any interworking pointer
+     *    does. Left in, it seeded the entry one byte into its own first
+     *    instruction, decoded the whole of _start out of phase, and registered
+     *    the entry at an odd address the loader never jumps to — so the
+     *    program could not start at all. */
     if (mod->have_info && mod->info.module_start != 0xFFFFFFFF) {
-        sq_push(&q, base + (mod->info.module_start & 0x3FFFFFFF), ARM_T32, 0);
+        sq_push(&q, base + (mod->info.module_start & 0x3FFFFFFE), ARM_T32, 0);
         out->seeds_entry++;
     }
 

@@ -356,6 +356,44 @@ static void test_memory(void) {
     printf("  memory, unaligned and bounds   ok\n");
 }
 
+/* --- CLZ ----------------------------------------------------------------------- */
+
+static void test_clz(void) {
+    /* Zero is 32 by ARM's definition; __builtin_clz(0) is undefined. */
+    assert(vita_clz(0u) == 32u);
+    assert(vita_clz(1u) == 31u);
+    assert(vita_clz(0x80000000u) == 0u);
+    assert(vita_clz(0x00010000u) == 15u);
+    /* The `x == 0` idiom compilers build from it: clz, then lsr #5. */
+    assert((vita_clz(0u) >> 5) == 1u && (vita_clz(7u) >> 5) == 0u);
+    printf("  clz, including zero            ok\n");
+}
+
+/* --- GE flags and NEON lanes ---------------------------------------------------- */
+
+static void test_parallel_and_lanes(void) {
+    /* uadd8: carry-out per byte sets GE for that byte only. */
+    assert(vita_uadd8(0x01FF80FFu, 0x01010180u) == 0x02008100u + 0x7Fu);
+    assert(flag_ge == 0x5u);                 /* bytes 0 and 2 carried */
+    /* sel picks rn's byte where GE is set */
+    assert(vita_sel(0xAABBCCDDu, 0x11223344u) == 0x11BB33DDu);
+    /* usub8: GE means no borrow */
+    vita_usub8(0x10101010u, 0x20101000u);
+    assert(flag_ge == 0x7u);                 /* byte 3 (0x10 - 0x20) borrowed */
+
+    /* NEON lanes: no carry may cross a lane boundary. */
+    assert(neon_add(0x00000000FFFFFFFFull, 0x0000000000000001ull, 2) == 0);
+    assert(neon_add(0x00000000FFFFFFFFull, 0x0000000000000001ull, 3) == 0x0000000100000000ull);
+    assert(neon_add(0xFF01ull, 0x0101ull, 0) == 0x0002ull);
+    assert(neon_sub(0x0000000000000000ull, 0x0000000000000001ull, 2) == 0x00000000FFFFFFFFull);
+    assert(neon_sub(0x0100ull, 0x0001ull, 0) == 0x01FFull);
+    assert(neon_sub(0x0100ull, 0x0001ull, 1) == 0x00FFull);
+    neon_setd(17, 0x0123456789ABCDEFull);
+    assert(neon_getd(17) == 0x0123456789ABCDEFull);
+    assert(vfp_s[34].u == 0x89ABCDEFu);      /* D17 low word: word 34, no S name */
+    printf("  GE/sel and NEON lanes          ok\n");
+}
+
 /* --- the VFP register file ---------------------------------------------------- */
 
 static void test_vfp_d32(void) {
@@ -429,6 +467,8 @@ int main(void) {
     test_dispatch();
     test_hle_libc();
     test_memory();
+    test_clz();
+    test_parallel_and_lanes();
     test_vfp_d32();
     test_mem_attach();
     test_import_handler();

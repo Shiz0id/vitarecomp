@@ -29,6 +29,7 @@
 // The low 8 FPSCR/CPSR bits that are not NZCV stay in ctx; NZCV live in the
 // runtime's separate flag ints while guest code runs.
 static constexpr uint32_t NZCV = 0xF0000000u;
+static constexpr uint32_t GE = 0x000F0000u; // CPSR 19:16, the runtime's flag_ge
 
 static uint32_t pack_nzcv(int n, int z, int c, int v) {
     return (uint32_t(n != 0) << 31) | (uint32_t(z != 0) << 30) | (uint32_t(c != 0) << 29) | (uint32_t(v != 0) << 28);
@@ -56,6 +57,7 @@ void RecompCPU::globals_from(const CPUContext &c) {
     flag_z = (c.cpsr >> 30) & 1;
     flag_c = (c.cpsr >> 29) & 1;
     flag_v = (c.cpsr >> 28) & 1;
+    flag_ge = (c.cpsr >> 16) & 0xF;
     // Vita3K's 64 floats and the runtime's 64 words are the same D0-D31 file.
     static_assert(sizeof(c.fpu_registers) == sizeof(vfp_reg) * VFP_WORDS);
     std::memcpy(vfp_s, c.fpu_registers.data(), sizeof(c.fpu_registers));
@@ -71,7 +73,7 @@ void RecompCPU::globals_to(CPUContext &c) const {
         c.cpu_registers[i] = r[i];
     c.cpu_registers[13] = sp;
     c.cpu_registers[14] = lr;
-    c.cpsr = (c.cpsr & ~NZCV) | pack_nzcv(flag_n, flag_z, flag_c, flag_v);
+    c.cpsr = (c.cpsr & ~(NZCV | GE)) | pack_nzcv(flag_n, flag_z, flag_c, flag_v) | ((flag_ge & 0xF) << 16);
     std::memcpy(c.fpu_registers.data(), vfp_s, sizeof(c.fpu_registers));
     c.fpscr = (c.fpscr & ~NZCV) | pack_nzcv(fpscr_n, fpscr_z, fpscr_c, fpscr_v);
 }
@@ -186,7 +188,7 @@ void RecompCPU::set_reg(uint8_t idx, uint32_t val) {
 uint32_t RecompCPU::get_cpsr() {
     if (!live())
         return ctx.cpsr;
-    return (ctx.cpsr & ~NZCV) | pack_nzcv(flag_n, flag_z, flag_c, flag_v);
+    return (ctx.cpsr & ~(NZCV | GE)) | pack_nzcv(flag_n, flag_z, flag_c, flag_v) | ((flag_ge & 0xF) << 16);
 }
 
 void RecompCPU::set_cpsr(uint32_t val) {
@@ -196,6 +198,7 @@ void RecompCPU::set_cpsr(uint32_t val) {
         flag_z = (val >> 30) & 1;
         flag_c = (val >> 29) & 1;
         flag_v = (val >> 28) & 1;
+        flag_ge = (val >> 16) & 0xF;
     }
 }
 

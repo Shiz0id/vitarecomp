@@ -214,16 +214,16 @@ endif()
 target_link_libraries(vita3k PRIVATE app audio compat config ctrl dialog display ime lang gdbstub gxm io miniz modules motion packages patch renderer sdl-frontend shader touch util psvpfsparser)
 
 # vita3krecomp: run a statically recompiled module in place of the dynarmic
-# JIT. VITA3K_RECOMP_TARGET names the per-game target holding the generated C
-# and its import defaults; that target must provide vita_register_functions().
+# JIT. VITA3K_RECOMP_GENERATED is the C file `armrecomp emit` wrote; its
+# import defaults are expected beside it in <file>_imports/.
 option(VITA3K_RECOMP "Run a statically recompiled module instead of the JIT" OFF)
-set(VITA3K_RECOMP_TARGET "" CACHE STRING "Target holding the recompiled module")
+set(VITA3K_RECOMP_GENERATED "" CACHE FILEPATH "armrecomp emit output (.c)")
 if(VITA3K_RECOMP)
 	set(VITARECOMP_THREADED ON CACHE BOOL "Thread-local guest CPU state" FORCE)
 	set(VITARECOMP_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
 	add_subdirectory(${VITARECOMP_ROOT} vitarecomp)
 	add_subdirectory(${VITARECOMP_ROOT}/vita3k-bridge vita3k-bridge)
-	target_link_libraries(vita3k PRIVATE vita3krecomp_bridge ${VITA3K_RECOMP_TARGET})
+	target_link_libraries(vita3k PRIVATE vita3krecomp_bridge vita3krecomp_game)
 	target_compile_definitions(vita3k PRIVATE VITA3K_RECOMP)
 endif()
 if(NOT ANDROID)

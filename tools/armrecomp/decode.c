@@ -275,7 +275,10 @@ static void decode_t16(uint16_t h, arm_insn *o) {
         int load = (h & 0x0800) != 0;
         o->rn = (h >> 8) & 7;
         o->reglist = h & 0xFF;
-        o->writeback = 1;
+        /* LDM writes back unless the base is in the list (then the loaded
+         * value wins); STM always writes back. */
+        o->writeback = load ? !(o->reglist & (1u << o->rn)) : 1;
+        o->op = load ? OP_LDM : OP_STM;
         set(o, load ? A_LOADM : A_STOREM, "ldm/stm");
         return;
     }
@@ -534,13 +537,17 @@ static int decode_vfp(uint16_t h1, uint16_t h2, arm_insn *o) {
             set(o, A_ALU, op ? "vmls" : "vmla");
             return 1;
 
-        case 0x1:                                  /* VNMLA / VNMLS / VNMUL   */
-            if (op) { o->op = OP_VNMUL; set(o, A_ALU, "vnmul"); return 1; }
-            return 0;                              /* negated accumulate forms */
+        case 0x1:
+            /* VNMLA / VNMLS. This case once decoded op == 1 as VNMUL, which
+             * lives at opc1 0x2: so every VNMLA lost its accumulate, and
+             * every VNMUL (below) lost its negation — both silently. */
+            o->op = op ? OP_VNMLA : OP_VNMLS;
+            set(o, A_ALU, op ? "vnmla" : "vnmls");
+            return 1;
 
-        case 0x2:
-            o->op = OP_VMUL;
-            set(o, A_ALU, "vmul");
+        case 0x2:                                  /* VMUL / VNMUL            */
+            o->op = op ? OP_VNMUL : OP_VMUL;
+            set(o, A_ALU, op ? "vnmul" : "vmul");
             return 1;
 
         case 0x3:
@@ -556,6 +563,23 @@ static int decode_vfp(uint16_t h1, uint16_t h2, arm_insn *o) {
         case 0xB: {                                /* the "other" group       */
             int opc2 = h1 & 0xF;
             int opc3 = (h2 >> 6) & 3;
+
+            /* VMOV immediate: an 8-bit float constant, expanded by the
+             * architecture's VFPExpandImm. Carried as its final bit pattern
+             * so the emitter writes bits rather than re-deriving a float. */
+            if ((opc3 & 1) == 0 && (h2 & 0x00B0) == 0) {
+                uint32_t i8 = ((uint32_t)opc2 << 4) | (h2 & 0xF);
+                uint32_t a = (i8 >> 7) & 1, b = (i8 >> 6) & 1, cdefgh = i8 & 0x3F;
+                o->op = OP_VMOV_IMM;
+                o->vn = o->vm = ARM_NO_REG;
+                o->has_imm = 1;
+                if (dp)   /* the high word; the low word of the double is zero */
+                    o->imm = (a << 31) | ((b ^ 1) << 30) | (b ? 0x3FC00000u : 0) | (cdefgh << 16);
+                else
+                    o->imm = (a << 31) | ((b ^ 1) << 30) | (b ? 0x3E000000u : 0) | (cdefgh << 19);
+                set(o, A_ALU, "vmov imm");
+                return 1;
+            }
 
             if (opc2 == 0x0 && opc3 == 1) { o->op = OP_VMOV;  set(o, A_ALU, "vmov"); return 1; }
             if (opc2 == 0x0 && opc3 == 3) { o->op = OP_VABS;  set(o, A_ALU, "vabs"); return 1; }
@@ -628,6 +652,108 @@ static uint32_t thumb_expand_imm(uint32_t imm12) {
     return r ? ((v >> r) | (v << (32 - r))) : v;
 }
 
+/* --- Advanced SIMD ------------------------------------------------------------
+ *
+ * Only the data-processing groups that the running programs have asked for so
+ * far, each decoded completely rather than sampled. Everything else in the
+ * space stays a named SIMD trap. Field layout (T32):
+ *
+ *   h1  111U 1111 xDss nnnn      h2  dddd oooo NQMB mmmm
+ *
+ * with register numbers D:Vd, N:Vn, M:Vm (0-31). A Q operation names even
+ * registers; an odd one is UNDEFINED, and is left untranslated.
+ */
+
+/* AdvSIMDExpandImm: the 64-bit constant a modified-immediate instruction
+ * means. cmode picks the lane width and where the byte sits in it. */
+static int simd_expand_imm(int op, int cmode, uint32_t imm8, uint64_t *out) {
+    uint64_t i = imm8 & 0xFF, r = 0;
+    switch (cmode >> 1) {
+        case 0: r = i;         r |= r << 32; break;       /* 32-bit lanes, byte 0 */
+        case 1: r = i << 8;    r |= r << 32; break;
+        case 2: r = i << 16;   r |= r << 32; break;
+        case 3: r = i << 24;   r |= r << 32; break;
+        case 4: r = i;         r |= r << 16; r |= r << 32; break;   /* 16-bit lanes */
+        case 5: r = i << 8;    r |= r << 16; r |= r << 32; break;
+        case 6:
+            r = (cmode & 1) ? ((i << 16) | 0xFFFF) : ((i << 8) | 0xFF);  /* "ones" forms */
+            r |= r << 32;
+            break;
+        case 7:
+            if ((cmode & 1) == 0 && op == 0) {             /* bytes */
+                r = i * 0x0101010101010101ull;
+            } else if ((cmode & 1) == 0 && op == 1) {      /* each bit a byte of 0xFF */
+                for (int b = 0; b < 8; b++)
+                    if (i & (1u << b)) r |= 0xFFull << (8 * b);
+            } else if (op == 0) {                          /* single-precision float */
+                uint64_t a = (i >> 7) & 1, bb = (i >> 6) & 1, cdefgh = i & 0x3F;
+                r = (a << 31) | ((bb ^ 1) << 30) | (bb ? 0x3E000000u : 0) | (cdefgh << 19);
+                r |= r << 32;
+            } else {
+                return 0;                                  /* UNDEFINED */
+            }
+            break;
+    }
+    *out = r;
+    return 1;
+}
+
+static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
+    if ((h1 & 0xEF00) != 0xEF00) return 0;          /* not data processing */
+
+    int U = (h1 >> 12) & 1;
+    int Q = (h2 >> 6) & 1;
+    int d = (((h1 >> 6) & 1) << 4) | ((h2 >> 12) & 0xF);
+    int n = (((h2 >> 7) & 1) << 4) | (h1 & 0xF);
+    int m = (((h2 >> 5) & 1) << 4) | (h2 & 0xF);
+
+    /* One register and a modified immediate: h1 111a 1111 1D00 0bcd,
+     * h2 dddd cccc 0Qo1 efgh. */
+    if ((h1 & 0x00B8) == 0x0080 && (h2 & 0x0090) == 0x0010) {
+        int cmode = (h2 >> 8) & 0xF, op = (h2 >> 5) & 1;
+        uint32_t imm8 = ((uint32_t)U << 7) | ((uint32_t)(h1 & 7) << 4) | (h2 & 0xF);
+        if (Q && (d & 1)) return 0;
+        if (!simd_expand_imm(op, cmode, imm8, &o->imm64)) return 0;
+        int orr_bic = (cmode < 12) && (cmode & 1);         /* 0xx1 and 10x1 */
+        if (op == 0)      o->neon_fn = orr_bic ? NL_ORR : NL_MOV;
+        else if (cmode == 14) o->neon_fn = NL_MOV;          /* VMOV.I64 */
+        else              o->neon_fn = orr_bic ? NL_BIC : NL_MVN;
+        o->op = OP_NEON_IMM;
+        o->vd = (int8_t)d;
+        o->neon_q = (uint8_t)Q;
+        static const char *const nm[] = { "vand", "vbic", "vorr", "vorn", "veor",
+                                          "vbsl", "vbit", "vbif", "vmov", "vmvn" };
+        set(o, A_SIMD, nm[o->neon_fn]);
+        return 1;
+    }
+
+    /* Three registers of the same length: h1 bit 7 clear. */
+    if ((h1 & 0x0080) == 0) {
+        int opc = (h2 >> 8) & 0xF, B = (h2 >> 4) & 1, size = (h1 >> 4) & 3;
+        if (Q && ((d | n | m) & 1)) return 0;
+        o->vd = (int8_t)d; o->vn = (int8_t)n; o->vm = (int8_t)m;
+        o->neon_q = (uint8_t)Q;
+        o->neon_size = (uint8_t)size;
+
+        if (opc == 0x1 && B == 1) {                        /* the logical group */
+            static const uint8_t fn[2][4] = { { NL_AND, NL_BIC, NL_ORR, NL_ORN },
+                                              { NL_EOR, NL_BSL, NL_BIT, NL_BIF } };
+            static const char *const nm[2][4] = { { "vand", "vbic", "vorr", "vorn" },
+                                                  { "veor", "vbsl", "vbit", "vbif" } };
+            o->op = OP_NEON_LOGIC;
+            o->neon_fn = fn[U][size];
+            set(o, A_SIMD, nm[U][size]);
+            return 1;
+        }
+        if (opc == 0x8 && B == 0) {                        /* VADD / VSUB .I<size> */
+            o->op = U ? OP_NEON_SUB : OP_NEON_ADD;
+            set(o, A_SIMD, U ? "vsub.i" : "vadd.i");
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static void decode_t32(uint16_t h1, uint16_t h2, arm_insn *o) {
     o->raw = ((uint32_t)h1 << 16) | h2;
 
@@ -647,6 +773,7 @@ static void decode_t32(uint16_t h1, uint16_t h2, arm_insn *o) {
      * that demands an explanation, and there wasn't one. */
     if ((h1 & 0xEC00) == 0xEC00) {
         if (decode_vfp(h1, h2, o)) return;
+        if (decode_neon(h1, h2, o)) return;
         set(o, A_SIMD, "simd/vfp");
         return;
     }
@@ -766,15 +893,27 @@ static void decode_t32(uint16_t h1, uint16_t h2, arm_insn *o) {
     /* Load/store multiple. LDM with the PC in the list is a return. */
     if ((h1 & 0xFE40) == 0xE800) {
         int load = (h1 & 0x0010) != 0;
-        if (load && (h2 & 0x8000)) { set(o, A_RETURN, "ldm {..,pc}"); return; }
-        o->op = load ? OP_POP : OP_PUSH;
         o->rn = h1 & 0xF;
         o->reglist = h2;
         o->writeback = (h1 & 0x0020) != 0;
-        /* Only the SP-relative writeback forms are PUSH/POP proper; the rest
-         * are general LDM/STM against an arbitrary base and the emitter's
-         * stack-shaped translation would be wrong for them. */
-        if (o->rn != 13) o->op = OP_NONE;
+        o->decrement = (h1 & 0x0180) == 0x0100;      /* DB; 0x0080 is IA */
+        if ((h1 & 0x0180) != 0x0080 && (h1 & 0x0180) != 0x0100) {
+            set(o, A_SYS, "srs/rfe");                 /* not LDM/STM at all */
+            return;
+        }
+        /* PUSH.W and POP.W are exactly STMDB sp! and LDMIA sp!. Anything
+         * else against SP — STMIA sp without writeback is a common way to
+         * store outgoing stack arguments — is a general LDM/STM and must not
+         * get the stack-shaped translation, which moves SP. */
+        if (o->rn == 13 && o->writeback && load && !o->decrement)      o->op = OP_POP;
+        else if (o->rn == 13 && o->writeback && !load && o->decrement) o->op = OP_PUSH;
+        else                                                           o->op = load ? OP_LDM : OP_STM;
+        /* A load that includes PC is a return — but it is still a load of
+         * every other register in the list and an SP adjustment. Classifying
+         * it as a return BEFORE filling in the operands made the emitter
+         * write a bare `return;` for every `pop.w {r4-r11, pc}`, so callee-
+         * saved registers and SP came back unrestored, silently. */
+        if (load && (h2 & 0x8000)) { set(o, A_RETURN, "ldm {..,pc}"); return; }
         set(o, load ? A_LOADM : A_STOREM, "ldm/stm.w");
         return;
     }
@@ -1016,19 +1155,75 @@ static void decode_t32(uint16_t h1, uint16_t h2, arm_insn *o) {
         return;
     }
 
-    /* Multiply. MLA/MLS have a third operand and are left to a trap rather
-     * than translated as a plain multiply, which would silently drop the
-     * accumulate. */
-    if ((h1 & 0xFFF0) == 0xFB00 && (h2 & 0x00F0) == 0x0000) {
-        if (((h2 >> 12) & 0xF) == 0xF) {          /* ra == 15 -> plain MUL */
-            o->op = OP_MUL;
-            o->rd = (h2 >> 8) & 0xF;
-            o->rn = h1 & 0xF;
-            o->rm = h2 & 0xF;
-            set(o, A_ALU, "mul.w");
+    /* Count leading zeros. Compilers use it for more than bit scanning:
+     * `clz r0, r0; lsrs r0, #5` is the branch-free `x == 0`. */
+    if ((h1 & 0xFFF0) == 0xFAB0 && (h2 & 0xF0F0) == 0xF080) {
+        o->op = OP_CLZ;
+        o->rd = (h2 >> 8) & 0xF;
+        o->rm = h2 & 0xF;
+        set(o, A_ALU, "clz");
+        return;
+    }
+
+    /* Parallel add/subtract, unsigned GE-setting forms (op2 == 100). The
+     * signed, saturating and halving variants share the group and are left
+     * named rather than guessed at. */
+    if ((h1 & 0xFF80) == 0xFA80 && (h2 & 0xF080) == 0xF000) {
+        int op1 = (h1 >> 4) & 7, op2 = (h2 >> 4) & 7;
+        o->rd = (h2 >> 8) & 0xF;
+        o->rn = h1 & 0xF;
+        o->rm = h2 & 0xF;
+        if (op2 == 4) {
+            static const arm_op pop[8] = { OP_UADD8, OP_UADD16, OP_NONE, OP_NONE,
+                                           OP_USUB8, OP_USUB16, OP_NONE, OP_NONE };
+            static const char *const pnm[8] = { "uadd8", "uadd16", "uasx", "?",
+                                                "usub8", "usub16", "usax", "?" };
+            o->op = pop[op1];
+            set(o, A_ALU, pnm[op1]);
             return;
         }
-        set(o, A_ALU, "mla/mls");
+        set(o, A_ALU, "parallel add/sub");
+        return;
+    }
+
+    /* SEL: bytes from rn or rm by GE. */
+    if ((h1 & 0xFFF0) == 0xFAA0 && (h2 & 0xF0F0) == 0xF080) {
+        o->op = OP_SEL;
+        o->rd = (h2 >> 8) & 0xF;
+        o->rn = h1 & 0xF;
+        o->rm = h2 & 0xF;
+        set(o, A_ALU, "sel");
+        return;
+    }
+
+    /* Multiply and multiply-accumulate. MLA and MLS carry a third source,
+     * the accumulator Ra, held in rt; Ra == 15 is plain MUL. */
+    if ((h1 & 0xFFF0) == 0xFB00 && ((h2 & 0x00F0) == 0x0000 || (h2 & 0x00F0) == 0x0010)) {
+        o->rd = (h2 >> 8) & 0xF;
+        o->rn = h1 & 0xF;
+        o->rm = h2 & 0xF;
+        o->rt = (h2 >> 12) & 0xF;
+        if ((h2 & 0x00F0) == 0x0010) { o->op = OP_MLS; set(o, A_ALU, "mls"); return; }
+        if (o->rt == 0xF)            { o->op = OP_MUL; o->rt = ARM_NO_REG; set(o, A_ALU, "mul.w"); return; }
+        o->op = OP_MLA;
+        set(o, A_ALU, "mla");
+        return;
+    }
+
+    /* Long multiply: a 64-bit product (or product plus accumulator) in a
+     * register pair. The compiler emits UMULL for every division by a
+     * constant, so it is far commoner than 64-bit arithmetic in the source.
+     * RdLo is held in rt and RdHi in rt2, as for LDRD. */
+    if ((h1 & 0xFF90) == 0xFB80 && (h2 & 0x00F0) == 0x0000) {
+        static const arm_op lm[4] = { OP_SMULL, OP_UMULL, OP_SMLAL, OP_UMLAL };
+        static const char *const nm[4] = { "smull", "umull", "smlal", "umlal" };
+        int k = (h1 >> 5) & 3;                   /* 00 smull 01 umull 10 smlal 11 umlal */
+        o->op  = lm[k];
+        o->rn  = h1 & 0xF;
+        o->rm  = h2 & 0xF;
+        o->rt  = (h2 >> 12) & 0xF;
+        o->rt2 = (h2 >> 8) & 0xF;
+        set(o, A_ALU, nm[k]);
         return;
     }
 

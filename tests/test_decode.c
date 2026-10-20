@@ -260,9 +260,10 @@ static void test_t32_operands(void) {
     in = dec(ARM_T32, BASE);
     assert(in.cls == A_STOREM && in.op == OP_PUSH && in.rn == 13);
 
-    put16(0, 0xE8B1); put16(2, 0x0030);      /* ldm r1!, {r4,r5} â€” base r1 */
+    put16(0, 0xE8B1); put16(2, 0x0030);      /* ldm r1!, {r4,r5}: base r1 */
     in = dec(ARM_T32, BASE);
-    assert(in.cls == A_LOADM && in.op == OP_NONE);
+    assert(in.cls == A_LOADM && in.op == OP_LDM && in.rn == 1 &&
+           in.writeback && !in.decrement && in.reglist == 0x0030);
 
     printf("  32-bit thumb operands          ok\n");
 }
@@ -668,6 +669,126 @@ static void test_bounds(void) {
     printf("  bounds                         ok\n");
 }
 
+/* --- forms the first run of a real module found missing ---------------------
+ *
+ * Encodings taken from GCC's own output for tests/vita/bridgetest, or worked
+ * out from the architecture manual. Three of these were translating WRONGLY
+ * rather than trapping, which is why each has an exact operand check. */
+
+static void test_bringup_forms(void) {
+    memset(code, 0, sizeof(code));
+    arm_insn in;
+
+    /* pop.w {r4-r11, pc}: a return that still restores eight registers and
+     * SP. It was classified as a return before its operands were filled in. */
+    put16(0, 0xE8BD); put16(2, 0x8FF0);
+    in = dec(ARM_T32, BASE);
+    assert(in.cls == A_RETURN && in.op == OP_POP && in.reglist == 0x8FF0);
+
+    /* stmia.w r6, {r0,r1}: no writeback, a struct copy. */
+    put16(0, 0xE886); put16(2, 0x0003);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_STM && in.rn == 6 && !in.writeback && !in.decrement);
+
+    /* stmia.w sp, {r0}: against SP but NOT a push — it must not move SP. */
+    put16(0, 0xE88D); put16(2, 0x0001);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_STM && in.rn == 13 && !in.writeback);
+
+    /* ldmdb r0!, {r1,r2} */
+    put16(0, 0xE930); put16(2, 0x0006);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDM && in.rn == 0 && in.writeback && in.decrement);
+
+    /* 16-bit: ldmia r2!, {r0,r1} writes back; ldmia r0, {r0,r1} does not,
+     * because the base is in the list. */
+    put16(0, 0xCA03);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDM && in.rn == 2 && in.writeback && in.reglist == 0x03);
+    put16(0, 0xC803);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDM && in.rn == 0 && !in.writeback);
+
+    /* clz r1, r1 */
+    put16(0, 0xFAB1); put16(2, 0xF181);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_CLZ && in.rd == 1 && in.rm == 1);
+
+    /* umull r3, r2, ip, r4 — division by a constant, from bridgetest's main */
+    put16(0, 0xFBAC); put16(2, 0x3204);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_UMULL && in.rn == 12 && in.rm == 4 && in.rt == 3 && in.rt2 == 2);
+    put16(0, 0xFB81); put16(2, 0x2003);       /* smull r2, r0, r1, r3 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_SMULL && in.rt == 2 && in.rt2 == 0);
+    put16(0, 0xFBC1); put16(2, 0x2003);
+    assert(dec(ARM_T32, BASE).op == OP_SMLAL);
+    put16(0, 0xFBE1); put16(2, 0x2003);
+    assert(dec(ARM_T32, BASE).op == OP_UMLAL);
+
+    /* mla r0, r1, r2, r3 / mls r0, r1, r2, r3 — Ra in rt */
+    put16(0, 0xFB01); put16(2, 0x3002);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_MLA && in.rd == 0 && in.rn == 1 && in.rm == 2 && in.rt == 3);
+    put16(0, 0xFB01); put16(2, 0x3012);
+    assert(dec(ARM_T32, BASE).op == OP_MLS);
+
+    /* vmov.f32 s12, #1.0 and vmov.f32 s11, #3.0 — both from bridgetest. The
+     * second has D set, and 0x08 is 3.0 by VFPExpandImm. */
+    put16(0, 0xEEB7); put16(2, 0x6A00);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_VMOV_IMM && in.vd == 12 && in.imm == 0x3F800000u);
+    put16(0, 0xEEF0); put16(2, 0x5A08);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_VMOV_IMM && in.vd == 11 && in.imm == 0x40400000u);
+    /* vmov.f64 d16, #1.0: high word only, D16 needs the D bit */
+    put16(0, 0xEEF7); put16(2, 0x0B00);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_VMOV_IMM && in.vfp_dp && in.vd == 16 && in.imm == 0x3FF00000u);
+
+    /* The multiply family by opc1 and op. vmul/vnmul share opc1 0x2;
+     * vnmls/vnmla share 0x1. Two of these four were decoded as each other. */
+    put16(0, 0xEE20); put16(2, 0x0A81);       /* vmul.f32  s0, s1, s2 */
+    assert(dec(ARM_T32, BASE).op == OP_VMUL);
+    put16(0, 0xEE20); put16(2, 0x0AC1);       /* vnmul.f32 s0, s1, s2 */
+    assert(dec(ARM_T32, BASE).op == OP_VNMUL);
+    put16(0, 0xEE10); put16(2, 0x0A81);       /* vnmls.f32 s0, s1, s2 */
+    assert(dec(ARM_T32, BASE).op == OP_VNMLS);
+    put16(0, 0xEE10); put16(2, 0x0AC1);       /* vnmla.f32 s0, s1, s2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_VNMLA && in.vd == 0 && in.vn == 1 && in.vm == 2);
+
+    /* uadd8 r5, r2, ip and sel r4, r4, ip: newlib's strcmp */
+    put16(0, 0xFA82); put16(2, 0xF54C);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_UADD8 && in.rd == 5 && in.rn == 2 && in.rm == 12);
+    put16(0, 0xFAA4); put16(2, 0xF48C);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_SEL && in.rd == 4 && in.rn == 4 && in.rm == 12);
+
+    /* NEON, from newlib's allocator. vmov.i32 d16, #0 and #5. */
+    put16(0, 0xEFC0); put16(2, 0x0010);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_IMM && in.neon_fn == NL_MOV && in.vd == 16 && in.imm64 == 0 && !in.neon_q);
+    put16(0, 0xEFC0); put16(2, 0x0015);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_IMM && in.imm64 == 0x0000000500000005ull);
+    /* vadd.i32 d16, d16, d17 */
+    put16(0, 0xEF60); put16(2, 0x08A1);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ADD && in.neon_size == 2 && in.vd == 16 && in.vn == 16 && in.vm == 17);
+    /* vorr d8, d16, d16 (the vmov alias) */
+    put16(0, 0xEF20); put16(2, 0x81B0);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_LOGIC && in.neon_fn == NL_ORR && in.vd == 8 && in.vn == 16 && in.vm == 16);
+    /* vmov.i8 q8, #0xFF: cmode 1110, Q set, a=1 bcd=111 efgh=1111 */
+    put16(0, 0xFFC7); put16(2, 0x0E5F);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_IMM && in.neon_q && in.vd == 16 && in.imm64 == ~0ull);
+
+    printf("  bring-up forms (ldm/stm, clz, long mul, vmov imm, vnm*)  ok\n");
+}
+
 int main(void) {
     printf("decode:\n");
     test_thumb_width();
@@ -686,6 +807,7 @@ int main(void) {
     test_vfp();
     test_it_block();
     test_bounds();
+    test_bringup_forms();
     printf("all decode tests passed\n");
     return 0;
 }

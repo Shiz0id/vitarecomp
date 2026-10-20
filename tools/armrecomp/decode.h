@@ -66,6 +66,11 @@ typedef enum {
     OP_SXTB, OP_SXTH, OP_UXTB, OP_UXTH, OP_REV,
     OP_IT, OP_NOP, OP_SVC, OP_CBZ, OP_CBNZ,
     OP_SBFX, OP_UBFX, OP_BFI, OP_BFC,
+    OP_CLZ,
+    OP_UADD8, OP_USUB8, OP_UADD16, OP_USUB16, OP_SEL,   /* GE-setting / reading */
+    OP_MLA, OP_MLS,                     /* rd = ra +/- rn * rm; ra in rt          */
+    OP_UMULL, OP_SMULL, OP_UMLAL, OP_SMLAL, /* rt = RdLo, rt2 = RdHi            */
+    OP_LDM, OP_STM,                     /* general base; `decrement` for DB       */
 
     /* Scalar VFP. Not vector work — 82% of this platform's coprocessor traffic
      * is ordinary floating point, and it maps onto C almost one to one. */
@@ -81,7 +86,20 @@ typedef enum {
     OP_VLDM, OP_VSTM,   /* register-list float load/store, incl. VPUSH/VPOP */
     OP_VMLA, OP_VMLS,   /* multiply-accumulate: vd = vd +/- (vn * vm)       */
     OP_VNMUL,
+    OP_VNMLA, OP_VNMLS, /* vd = -vd - (vn * vm)  /  vd = -vd + (vn * vm)   */
+    OP_VMOV_IMM,        /* vd = VFPExpandImm(imm8), the bits held in imm   */
+
+    /* Advanced SIMD (NEON). Registers are D numbers 0-31 in vd/vn/vm; a Q
+     * operation (neon_q) covers the aligned pair d, d+1. */
+    OP_NEON_ADD, OP_NEON_SUB,   /* integer, lanes of 8 << neon_size bits   */
+    OP_NEON_LOGIC,              /* neon_fn: an arm_neon_logic              */
+    OP_NEON_IMM,                /* neon_fn: an arm_neon_logic; imm64 below */
 } arm_op;
+
+typedef enum {
+    NL_AND, NL_BIC, NL_ORR, NL_ORN, NL_EOR, NL_BSL, NL_BIT, NL_BIF,
+    NL_MOV, NL_MVN,             /* immediate forms only */
+} arm_neon_logic;
 
 /* Shift types, in the architecture's encoding order. */
 typedef enum { SH_LSL = 0, SH_LSR = 1, SH_ASR = 2, SH_ROR = 3 } arm_shift;
@@ -122,6 +140,11 @@ typedef struct {
     uint16_t   reglist;         /* PUSH/POP/LDM/STM                      */
     uint8_t    cond;            /* ARM_COND_AL when unconditional        */
     uint8_t    writeback;
+    uint8_t    decrement;       /* LDM/STM: DB (decrement before) vs IA   */
+    uint8_t    neon_q;          /* NEON: quadword (two D registers)       */
+    uint8_t    neon_size;       /* NEON: lane size, 0..3 = 8..64 bits      */
+    uint8_t    neon_fn;         /* NEON: arm_neon_logic                    */
+    uint64_t   imm64;           /* NEON: expanded modified immediate       */
     uint8_t    mem_add;         /* U bit: offset added rather than subtracted */
     uint8_t    it_mask;         /* IT: which of the next 4 are conditional */
 

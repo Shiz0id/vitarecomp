@@ -54,6 +54,11 @@ extern VITA_TLS uint32_t sp, lr;
  * generated C readable. */
 extern VITA_TLS int flag_n, flag_z, flag_c, flag_v;
 
+/* APSR.GE, four bits, one per byte lane. Written by the ARMv6 parallel
+ * add/subtract instructions and read by SEL — the pair newlib's strcmp and
+ * memchr use to test a word four bytes at a time. CPSR bits 19:16. */
+extern VITA_TLS uint32_t flag_ge;
+
 #ifdef __cplusplus
 }
 #endif

@@ -41,3 +41,34 @@ generated/
 # wholesale here.
 !third_party/Vita3K/**/
 !third_party/Vita3K/**
+
+# Vita3K's submodule dependencies, fetched locally for a build; never committed.
+# third_party/VITA3K.md pins their commits.
+/third_party/Vita3K/external/LibAtrac9
+/third_party/Vita3K/external/SPIRV-Cross
+/third_party/Vita3K/external/VulkanMemoryAllocator-Hpp
+/third_party/Vita3K/external/boost
+/third_party/Vita3K/external/capstone
+/third_party/Vita3K/external/concurrentqueue
+/third_party/Vita3K/external/cubeb
+/third_party/Vita3K/external/dirent
+/third_party/Vita3K/external/dlmalloc
+/third_party/Vita3K/external/dynarmic
+/third_party/Vita3K/external/ffmpeg
+/third_party/Vita3K/external/fmt
+/third_party/Vita3K/external/glslang
+/third_party/Vita3K/external/googletest
+/third_party/Vita3K/external/libadrenotools
+/third_party/Vita3K/external/libfat16
+/third_party/Vita3K/external/nativefiledialog-extended
+/third_party/Vita3K/external/printf
+/third_party/Vita3K/external/psvpfstools
+/third_party/Vita3K/external/pugixml
+/third_party/Vita3K/external/sdl
+/third_party/Vita3K/external/spdlog
+/third_party/Vita3K/external/stb
+/third_party/Vita3K/external/substitute
+/third_party/Vita3K/external/tracy
+/third_party/Vita3K/external/vita-toolchain
+/third_party/Vita3K/external/xxHash
+/third_party/Vita3K/external/yaml-cpp

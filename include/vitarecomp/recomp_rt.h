@@ -12,6 +12,7 @@
 #include "cpu.h"
 #include "mem.h"
 #include "vfp.h"
+#include "neon.h"
 
 #include <math.h>
 
@@ -121,6 +122,63 @@ static inline uint32_t vita_sxtb(uint32_t v) { return (uint32_t)(int32_t)(int8_t
 static inline uint32_t vita_sxth(uint32_t v) { return (uint32_t)(int32_t)(int16_t)(v & 0xFFFF); }
 static inline uint32_t vita_uxtb(uint32_t v) { return v & 0xFF; }
 static inline uint32_t vita_uxth(uint32_t v) { return v & 0xFFFF; }
+
+/* --- parallel add/subtract and SEL -------------------------------------------
+ *
+ * Byte- or halfword-wise arithmetic in a core register, with a GE bit per
+ * byte recording carry-out (add) or no-borrow (subtract). The 16-bit forms
+ * set both GE bits of their lane. SEL then picks each result byte from rn
+ * where GE is set and from rm where it is not.
+ */
+
+static inline uint32_t vita_uadd8(uint32_t a, uint32_t b) {
+    uint32_t r = 0, ge = 0;
+    for (int i = 0; i < 4; i++) {
+        uint32_t s = ((a >> (8 * i)) & 0xFF) + ((b >> (8 * i)) & 0xFF);
+        r |= (s & 0xFF) << (8 * i);
+        if (s >= 0x100) ge |= 1u << i;
+    }
+    flag_ge = ge;
+    return r;
+}
+
+static inline uint32_t vita_usub8(uint32_t a, uint32_t b) {
+    uint32_t r = 0, ge = 0;
+    for (int i = 0; i < 4; i++) {
+        uint32_t x = (a >> (8 * i)) & 0xFF, y = (b >> (8 * i)) & 0xFF;
+        r |= ((x - y) & 0xFF) << (8 * i);
+        if (x >= y) ge |= 1u << i;
+    }
+    flag_ge = ge;
+    return r;
+}
+
+static inline uint32_t vita_uadd16(uint32_t a, uint32_t b) {
+    uint32_t lo = (a & 0xFFFF) + (b & 0xFFFF), hi = (a >> 16) + (b >> 16);
+    flag_ge = (lo >= 0x10000 ? 0x3u : 0u) | (hi >= 0x10000 ? 0xCu : 0u);
+    return (lo & 0xFFFF) | (hi << 16);
+}
+
+static inline uint32_t vita_usub16(uint32_t a, uint32_t b) {
+    uint32_t xl = a & 0xFFFF, yl = b & 0xFFFF, xh = a >> 16, yh = b >> 16;
+    flag_ge = (xl >= yl ? 0x3u : 0u) | (xh >= yh ? 0xCu : 0u);
+    return ((xl - yl) & 0xFFFF) | (((xh - yh) & 0xFFFF) << 16);
+}
+
+static inline uint32_t vita_sel(uint32_t n, uint32_t m) {
+    uint32_t r = 0;
+    for (int i = 0; i < 4; i++)
+        r |= (((flag_ge >> i) & 1) ? n : m) & (0xFFu << (8 * i));
+    return r;
+}
+
+/* CLZ. __builtin_clz(0) is undefined, and ARM defines CLZ of zero as 32. */
+static inline uint32_t vita_clz(uint32_t v) {
+    uint32_t n = 0;
+    if (!v) return 32;
+    while (!(v & 0x80000000u)) { v <<= 1; n++; }
+    return n;
+}
 
 static inline uint32_t vita_rev(uint32_t v) {
     return ((v & 0xFF) << 24) | ((v & 0xFF00) << 8)
