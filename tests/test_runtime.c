@@ -569,6 +569,206 @@ static void test_neon_lanes(void) {
     printf("ok   neon lanes: ceq/tst on every lane size, padd, movn, dup, lane moves\n");
 }
 
+/* Lanes of 8 << size bits packed low lane first into one D word, and the same
+ * value in every lane. Declared here, ahead of pack_lanes and rep_lane, which
+ * come later in the file. */
+static uint64_t qd_pack(const uint64_t *v, int size, int n) {
+    int w = 8 << size;
+    uint64_t r = 0;
+    for (int i = 0; i < n; i++)
+        r |= (v[i] & neon_lmask(size)) << (i * w);
+    return r;
+}
+
+static uint64_t qd_rep(uint64_t v, int size) {
+    uint64_t r = 0;
+    for (int i = 0; i < 64 / (8 << size); i++)
+        r |= (v & neon_lmask(size)) << (i * (8 << size));
+    return r;
+}
+
+/* VQDMULH, VQRDMULH, VQDMULL, VQDMLAL and VQDMLSL, worked out from the
+ * definitions. These are the cases where plain C goes wrong: the doubled
+ * product of two 16-bit lanes is one bit past int16, a negative product
+ * shifted right truncates toward zero where the architecture floors, and an
+ * accumulate sum wraps where it must saturate. The arithmetic for each case is
+ * given in the comment beside it. */
+static void test_neon_qdmul_c(void) {
+    /* VQDMULH at 16 bits: sat((2ab) >> 16), floored. The product of the two
+     * lanes 0x8000 is 2^31, which saturates to 0x7FFF. 0x8000 * 0x7FFF doubles
+     * to -2147418112 = -32767 * 2^16, so the result is -32767 (0x8001). 0x4000
+     * squared doubles to 2^29, giving 2^13 = 0x2000. -1 * 0x4000 doubles to
+     * -32768, which is -0.5 and floors to -1, where truncation would give 0. */
+    assert(neon_qdmulh(qd_rep(0x8000, 1), qd_rep(0x8000, 1), 1, 0) == qd_rep(0x7FFF, 1));
+    assert(neon_qdmulh(qd_rep(0x8000, 1), qd_rep(0x7FFF, 1), 1, 0) == qd_rep(0x8001, 1));
+    assert(neon_qdmulh(qd_rep(0x4000, 1), qd_rep(0x4000, 1), 1, 0) == qd_rep(0x2000, 1));
+    assert(neon_qdmulh(qd_rep(0xFFFF, 1), qd_rep(0x0001, 1), 1, 0) == qd_rep(0xFFFF, 1));
+    assert(neon_qdmulh(qd_rep(0xFFFF, 1), qd_rep(0x4000, 1), 1, 0) == qd_rep(0xFFFF, 1));
+
+    /* The same at 32 bits: min * min saturates to 0x7FFFFFFF; 2^30 squared
+     * doubles to 2^61, which is 2^29 after the shift; -1 * 2^30 is -0.5 and
+     * floors to -1. */
+    assert(neon_qdmulh(qd_rep(0x80000000, 2), qd_rep(0x80000000, 2), 2, 0) == qd_rep(0x7FFFFFFF, 2));
+    assert(neon_qdmulh(qd_rep(0x40000000, 2), qd_rep(0x40000000, 2), 2, 0) == qd_rep(0x20000000, 2));
+    assert(neon_qdmulh(qd_rep(0xFFFFFFFF, 2), qd_rep(0x40000000, 2), 2, 0) == qd_rep(0xFFFFFFFF, 2));
+    /* The most negative product that does not saturate: min * max doubles to
+     * -(2^63 - 2^32), which is -(2^31 - 1) after the shift, and rounding
+     * changes it by less than one unit. For VQDMULH this is the case where a
+     * floor written as (-t + 2^32 - 1) / 2^32 overflows int64; VQRDMULH is
+     * checked alongside it. */
+    assert(neon_qdmulh(qd_rep(0x80000000, 2), qd_rep(0x7FFFFFFF, 2), 2, 0) == qd_rep(0x80000001, 2));
+    assert(neon_qdmulh(qd_rep(0x80000000, 2), qd_rep(0x7FFFFFFF, 2), 2, 1) == qd_rep(0x80000001, 2));
+
+    /* Lanes that differ, so a lane mixed up with another shows. The second
+     * row is the one that saturates in lane 0. */
+    uint64_t hn[4] = { 0x8000, 0x4000, 0x7FFF, 0x0001 }, hm[4] = { 0x8000, 0x8000, 0x8000, 0x8000 };
+    assert(neon_qdmulh(qd_pack(hn, 1, 4), qd_pack(hm, 1, 4), 1, 0) == qd_pack((uint64_t[]){ 0x7FFF, 0xC000, 0x8001, 0xFFFF }, 1, 4));
+
+    /* VQRDMULH adds 2^(w-1) before the shift: sat((2ab + 2^(w-1)) >> w).
+     * min * min is the only saturating pair. Its doubled product 2^31 plus the
+     * rounding 2^15 is shifted by 16 to 2^15 + 0.5, which floors to 32768, one
+     * past the top. No other pair reaches the top. -1 * 1 rounds to
+     * (-2 + 32768) >> 16 = 0, and 1 * 0x4000 to (32768 + 32768) >> 16 = 1. */
+    assert(neon_qdmulh(qd_rep(0x8000, 1), qd_rep(0x8000, 1), 1, 1) == qd_rep(0x7FFF, 1));
+    assert(neon_qdmulh(qd_rep(0xFFFF, 1), qd_rep(0x0001, 1), 1, 1) == qd_rep(0x0000, 1));
+    assert(neon_qdmulh(qd_rep(0x0001, 1), qd_rep(0x4000, 1), 1, 1) == qd_rep(0x0001, 1));
+    assert(neon_qdmulh(qd_rep(0xFFFF, 1), qd_rep(0x4000, 1), 1, 1) == qd_rep(0x0000, 1));
+    assert(neon_qdmulh(qd_rep(0x80000000, 2), qd_rep(0x80000000, 2), 2, 1) == qd_rep(0x7FFFFFFF, 2));
+    assert(neon_qdmulh(qd_rep(0x00000001, 2), qd_rep(0x40000000, 2), 2, 1) == qd_rep(0x00000001, 2));
+    /* Lane 3 is -1 * 0x4000: VQRDMULH rounds it to 0, and VQDMULH floors it to -1. */
+    uint64_t rn[4] = { 0x8000, 0x4000, 0x7FFF, 0xFFFF }, rm[4] = { 0x8000, 0x8000, 0x8000, 0x4000 };
+    assert(neon_qdmulh(qd_pack(rn, 1, 4), qd_pack(rm, 1, 4), 1, 1)
+           == qd_pack((uint64_t[]){ 0x7FFF, 0xC000, 0x8001, 0x0000 }, 1, 4));
+    assert(neon_qdmulh(qd_pack(rn, 1, 4), qd_pack(rm, 1, 4), 1, 0)
+           == qd_pack((uint64_t[]){ 0x7FFF, 0xC000, 0x8001, 0xFFFF }, 1, 4));
+
+    /* VQDMULL: the doubled product of two 16-bit lanes is a 32-bit lane. The
+     * min * min lane is 2^31, which saturates to 0x7FFFFFFF. -3 * 5 doubles
+     * to -30. Lanes 0 and 1 go to r[0], lanes 2 and 3 to r[1]. */
+    uint64_t r[2];
+    uint64_t ln[4] = { 0x8000, 0x8000, 0x0003, 0xFFFD }, lm[4] = { 0x8000, 0x7FFF, 0x0005, 0x0005 };
+    neon_qdmull(r, qd_pack(ln, 1, 4), qd_pack(lm, 1, 4), 1);
+    assert(r[0] == ((0x80010000ull << 32) | 0x7FFFFFFFull));   /* lane 1: -32768 * 32767 * 2 */
+    assert(r[1] == ((0xFFFFFFE2ull << 32) | 0x0000001Eull));  /* lanes 2, 3: 30 and -30 */
+    neon_qdmull(r, qd_rep(0x8000, 1), qd_rep(0x8000, 1), 1);
+    assert(r[0] == 0x7FFFFFFF7FFFFFFFull && r[1] == 0x7FFFFFFF7FFFFFFFull);
+    /* 64-bit lanes: min * min doubles to 2^63, which saturates to the int64
+     * maximum. Lane 1 is 2 * 2^30 * -2^31 = -2^62. */
+    uint64_t sn[2] = { 0x80000000, 0x40000000 }, sm[2] = { 0x80000000, 0x80000000 };
+    neon_qdmull(r, qd_pack(sn, 2, 2), qd_pack(sm, 2, 2), 2);
+    assert(r[0] == 0x7FFFFFFFFFFFFFFFull && r[1] == 0xC000000000000000ull);
+
+    /* VQDMLAL and VQDMLSL, 16-bit sources (32-bit wide lanes). The product
+     * saturates first, then the accumulate saturates on its own. A full
+     * accumulator plus a positive product stays at the top; a minimum
+     * accumulator minus a positive product stays at the bottom. */
+    uint64_t acc_max[2] = { 0x7FFFFFFF7FFFFFFFull, 0x7FFFFFFF7FFFFFFFull };
+    uint64_t acc_min[2] = { 0x8000000080000000ull, 0x8000000080000000ull };
+    uint64_t acc_neg1[2] = { 0xFFFFFFFFFFFFFFFFull, 0xFFFFFFFFFFFFFFFFull };
+    uint64_t acc_1[2] = { 0x0000000100000001ull, 0x0000000100000001ull };
+    r[0] = acc_max[0]; r[1] = acc_max[1];
+    neon_qdmlal(r, qd_rep(0x4000, 1), qd_rep(0x4000, 1), 1, 0);   /* 0x7FFFFFFF + 2^29: top */
+    assert(r[0] == acc_max[0] && r[1] == acc_max[1]);
+    r[0] = acc_min[0]; r[1] = acc_min[1];
+    neon_qdmlal(r, qd_rep(0x0001, 1), qd_rep(0x8000, 1), 1, 0);   /* -2^31 - 65536: bottom */
+    assert(r[0] == acc_min[0] && r[1] == acc_min[1]);
+    r[0] = acc_min[0]; r[1] = acc_min[1];
+    neon_qdmlal(r, qd_rep(0x4000, 1), qd_rep(0x4000, 1), 1, 1);   /* -2^31 - 2^29: bottom */
+    assert(r[0] == acc_min[0] && r[1] == acc_min[1]);
+    /* min * min: the product saturates to 0x7FFFFFFF before it is added to -1,
+     * so the sum is 0x7FFFFFFE. Wrapping the doubled product first would give
+     * -2^31 instead, and -2^31 - 1 wraps again. For VQDMLSL, 1 minus 0x7FFFFFFF
+     * is -0x7FFFFFFE, which is 0x80000002. */
+    r[0] = acc_neg1[0]; r[1] = acc_neg1[1];
+    neon_qdmlal(r, qd_rep(0x8000, 1), qd_rep(0x8000, 1), 1, 0);
+    assert(r[0] == 0x7FFFFFFE7FFFFFFEull && r[1] == 0x7FFFFFFE7FFFFFFEull);
+    r[0] = acc_1[0]; r[1] = acc_1[1];
+    neon_qdmlal(r, qd_rep(0x8000, 1), qd_rep(0x8000, 1), 1, 1);
+    assert(r[0] == 0x8000000280000002ull && r[1] == 0x8000000280000002ull);
+    /* Ordinary: 3 * 5 doubles to 30, so 100 + 30 is 130 and 100 - 30 is 70,
+     * in each 32-bit wide lane of r[0] and r[1]. */
+    uint64_t acc_100 = qd_pack((uint64_t[]){ 100, 100 }, 2, 2);
+    r[0] = acc_100; r[1] = acc_100;
+    neon_qdmlal(r, qd_rep(0x0003, 1), qd_rep(0x0005, 1), 1, 0);
+    assert(r[0] == qd_pack((uint64_t[]){ 130, 130 }, 2, 2) && r[1] == r[0]);
+    r[0] = acc_100; r[1] = acc_100;
+    neon_qdmlal(r, qd_rep(0x0003, 1), qd_rep(0x0005, 1), 1, 1);
+    assert(r[0] == qd_pack((uint64_t[]){ 70, 70 }, 2, 2) && r[1] == r[0]);
+
+    /* VQDMLAL and VQDMLSL, 32-bit sources (64-bit wide lanes). The 64-bit sum
+     * can overflow, so it saturates by a sign test. At the top, the max plus
+     * 2^61 stays max. At the bottom, min minus 2^61 stays min. min * min
+     * saturates to the maximum product, so -1 + max is max - 1, and 0 - max
+     * is -(2^63 - 1), which is 0x8000000000000001 and is exact. Starting from
+     * -2, the subtraction -2 - max overflows and saturates to the minimum. */
+    uint64_t big_max[2] = { 0x7FFFFFFFFFFFFFFFull, 0x7FFFFFFFFFFFFFFFull };
+    uint64_t big_min[2] = { 0x8000000000000000ull, 0x8000000000000000ull };
+    uint64_t n32[2] = { 0x40000000, 0x40000000 };
+    r[0] = big_max[0]; r[1] = big_max[1];
+    neon_qdmlal(r, qd_pack(n32, 2, 2), qd_pack(n32, 2, 2), 2, 0);
+    assert(r[0] == big_max[0] && r[1] == big_max[1]);
+    r[0] = big_min[0]; r[1] = big_min[1];
+    neon_qdmlal(r, qd_pack(n32, 2, 2), qd_pack(n32, 2, 2), 2, 1);
+    assert(r[0] == big_min[0] && r[1] == big_min[1]);
+    uint64_t mm[2] = { 0x80000000, 0x80000000 };
+    uint64_t acc_m1[2] = { 0xFFFFFFFFFFFFFFFFull, 0xFFFFFFFFFFFFFFFFull };
+    uint64_t acc_0[2] = { 0, 0 }, acc_m2[2] = { 0xFFFFFFFFFFFFFFFEull, 0xFFFFFFFFFFFFFFFEull };
+    r[0] = acc_m1[0]; r[1] = acc_m1[1];
+    neon_qdmlal(r, qd_pack(mm, 2, 2), qd_pack(mm, 2, 2), 2, 0);
+    assert(r[0] == 0x7FFFFFFFFFFFFFFEull && r[1] == 0x7FFFFFFFFFFFFFFEull);
+    r[0] = acc_0[0]; r[1] = acc_0[1];
+    neon_qdmlal(r, qd_pack(mm, 2, 2), qd_pack(mm, 2, 2), 2, 1);
+    assert(r[0] == 0x8000000000000001ull && r[1] == 0x8000000000000001ull);
+    r[0] = acc_m2[0]; r[1] = acc_m2[1];
+    neon_qdmlal(r, qd_pack(mm, 2, 2), qd_pack(mm, 2, 2), 2, 1);
+    assert(r[0] == big_min[0] && r[1] == big_min[1]);
+    uint64_t acc_t[2] = { 1, 2 };
+    r[0] = acc_t[0]; r[1] = acc_t[1];
+    neon_qdmlal(r, qd_pack(n32, 2, 2), qd_pack(n32, 2, 2), 2, 0);  /* 1 + 2^61, 2 + 2^61 */
+    assert(r[0] == 0x2000000000000001ull && r[1] == 0x2000000000000002ull);
+    r[0] = acc_t[0]; r[1] = acc_t[1];
+    neon_qdmlal(r, qd_pack(n32, 2, 2), qd_pack(n32, 2, 2), 2, 1);  /* 1 - 2^61, 2 - 2^61 */
+    assert(r[0] == 0xE000000000000001ull && r[1] == 0xE000000000000002ull);
+
+    /* By scalar. The scalar is a lane of the second D word, broadcast, and
+     * these pick a lane other than 0 so a wrong index gives a wrong answer.
+     * VQDMULH.S16 by m[2] = 0x8000: n lanes 0x8000, 0x4000, 0x7FFF, 0x0001. */
+    uint64_t sm16[4] = { 0x0010, 0x0020, 0x8000, 0x0001 };
+    uint64_t sn16[4] = { 0x8000, 0x4000, 0x7FFF, 0x0001 };
+    assert(neon_qdmulh(qd_pack(sn16, 1, 4), neon_dup_lane(qd_pack(sm16, 1, 4), 1, 2), 1, 0)
+           == qd_pack((uint64_t[]){ 0x7FFF, 0xC000, 0x8001, 0xFFFF }, 1, 4));
+    /* VQRDMULH.S32 by m[1] = 0x80000000: n lanes min and 2^30. */
+    uint64_t sm32[2] = { 0x00000001, 0x80000000 }, sn32[2] = { 0x80000000, 0x40000000 };
+    assert(neon_qdmulh(qd_pack(sn32, 2, 2), neon_dup_lane(qd_pack(sm32, 2, 2), 2, 1), 2, 1)
+           == qd_pack((uint64_t[]){ 0x7FFFFFFF, 0xC0000000 }, 2, 2));
+    /* VMLA.I16 by d[2] = 7: d + n * 7 per lane. VMLS.I32 by m[1] = 4. */
+    uint64_t vd16[4] = { 1, 2, 3, 4 }, vn16[4] = { 10, 20, 30, 40 }, vm16[4] = { 5, 6, 7, 8 };
+    assert(neon_mla(qd_pack(vd16, 1, 4), qd_pack(vn16, 1, 4), neon_dup_lane(qd_pack(vm16, 1, 4), 1, 2), 1)
+           == qd_pack((uint64_t[]){ 71, 142, 213, 284 }, 1, 4));
+    uint64_t vd32[2] = { 100, 200 }, vn32[2] = { 3, 5 }, vm32[2] = { 9, 4 };
+    assert(neon_mls(qd_pack(vd32, 2, 2), qd_pack(vn32, 2, 2), neon_dup_lane(qd_pack(vm32, 2, 2), 2, 1), 2)
+           == qd_pack((uint64_t[]){ 88, 180 }, 2, 2));
+    /* VMLAL.S16 by m[1] = -10: the widened products are 20, -30, -40, -50. */
+    uint64_t wn[4] = { 0xFFFE, 0x0003, 0x0004, 0x0005 }, wm[4] = { 0x0005, 0xFFF6, 0x0007, 0x0009 };
+    uint64_t wr[2] = { qd_pack((uint64_t[]){ 1000, 2000 }, 2, 2), qd_pack((uint64_t[]){ 3000, 4000 }, 2, 2) };
+    neon_wide_mac(wr, qd_pack(wn, 1, 4), neon_dup_lane(qd_pack(wm, 1, 4), 1, 1), 1, 0, 0);
+    assert(wr[0] == qd_pack((uint64_t[]){ 1020, 1970 }, 2, 2));
+    assert(wr[1] == qd_pack((uint64_t[]){ 2960, 3950 }, 2, 2));
+    /* VQDMULL.S16 by m[2] = 0x8000: the lanes are 0x7FFFFFFF, and -3 * 2^16,
+     * -4 * 2^16 and -5 * 2^16 for the others, as 32-bit lanes. */
+    uint64_t qm16[4] = { 0x0001, 0x0002, 0x8000, 0x0003 }, qn16[4] = { 0x8000, 0x0003, 0x0004, 0x0005 };
+    neon_qdmull(r, qd_pack(qn16, 1, 4), neon_dup_lane(qd_pack(qm16, 1, 4), 1, 2), 1);
+    assert(r[0] == ((0xFFFD0000ull << 32) | 0x7FFFFFFFull));
+    assert(r[1] == ((0xFFFB0000ull << 32) | 0xFFFC0000ull));
+    /* VQDMLAL.S32 by m[1] = 2^30: products 2^61 and -2^62, added to 1 and 2. */
+    uint64_t qn32[2] = { 0x40000000, 0x80000000 }, qm32[2] = { 0, 0x40000000 };
+    r[0] = 1; r[1] = 2;
+    neon_qdmlal(r, qd_pack(qn32, 2, 2), neon_dup_lane(qd_pack(qm32, 2, 2), 2, 1), 2, 0);
+    assert(r[0] == 0x2000000000000001ull && r[1] == 0xC000000000000002ull);
+
+    printf("ok   neon vqdmulh, vqrdmulh, vqdmull, vqdmlal, vqdmlsl: saturation, floor, rounding, lanes, scalars\n");
+}
+
 /* --- Advanced SIMD single precision ----------------------------------------- */
 
 static uint32_t f32_bits(float f) {
@@ -2372,6 +2572,7 @@ int main(void) {
     test_exclusive();
     test_shifter_carry();
     test_neon_lanes();
+    test_neon_qdmul_c();
     test_neon_f32();
     test_neon_f32_b();
     test_neon_int_c();

@@ -165,6 +165,36 @@ int main(void) {
     T("vdup.8 lane",         "vdup.8 d0, d1[5]");
     T("vdup.16 q lane",      "vdup.16 q0, d3[2]");
     T("vdup.32 lane",        "vdup.32 d0, d7[1]");
+    T("vqdmulh.s16 d",       "vqdmulh.s16 d0, d1, d2");
+    T("vqdmulh.s32 d",       "vqdmulh.s32 d0, d1, d2");
+    T("vqdmulh.s16 q",       "vqdmulh.s16 q0, q1, q2");
+    T("vqdmulh.s32 q=n",     "vqdmulh.s32 q0, q0, q1");
+    T("vqrdmulh.s16 q",      "vqrdmulh.s16 q0, q1, q2");
+    T("vqrdmulh.s32 d",      "vqrdmulh.s32 d0, d1, d2");
+    T("vqrdmulh.s16 d=m",    "vqrdmulh.s16 d0, d1, d0");
+    T("vqrdmulh.s32 q",      "vqrdmulh.s32 q0, q1, q2");
+    T("vmla.i16 d lane",     "vmla.i16 d0, d1, d2[1]");
+    T("vmla.i32 q lane",     "vmla.i32 q0, q1, d2[1]");
+    T("vmls.i16 q lane",     "vmls.i16 q0, q1, d3[3]");
+    T("vmls.i32 d lane",     "vmls.i32 d0, d1, d7[0]");
+    T("vmul.i16 d lane",     "vmul.i16 d0, d1, d2[3]");
+    T("vmul.i32 q scalar in Qd", "vmul.i32 q0, q1, d1[1]");
+    T("vmlal.s16 lane",      "vmlal.s16 q0, d1, d2[0]");
+    T("vmlal.u32 lane",      "vmlal.u32 q0, d1, d3[1]");
+    T("vmlsl.u16 lane",      "vmlsl.u16 q1, d2, d7[3]");
+    T("vmlsl.s32 lane",      "vmlsl.s32 q0, d1, d2[0]");
+    T("vmull.s16 lane",      "vmull.s16 q1, d2, d3[2]");
+    T("vmull.s16 Dn in Qd",  "vmull.s16 q0, d0, d1[2]");
+    T("vmull.u32 lane",      "vmull.u32 q1, d2, d3[1]");
+    T("vqdmull.s16 lane",    "vqdmull.s16 q0, d1, d2[1]");
+    T("vqdmull.s32 lane",    "vqdmull.s32 q1, d2, d3[1]");
+    /* No VQDMULL/VQDMLAL/VQDMLSL (vector) nor VQDMLAL/VQDMLSL (scalar): dynarmic
+     * does not implement them, so stock has no result to compare; they are
+     * checked against an independent reference instead. */
+    T("vqdmulh.s16 d lane",  "vqdmulh.s16 d0, d1, d2[2]");
+    T("vqdmulh.s32 q lane",  "vqdmulh.s32 q0, q1, d3[1]");
+    T("vqrdmulh.s16 q lane", "vqrdmulh.s16 q0, q1, d7[2]");
+    T("vqrdmulh.s32 d lane", "vqrdmulh.s32 d0, d1, d7[1]");
     T("vtbl1",               "vmov.i8 d2, #0x05\n vtbl.8 d0, {d1}, d2");
     T("vtbl4",               "vmov.i8 d6, #30\n vtbl.8 d0, {d1-d4}, d6");
     T("vtbl range",          "vmov.i8 d6, #33\n vtbl.8 d0, {d1-d4}, d6");

@@ -1328,9 +1328,9 @@ static void test_homebrew_forms(void) {
     put16(0, 0xEF32); put16(2, 0x0844);                  /* vadd.i64 q0, q1, q2 */
     in = dec(ARM_T32, BASE);
     assert(in.op == OP_NEON_ADD && in.op != OP_NEON_QADD);
-    put16(0, 0xEF11); put16(2, 0x0B02);                  /* vqdmulh.s16 d0, d1, d2 (not claimed) */
+    put16(0, 0xEF11); put16(2, 0x0B02);                  /* vqdmulh.s16 d0, d1, d2 */
     in = dec(ARM_T32, BASE);
-    assert(in.op != OP_NEON_QADD && in.op != OP_NEON_MUL);
+    assert(in.op == OP_NEON_QDMULH);
 
     /* Shifts by immediate. L:imm6 (h2 bit 7 and h1 bits 5:0) gives the size and
      * amount: VSHR is opc 0000 and VSRA 0001 (right, amount 2*esize - L:imm6),
@@ -2807,6 +2807,271 @@ static void test_neon_cmp_forms(void) {
     printf("ok   neon compares, max/min, absolute difference, vaba, and their rejects\n");
 }
 
+/* VQDMULH and VQRDMULH, the long VQDMULL, VQDMLAL and VQDMLSL, and the integer
+ * forms by scalar with their saturating and long kin. Each encoding was taken
+ * from arm-vita-eabi-as and checked by objdump. The scalar index is read two
+ * ways: at 16-bit it is M:h2[3] with Vm = h2[2:0], and at 32-bit it is M with
+ * Vm = h2[3:0], so d2[1] and d2[2] (16-bit) and d15[1] (32-bit) pin both.
+ * The rejects are computed from the layout, and each comment gives the bit
+ * that refuses it. */
+static void test_neon_qdmul_forms(void) {
+    arm_insn in;
+
+    /* VQDMULH and VQRDMULH, same length: opc 1011 with B clear, U the rounding. */
+    put16(0, 0xEF11); put16(2, 0x0B02);                  /* vqdmulh.s16 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QDMULH && in.vd == 0 && in.vn == 1 && in.vm == 2);
+    assert(!in.neon_q && in.neon_size == 1 && !in.has_imm && strcmp(in.mnemonic, "vqdmulh.s16") == 0);
+    put16(0, 0xEF22); put16(2, 0x0B44);                  /* vqdmulh.s32 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QDMULH && in.vd == 0 && in.vn == 2 && in.vm == 4);
+    assert(in.neon_q && in.neon_size == 2 && strcmp(in.mnemonic, "vqdmulh.s32") == 0);
+    put16(0, 0xFF52); put16(2, 0x0BE4);                  /* vqrdmulh.s16 q8, q9, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QRDMULH && in.vd == 16 && in.vn == 18 && in.vm == 20);
+    assert(in.neon_q && in.neon_size == 1 && strcmp(in.mnemonic, "vqrdmulh.s16") == 0);
+    put16(0, 0xFF24); put16(2, 0x3B05);                  /* vqrdmulh.s32 d3, d4, d5 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QRDMULH && in.vd == 3 && in.vn == 4 && in.vm == 5);
+    assert(!in.neon_q && in.neon_size == 2 && strcmp(in.mnemonic, "vqrdmulh.s32") == 0);
+
+    /* VPADD (opc 1011 with B set) is claimed above the new VQDMULH branch, so
+     * it must still be OP_NEON_PADD. */
+    put16(0, 0xEF11); put16(2, 0x0B12);                  /* vpadd.i16 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_PADD && in.vd == 0 && in.vn == 1 && in.vm == 2 && in.neon_size == 1);
+
+    /* Rejects. Size 00 and size 11 are UNDEFINED: h1 bits 5:4 are 00 or 11,
+     * and the size test refuses both, so neither reads as VQDMULH. Q set with
+     * Vd = d1 is odd, and a Q form needs every register even. */
+    put16(0, 0xEF01); put16(2, 0x0B02);                  /* vqdmulh, size 00 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xEF31); put16(2, 0x0B02);                  /* vqdmulh, size 11 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xEF11); put16(2, 0x1B42);                  /* vqdmulh q, Vd = d1: odd */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+
+    /* VQDMULL, VQDMLAL and VQDMLSL, different lengths: opc 1101, 1001 and 1011,
+     * U clear, source size 16 or 32 (h1 bits 5:4), and Qd a Q pair twice as
+     * wide as the source lanes. */
+    put16(0, 0xEF91); put16(2, 0x0D02);                  /* vqdmull.s16 q0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QDMULL && in.vd == 0 && in.vn == 1 && in.vm == 2);
+    assert(in.neon_size == 1 && !in.vfp_unsigned && !in.neon_q && !in.has_imm);
+    assert(strcmp(in.mnemonic, "vqdmull.s16") == 0);
+    put16(0, 0xEFE1); put16(2, 0x0DA2);                  /* vqdmull.s32 q8, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QDMULL && in.vd == 16 && in.vn == 17 && in.vm == 18);
+    assert(in.neon_size == 2 && strcmp(in.mnemonic, "vqdmull.s32") == 0);
+    put16(0, 0xEF91); put16(2, 0x0902);                  /* vqdmlal.s16 q0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QDMLAL && in.vd == 0 && in.vn == 1 && in.vm == 2);
+    assert(in.neon_size == 1 && strcmp(in.mnemonic, "vqdmlal.s16") == 0);
+    put16(0, 0xEFA4); put16(2, 0x2905);                  /* vqdmlal.s32 q1, d4, d5 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QDMLAL && in.vd == 2 && in.vn == 4 && in.vm == 5);
+    assert(in.neon_size == 2 && strcmp(in.mnemonic, "vqdmlal.s32") == 0);
+    put16(0, 0xEF91); put16(2, 0x0B02);                  /* vqdmlsl.s16 q0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QDMLSL && in.vd == 0 && in.vn == 1 && in.vm == 2);
+    assert(in.neon_size == 1 && strcmp(in.mnemonic, "vqdmlsl.s16") == 0);
+    put16(0, 0xEFE1); put16(2, 0x0BA2);                  /* vqdmlsl.s32 q8, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QDMLSL && in.vd == 16 && in.vn == 17 && in.vm == 18);
+    assert(in.neon_size == 2 && strcmp(in.mnemonic, "vqdmlsl.s32") == 0);
+
+    /* Neighbours: VMLAL and VMULL keep their claims, since the new long branch
+     * takes only opc 1001, 1011 and 1101. */
+    put16(0, 0xEF91); put16(2, 0x0802);                  /* vmlal.s16 q0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MLAL && in.vd == 0 && in.vn == 1 && in.vm == 2);
+    put16(0, 0xEFA1); put16(2, 0x0C02);                  /* vmull.s32 q0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MULL && in.vd == 0 && in.vn == 1 && in.vm == 2);
+
+    /* Rejects of the long group. U set is UNDEFINED for VQDMULL and the VQDML*
+     * forms (h1 bit 12). Size 00 is UNDEFINED. Qd = d1 is odd, so it is refused. */
+    put16(0, 0xFF91); put16(2, 0x0D02);                  /* vqdmull, U set */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xFF91); put16(2, 0x0902);                  /* vqdmlal, U set */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xEF81); put16(2, 0x0D02);                  /* vqdmull, size 00 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xEF91); put16(2, 0x1D02);                  /* vqdmull, Qd = d1: odd */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+
+    /* Integer by scalar, same length: VMLA.I, VMLS.I, VMUL.I and the saturating
+     * high multiplies. The 16-bit index is M:h2[3] and Vm is h2[2:0], so
+     * d2[1] is h2 = 004A, index 1, and d2[3] is h2 = 086A, index 3. */
+    put16(0, 0xEF91); put16(2, 0x004A);                  /* vmla.i16 d0, d1, d2[1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MLA_SCALAR && in.vd == 0 && in.vn == 1 && in.vm == 2);
+    assert(in.imm == 1 && in.has_imm && !in.neon_q && in.neon_size == 1);
+    assert(!in.vfp_unsigned && strcmp(in.mnemonic, "vmla.i16") == 0);
+    put16(0, 0xFFA2); put16(2, 0x0062);                  /* vmla.i32 q0, q1, d2[1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MLA_SCALAR && in.vd == 0 && in.vn == 2 && in.vm == 2);
+    assert(in.imm == 1 && in.has_imm && in.neon_q && in.neon_size == 2);
+    assert(strcmp(in.mnemonic, "vmla.i32") == 0);
+    put16(0, 0xFFD2); put16(2, 0x04EF);                  /* vmls.i16 q8, q9, d7[3] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MLS_SCALAR && in.vd == 16 && in.vn == 18 && in.vm == 7);
+    assert(in.imm == 3 && in.has_imm && in.neon_q && in.neon_size == 1);
+    assert(strcmp(in.mnemonic, "vmls.i16") == 0);
+    put16(0, 0xEFA1); put16(2, 0x044F);                  /* vmls.i32 d0, d1, d15[0] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MLS_SCALAR && in.vd == 0 && in.vn == 1 && in.vm == 15);
+    assert(in.imm == 0 && in.has_imm && !in.neon_q && in.neon_size == 2);
+    put16(0, 0xEF91); put16(2, 0x086A);                  /* vmul.i16 d0, d1, d2[3] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MUL_SCALAR && in.vd == 0 && in.vn == 1 && in.vm == 2);
+    assert(in.imm == 3 && in.has_imm && !in.neon_q && in.neon_size == 1);
+    assert(strcmp(in.mnemonic, "vmul.i16") == 0);
+    put16(0, 0xFFE2); put16(2, 0x08EF);                  /* vmul.i32 q8, q9, d15[1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MUL_SCALAR && in.vd == 16 && in.vn == 18 && in.vm == 15);
+    assert(in.imm == 1 && in.has_imm && in.neon_q && in.neon_size == 2);
+    put16(0, 0xEF91); put16(2, 0x0C62);                  /* vqdmulh.s16 d0, d1, d2[2] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QDMULH_SCALAR && in.vd == 0 && in.vn == 1 && in.vm == 2);
+    assert(in.imm == 2 && in.has_imm && !in.neon_q && in.neon_size == 1);
+    assert(strcmp(in.mnemonic, "vqdmulh.s16") == 0);
+    put16(0, 0xFFA2); put16(2, 0x0C63);                  /* vqdmulh.s32 q0, q1, d3[1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QDMULH_SCALAR && in.vd == 0 && in.vn == 2 && in.vm == 3);
+    assert(in.imm == 1 && in.has_imm && in.neon_q && in.neon_size == 2);
+    put16(0, 0xFFD2); put16(2, 0x0DE7);                  /* vqrdmulh.s16 q8, q9, d7[2] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QRDMULH_SCALAR && in.vd == 16 && in.vn == 18 && in.vm == 7);
+    assert(in.imm == 2 && in.has_imm && in.neon_q && in.neon_size == 1);
+    put16(0, 0xEFA1); put16(2, 0x0D6F);                  /* vqrdmulh.s32 d0, d1, d15[1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QRDMULH_SCALAR && in.vd == 0 && in.vn == 1 && in.vm == 15);
+    assert(in.imm == 1 && in.has_imm && !in.neon_q && in.neon_size == 2);
+    assert(strcmp(in.mnemonic, "vqrdmulh.s32") == 0);
+
+    /* Integer by scalar, long: VMLAL, VMLSL and VMULL take U from h1 bit 12, so
+     * the U set vmlal.u32 with an odd Vn is legal: Vn is a D register here. */
+    put16(0, 0xEF91); put16(2, 0x0242);                  /* vmlal.s16 q0, d1, d2[0] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MLAL_SCALAR && in.vd == 0 && in.vn == 1 && in.vm == 2);
+    assert(in.imm == 0 && in.has_imm && !in.vfp_unsigned && in.neon_size == 1);
+    assert(!in.neon_q && strcmp(in.mnemonic, "vmlal.s16") == 0);
+    put16(0, 0xFFE1); put16(2, 0x02EF);                  /* vmlal.u32 q8, d17, d15[1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MLAL_SCALAR && in.vd == 16 && in.vn == 17 && in.vm == 15);
+    assert(in.imm == 1 && in.vfp_unsigned && in.neon_size == 2 && !in.neon_q);
+    assert(strcmp(in.mnemonic, "vmlal.u32") == 0);
+    put16(0, 0xFF91); put16(2, 0x066F);                  /* vmlsl.u16 q0, d1, d7[3] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MLSL_SCALAR && in.vd == 0 && in.vn == 1 && in.vm == 7);
+    assert(in.imm == 3 && in.vfp_unsigned && in.neon_size == 1);
+    assert(strcmp(in.mnemonic, "vmlsl.u16") == 0);
+    put16(0, 0xEFA2); put16(2, 0x2643);                  /* vmlsl.s32 q1, d2, d3[0] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MLSL_SCALAR && in.vd == 2 && in.vn == 2 && in.vm == 3);
+    assert(in.imm == 0 && !in.vfp_unsigned && in.neon_size == 2);
+    put16(0, 0xEF91); put16(2, 0x0A62);                  /* vmull.s16 q0, d1, d2[2] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MULL_SCALAR && in.vd == 0 && in.vn == 1 && in.vm == 2);
+    assert(in.imm == 2 && !in.vfp_unsigned && in.neon_size == 1);
+    assert(strcmp(in.mnemonic, "vmull.s16") == 0);
+    put16(0, 0xEF90); put16(2, 0x0A61);                  /* vmull.s16 q0, d0, d1[2]: Dn overlaps Qd */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MULL_SCALAR && in.vd == 0 && in.vn == 0 && in.vm == 1);
+    assert(in.imm == 2 && in.neon_size == 1);
+    put16(0, 0xFFE1); put16(2, 0x0AEE);                  /* vmull.u32 q8, d17, d14[1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MULL_SCALAR && in.vd == 16 && in.vn == 17 && in.vm == 14);
+    assert(in.imm == 1 && in.vfp_unsigned && in.neon_size == 2);
+
+    /* Saturating long by scalar: VQDMULL, VQDMLAL, VQDMLSL, with U clear. */
+    put16(0, 0xEF91); put16(2, 0x0B4A);                  /* vqdmull.s16 q0, d1, d2[1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QDMULL_SCALAR && in.vd == 0 && in.vn == 1 && in.vm == 2);
+    assert(in.imm == 1 && in.has_imm && in.neon_size == 1 && !in.neon_q);
+    put16(0, 0xEF91); put16(2, 0x0B42);                  /* vqdmull.s16 q0, d1, d2[0] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QDMULL_SCALAR && in.imm == 0 && in.vm == 2);
+    put16(0, 0xEFE1); put16(2, 0x0BEF);                  /* vqdmull.s32 q8, d17, d15[1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QDMULL_SCALAR && in.vd == 16 && in.vn == 17 && in.vm == 15);
+    assert(in.imm == 1 && in.neon_size == 2);
+    put16(0, 0xEF91); put16(2, 0x036A);                  /* vqdmlal.s16 q0, d1, d2[3] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QDMLAL_SCALAR && in.vd == 0 && in.vn == 1 && in.vm == 2);
+    assert(in.imm == 3 && in.neon_size == 1 && strcmp(in.mnemonic, "vqdmlal.s16") == 0);
+    put16(0, 0xEFA2); put16(2, 0x2343);                  /* vqdmlal.s32 q1, d2, d3[0] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QDMLAL_SCALAR && in.vd == 2 && in.vn == 2 && in.vm == 3);
+    assert(in.imm == 0 && in.neon_size == 2);
+    put16(0, 0xEF91); put16(2, 0x0765);                  /* vqdmlsl.s16 q0, d1, d5[2] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QDMLSL_SCALAR && in.vd == 0 && in.vn == 1 && in.vm == 5);
+    assert(in.imm == 2 && in.neon_size == 1 && strcmp(in.mnemonic, "vqdmlsl.s16") == 0);
+    put16(0, 0xEFE1); put16(2, 0x07E9);                  /* vqdmlsl.s32 q8, d17, d9[1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QDMLSL_SCALAR && in.vd == 16 && in.vn == 17 && in.vm == 9);
+    assert(in.imm == 1 && in.neon_size == 2);
+    put16(0, 0xEF91); put16(2, 0x074A);                  /* vqdmlsl.s16 q0, d1, d2[1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QDMLSL_SCALAR && in.vm == 2 && in.imm == 1);
+
+    /* VQDMULH and VQRDMULH by scalar at 16-bit. vqdmulh.s16 d0, d1, d2[1] is
+     * 0C4A: Vm = h2[2:0] = 010 (d2), and the index is M:h2[3] = 0:1 = 1. */
+    put16(0, 0xEF91); put16(2, 0x0C4A);                  /* vqdmulh.s16 d0, d1, d2[1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QDMULH_SCALAR && in.vd == 0 && in.vn == 1 && in.vm == 2);
+    assert(in.imm == 1 && !in.neon_q && in.neon_size == 1);
+    put16(0, 0xEF91); put16(2, 0x0D4A);                  /* vqrdmulh.s16 d0, d1, d2[1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QRDMULH_SCALAR && in.vm == 2 && in.imm == 1);
+
+    /* Neighbours: the float forms keep their decode. VMUL.F32 is opc 1001 and
+     * VMLA.F32 opc 0001, at size 10. Both are checked against their operands
+     * and index, and VMLA.F32 with size 01 is refused. */
+    put16(0, 0xFFA2); put16(2, 0x0962);                  /* vmul.f32 q0, q1, d2[1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMUL_SCALAR && in.vd == 0 && in.vn == 2 && in.vm == 2);
+    assert(in.imm == 1 && in.has_imm && in.neon_q && in.neon_size == 2);
+    put16(0, 0xEFA1); put16(2, 0x0143);                  /* vmla.f32 d0, d1, d3[0] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMLA_SCALAR && in.vd == 0 && in.vn == 1 && in.vm == 3);
+    assert(in.imm == 0 && in.has_imm && !in.neon_q && in.neon_size == 2);
+    put16(0, 0xEF91); put16(2, 0x0143);                  /* the same opc 0001 at size 01: UNDEFINED */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+
+    /* Rejects of the scalar group. Size 00 is UNDEFINED for every form. A Q
+     * form with an odd Qd or Qn is refused: 0062 with n = 3 is Vn = d3, so
+     * the Q form vmla.i32 q0, q3, d2[1] has an odd Qn. The long forms refuse
+     * an odd Qd (1242 has d = 1) and U set on the saturating ones. */
+    put16(0, 0xEF81); put16(2, 0x004A);                  /* scalar group, size 00 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xEF91); put16(2, 0x1242);                  /* vmlal.s16 scalar, Qd = d1: odd */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xFFA3); put16(2, 0x0062);                  /* vmla.i32 q0, q3, d2[1]: Qn odd */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xFF91); put16(2, 0x036A);                  /* vqdmlal scalar, U set */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xFF91); put16(2, 0x0B4A);                  /* vqdmull scalar, U set */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+
+    printf("ok   neon vqdmulh, vqrdmulh, vqdmull, vqdmlal, vqdmlsl, and integer by scalar: every size, the index, the rejects\n");
+}
+
 /* The compares with zero, integer VABS and VNEG, all in the two-registers-
  * miscellaneous group with A = 01. Each encoding was taken from
  * arm-vita-eabi-as and checked by objdump. F (h2 bit 10) with op (h2 bits
@@ -3174,6 +3439,7 @@ int main(void) {
     test_neon_ldst_lane();
     test_neon_narrow_forms();
     test_neon_cmp_forms();
+    test_neon_qdmul_forms();
     test_neon_shl_reg_forms();
     test_neon_halving_forms();
     test_neon_hn_poly_forms();

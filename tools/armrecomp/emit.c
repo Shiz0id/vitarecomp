@@ -1229,6 +1229,113 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             break;
         }
 
+        /* Integer by scalar, and the same-length saturating doubling multiplies
+         * (neon.h). The scalar is broadcast into _s before any store, since its
+         * D register can be part of the destination: vmul.i32 q0, q1, d1[1]
+         * writes d1, which holds the scalar. The other operands are read into
+         * locals before the first neon_setd too. A D form also reads the second
+         * D word of each operand, which is harmless: the register file is
+         * indexed modulo 64 words. */
+        case OP_NEON_MUL_SCALAR: case OP_NEON_MLA_SCALAR: case OP_NEON_MLS_SCALAR:
+        case OP_NEON_QDMULH_SCALAR: case OP_NEON_QRDMULH_SCALAR: {
+            int regs = in->neon_q ? 2 : 1, sz = in->neon_size;
+            int acc = in->op == OP_NEON_MLA_SCALAR || in->op == OP_NEON_MLS_SCALAR;
+            fprintf(f, "    { uint64_t _s = neon_dup_lane(neon_getd(%d), %d, %u);",
+                    in->vm, sz, (unsigned)in->imm);
+            fprintf(f, " uint64_t _n[2] = {neon_getd(%d), neon_getd(%d)};",
+                    in->vn, in->vn + 1);
+            if (acc)
+                fprintf(f, " uint64_t _d[2] = {neon_getd(%d), neon_getd(%d)};",
+                        in->vd, in->vd + 1);
+            fprintf(f, "\n");
+            for (int k = 0; k < regs; k++) {
+                switch (in->op) {
+                case OP_NEON_MUL_SCALAR:
+                    fprintf(f, "      neon_setd(%d, neon_mul(_n[%d], _s, %d));\n", in->vd + k, k, sz);
+                    break;
+                case OP_NEON_MLA_SCALAR:
+                    fprintf(f, "      neon_setd(%d, neon_mla(_d[%d], _n[%d], _s, %d));\n",
+                            in->vd + k, k, k, sz);
+                    break;
+                case OP_NEON_MLS_SCALAR:
+                    fprintf(f, "      neon_setd(%d, neon_mls(_d[%d], _n[%d], _s, %d));\n",
+                            in->vd + k, k, k, sz);
+                    break;
+                default:
+                    fprintf(f, "      neon_setd(%d, neon_qdmulh(_n[%d], _s, %d, %d));\n",
+                            in->vd + k, k, sz, in->op == OP_NEON_QRDMULH_SCALAR);
+                    break;
+                }
+            }
+            fprintf(f, "    }\n");
+            break;
+        }
+
+        /* Same-length saturating doubling multiply high, vector: D or Q, one
+         * neon_qdmulh per D word pair, with both operands read first. */
+        case OP_NEON_QDMULH: case OP_NEON_QRDMULH: {
+            int regs = in->neon_q ? 2 : 1;
+            fprintf(f, "    { uint64_t _n[2] = {neon_getd(%d), neon_getd(%d)}, _m[2] = {neon_getd(%d), neon_getd(%d)};\n",
+                    in->vn, in->vn + 1, in->vm, in->vm + 1);
+            for (int k = 0; k < regs; k++)
+                fprintf(f, "      neon_setd(%d, neon_qdmulh(_n[%d], _m[%d], %d, %d));\n",
+                        in->vd + k, k, k, in->neon_size, in->op == OP_NEON_QRDMULH);
+            fprintf(f, "    }\n");
+            break;
+        }
+
+        /* Long saturating doubling forms, vector: Qd (a pair) from two D
+         * registers. The helper reads its inputs and fills r, and r is stored
+         * to Qd after both are read. QDMLAL and QDMLSL read Qd as the
+         * accumulator. */
+        case OP_NEON_QDMULL:
+            fprintf(f, "    { uint64_t r[2];");
+            fprintf(f, " neon_qdmull(r, neon_getd(%d), neon_getd(%d), %d);",
+                    in->vn, in->vm, in->neon_size);
+            fprintf(f, " neon_setd(%d, r[0]); neon_setd(%d, r[1]); }\n", in->vd, in->vd + 1);
+            break;
+
+        case OP_NEON_QDMLAL: case OP_NEON_QDMLSL:
+            fprintf(f, "    { uint64_t r[2] = {neon_getd(%d), neon_getd(%d)};", in->vd, in->vd + 1);
+            fprintf(f, " neon_qdmlal(r, neon_getd(%d), neon_getd(%d), %d, %d);",
+                    in->vn, in->vm, in->neon_size, in->op == OP_NEON_QDMLSL);
+            fprintf(f, " neon_setd(%d, r[0]); neon_setd(%d, r[1]); }\n", in->vd, in->vd + 1);
+            break;
+
+        /* Long forms by scalar. The scalar is broadcast into _s before r is
+         * written, so Qd may overlap Dn (vqdmull.s16 q0, d0, d1[0]) or the
+         * scalar's own D register, which is part of Qd in q0. Dn is read in the
+         * helper call, before the stores. */
+        case OP_NEON_MULL_SCALAR: case OP_NEON_MLAL_SCALAR: case OP_NEON_MLSL_SCALAR:
+        case OP_NEON_QDMULL_SCALAR: case OP_NEON_QDMLAL_SCALAR: case OP_NEON_QDMLSL_SCALAR: {
+            int acc = in->op != OP_NEON_MULL_SCALAR && in->op != OP_NEON_QDMULL_SCALAR;
+            fprintf(f, "    { uint64_t _s = neon_dup_lane(neon_getd(%d), %d, %u);",
+                    in->vm, in->neon_size, (unsigned)in->imm);
+            if (acc)
+                fprintf(f, " uint64_t r[2] = {neon_getd(%d), neon_getd(%d)};", in->vd, in->vd + 1);
+            else
+                fprintf(f, " uint64_t r[2];");
+            switch (in->op) {
+            case OP_NEON_MULL_SCALAR:
+                fprintf(f, " neon_wide_mul(r, neon_getd(%d), _s, %d, %d);",
+                        in->vn, in->neon_size, in->vfp_unsigned);
+                break;
+            case OP_NEON_MLAL_SCALAR: case OP_NEON_MLSL_SCALAR:
+                fprintf(f, " neon_wide_mac(r, neon_getd(%d), _s, %d, %d, %d);",
+                        in->vn, in->neon_size, in->vfp_unsigned, in->op == OP_NEON_MLSL_SCALAR);
+                break;
+            case OP_NEON_QDMULL_SCALAR:
+                fprintf(f, " neon_qdmull(r, neon_getd(%d), _s, %d);", in->vn, in->neon_size);
+                break;
+            default:
+                fprintf(f, " neon_qdmlal(r, neon_getd(%d), _s, %d, %d);",
+                        in->vn, in->neon_size, in->op == OP_NEON_QDMLSL_SCALAR);
+                break;
+            }
+            fprintf(f, " neon_setd(%d, r[0]); neon_setd(%d, r[1]); }\n", in->vd, in->vd + 1);
+            break;
+        }
+
         /* Max, min and compares: one helper per lane pair, as above. The
          * compare helpers return all-ones or zero in each lane. */
         case OP_NEON_FMAX: case OP_NEON_FMIN:

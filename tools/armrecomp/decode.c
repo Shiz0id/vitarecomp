@@ -954,6 +954,19 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
             set(o, A_SIMD, nm[B][U]);
             return 1;
         }
+        /* Saturating doubling multiply returning the high half: opc 1011 with B
+         * clear, U picking VQDMULH (0) or VQRDMULH (1). B set is VPADD, which
+         * is claimed above. Sizes 1 and 2 only: size 0 and size 3 are
+         * UNDEFINED and refused. Q is allowed, and the odd-register check at
+         * the top of this group already covers it. */
+        if (opc == 0xB && B == 0 && (size == 1 || size == 2)) {
+            static const char *const nm[2][2] = {
+                { "vqdmulh.s16", "vqdmulh.s32" }, { "vqrdmulh.s16", "vqrdmulh.s32" },
+            };
+            o->op = U ? OP_NEON_QRDMULH : OP_NEON_QDMULH;
+            set(o, A_SIMD, nm[U][size - 1]);
+            return 1;
+        }
         if (opc == 0xD && !(size & 1)) {                   /* float, .F32 only */
             /* For floats the size field is sz (bit 20, 0 for F32) and bit 21
              * (size>>1) is an operation bit, so the operation is picked by U,
@@ -1016,13 +1029,12 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
      * and Qm must be even. ss = 11 is not this group: it is the 1111 space of
      * VEXT, VMOVN and the rest, all of which have bits 5:4 set. Bits 6 and 4
      * of h2 are clear here, which keeps it apart from the scalar group (bit 6
-     * set) and the shift and one-register immediate groups (bit 4 set). The
-     * opc values not claimed return 0: 1001, 1011 and 1101 (VQDMLAL, VQDMLSL
-     * and VQDMULL), and 1111, which is undefined. The polynomial VMULL (1110)
-     * is claimed only for U clear and ss 00: U set and ss 01 are UNDEFINED,
-     * and ss 10 is VMULL.P64, which needs the Crypto extension the Vita
-     * lacks. The W forms (0001, 0011) take a Q register for vn as well, so n
-     * must be even. */
+     * set) and the shift and one-register immediate groups (bit 4 set).
+     * Every opc but 1111, which is undefined, is claimed. The polynomial
+     * VMULL (1110) is claimed only for U clear and ss 00: U set and ss 01 are
+     * UNDEFINED, and ss 10 is VMULL.P64, which needs the Crypto extension the
+     * Vita lacks. The W forms (0001, 0011) take a Q register for vn as well,
+     * so n must be even. */
     if ((h1 & 0x0080) && (h1 & 0x0030) != 0x0030 && (h2 & 0x0050) == 0) {
         int opc = (h2 >> 8) & 0xF, size = (h1 >> 4) & 3;
 
@@ -1086,6 +1098,24 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
             return 1;
         }
 
+        /* Saturating doubling long forms: opc 1001 (VQDMLAL), 1011 (VQDMLSL)
+         * and 1101 (VQDMULL). Size is the SOURCE lane. U must be 0 and size
+         * 00 is UNDEFINED. Qd is a Q pair, so d must be even. */
+        if (opc == 0x9 || opc == 0xB || opc == 0xD) {
+            static const char *const nm[3][2] = {
+                { "vqdmlal.s16", "vqdmlal.s32" }, { "vqdmlsl.s16", "vqdmlsl.s32" },
+                { "vqdmull.s16", "vqdmull.s32" },
+            };
+            static const arm_op ops[3] = { OP_NEON_QDMLAL, OP_NEON_QDMLSL, OP_NEON_QDMULL };
+            int k = opc == 0x9 ? 0 : opc == 0xB ? 1 : 2;
+            if (U || (size != 1 && size != 2) || (d & 1)) return 0;
+            o->op = ops[k];
+            o->vd = (int8_t)d; o->vn = (int8_t)n; o->vm = (int8_t)m;
+            o->neon_size = (uint8_t)size;
+            set(o, A_SIMD, nm[k][size - 1]);
+            return 1;
+        }
+
         int kind, wide = 0;
         switch (opc) {
             case 0x0: kind = 0; break;                     /* VADDL */
@@ -1122,18 +1152,30 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
         return 1;
     }
 
-    /* Three registers and a scalar: h1 bit 7 set, bits 5:4 = 10 for F32.
-     * h2 is dddd opc(4) N 1 M 0 mmmm, so bit 6 and bit 4 are fixed. The scalar
-     * is a 32-bit lane: M selects the lane and Vm[3:0] the D register, so unlike
-     * the other forms M is NOT the top bit of the register number here. The Q
-     * bit is h1 bit 12, the same position as U in the same-length group. */
-    if ((h1 & 0x0080) && (h1 & 0x0030) == 0x0020 && (h2 & 0x0050) == 0x0040) {
-        int opc = (h2 >> 8) & 0xF;
-        int idx = (h2 >> 5) & 1;                           /* M: lane index  */
-        int reg = h2 & 0xF;                                /* Vm[3:0] only    */
-        int Qs = U;                                        /* Q, see above    */
-        if (Qs && ((d | n) & 1)) return 0;
-        if (opc == 0x1 || opc == 0x5 || opc == 0x9) {      /* VMLA / VMLS / VMUL */
+    /* Two registers and a scalar (the ARM ARM's name for this group): h1
+     * 111U 1111 1D ss nnnn, h2 dddd opc(4) N 1 M 0 mmmm. Bits 6 and 4 of h2 are
+     * fixed, which keeps it apart from the different-length group (bit 6 clear)
+     * and the shift and one-register groups (bit 4 set). ss = 11 is another
+     * group, the 1111 space of VEXT, VDUP and the misc forms, so it is not
+     * claimed here. U is h1 bit 12: Q for the same-length forms, and U for the
+     * long ones, where it must be 0 for the VQDML* and VQDMULL forms.
+     *
+     * The scalar is Dm[index], and its register and index depend on the size:
+     *   size 01 (16-bit): Vm = h2 bits 2:0 (D0-D7), index = M:h2 bit 3, 0 to 3
+     *   size 10 (32-bit): Vm = h2 bits 3:0, index = M, 0 or 1
+     * So M is not the top bit of Vm here, unlike the three-register forms, and
+     * size 00 is UNDEFINED for every form. The float forms (opc 0001, 0101,
+     * 1001) are size 10 only, and decode as they always did. */
+    if ((h1 & 0x0080) && (h1 & 0x0030) != 0x0030 && (h2 & 0x0050) == 0x0040) {
+        int opc = (h2 >> 8) & 0xF, size = (h1 >> 4) & 3;
+        int M = (h2 >> 5) & 1;
+        if (size == 0) return 0;                           /* UNDEFINED */
+        int reg = size == 1 ? (h2 & 0x7) : (h2 & 0xF);     /* Vm, see above */
+        int idx = size == 1 ? ((M << 1) | ((h2 >> 3) & 1)) : M;
+        int Qs = U;                                        /* Q, same-length */
+
+        if (opc == 0x1 || opc == 0x5 || opc == 0x9) {      /* float: F32 only */
+            if (size != 2 || (Qs && ((d | n) & 1))) return 0;
             o->op = opc == 0x1 ? OP_NEON_FMLA_SCALAR
                   : opc == 0x5 ? OP_NEON_FMLS_SCALAR : OP_NEON_FMUL_SCALAR;
             o->vd = (int8_t)d; o->vn = (int8_t)n; o->vm = (int8_t)reg;
@@ -1144,7 +1186,72 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
             set(o, A_SIMD, opc == 0x1 ? "vmla.f32" : opc == 0x5 ? "vmls.f32" : "vmul.f32");
             return 1;
         }
-        return 0;
+        if (opc == 0x0 || opc == 0x4 || opc == 0x8 || opc == 0xC || opc == 0xD) {
+            /* VMLA.I, VMLS.I, VMUL.I (opc 0000, 0100, 1000) and VQDMULH,
+             * VQRDMULH (1100, 1101): all same-length, Q picks the quad size of
+             * Qd and Qn, and the sizes here are 1 and 2 (size 0 returned above). */
+            if (Qs && ((d | n) & 1)) return 0;
+            static const arm_op ops[5] = {
+                OP_NEON_MLA_SCALAR, OP_NEON_MLS_SCALAR, OP_NEON_MUL_SCALAR,
+                OP_NEON_QDMULH_SCALAR, OP_NEON_QRDMULH_SCALAR,
+            };
+            static const char *const nm[5][2] = {
+                { "vmla.i16", "vmla.i32" }, { "vmls.i16", "vmls.i32" },
+                { "vmul.i16", "vmul.i32" }, { "vqdmulh.s16", "vqdmulh.s32" },
+                { "vqrdmulh.s16", "vqrdmulh.s32" },
+            };
+            int k = opc == 0x0 ? 0 : opc == 0x4 ? 1 : opc == 0x8 ? 2 : opc == 0xC ? 3 : 4;
+            o->op = ops[k];
+            o->vd = (int8_t)d; o->vn = (int8_t)n; o->vm = (int8_t)reg;
+            o->imm = (uint32_t)idx;
+            o->has_imm = 1;
+            o->neon_q = (uint8_t)Qs;
+            o->neon_size = (uint8_t)size;
+            set(o, A_SIMD, nm[k][size - 1]);
+            return 1;
+        }
+        if (opc == 0x2 || opc == 0x6 || opc == 0xA) {
+            /* VMLAL, VMLSL and VMULL by scalar (opc 0010, 0110, 1010). Qd is a
+             * Q pair and Dn a D register, so only d is checked. U is bit 12 and
+             * is the signedness here, not a Q bit. */
+            if (d & 1) return 0;
+            static const arm_op ops[3] = { OP_NEON_MLAL_SCALAR, OP_NEON_MLSL_SCALAR,
+                                           OP_NEON_MULL_SCALAR };
+            static const char *const nm[3][2][2] = {
+                { { "vmlal.s16", "vmlal.s32" }, { "vmlal.u16", "vmlal.u32" } },
+                { { "vmlsl.s16", "vmlsl.s32" }, { "vmlsl.u16", "vmlsl.u32" } },
+                { { "vmull.s16", "vmull.s32" }, { "vmull.u16", "vmull.u32" } },
+            };
+            int k = opc == 0x2 ? 0 : opc == 0x6 ? 1 : 2;
+            o->op = ops[k];
+            o->vd = (int8_t)d; o->vn = (int8_t)n; o->vm = (int8_t)reg;
+            o->imm = (uint32_t)idx;
+            o->has_imm = 1;
+            o->neon_size = (uint8_t)size;
+            o->vfp_unsigned = (uint8_t)U;
+            set(o, A_SIMD, nm[k][U][size - 1]);
+            return 1;
+        }
+        if (opc == 0x3 || opc == 0x7 || opc == 0xB) {
+            /* VQDMLAL, VQDMLSL and VQDMULL by scalar (opc 0011, 0111, 1011).
+             * Bit 12 must be 0: U set is UNDEFINED. Qd is a Q pair, as above. */
+            if (U || (d & 1)) return 0;
+            static const arm_op ops[3] = { OP_NEON_QDMLAL_SCALAR, OP_NEON_QDMLSL_SCALAR,
+                                           OP_NEON_QDMULL_SCALAR };
+            static const char *const nm[3][2] = {
+                { "vqdmlal.s16", "vqdmlal.s32" }, { "vqdmlsl.s16", "vqdmlsl.s32" },
+                { "vqdmull.s16", "vqdmull.s32" },
+            };
+            int k = opc == 0x3 ? 0 : opc == 0x7 ? 1 : 2;
+            o->op = ops[k];
+            o->vd = (int8_t)d; o->vn = (int8_t)n; o->vm = (int8_t)reg;
+            o->imm = (uint32_t)idx;
+            o->has_imm = 1;
+            o->neon_size = (uint8_t)size;
+            set(o, A_SIMD, nm[k][size - 1]);
+            return 1;
+        }
+        return 0;                                          /* opc 1110, 1111 */
     }
 
     /* Two registers and a shift amount: h1 111U 1111 1D imm6, h2 dddd opc(4) L

@@ -130,6 +130,22 @@ typedef enum {
     OP_NEON_FMUL_SCALAR,        /* vd = vn * vm[imm], vm a D register        */
     OP_NEON_FMLA_SCALAR,        /* vd = vd + vn * vm[imm], vm a D register   */
     OP_NEON_FMLS_SCALAR,        /* vd = vd - vn * vm[imm], vm a D register   */
+    OP_NEON_QDMULH, OP_NEON_QRDMULH, /* saturating doubling multiply high, vd = vn op vm
+                                   per lane of neon_size; QRDMULH rounds; Q pairs
+                                   as the same-length group                   */
+    OP_NEON_QDMULL,             /* vd (Q pair) = sat(2 * vn * vm), vn and vm D
+                                   registers, neon_size the SOURCE lane       */
+    OP_NEON_QDMLAL, OP_NEON_QDMLSL, /* vd (Q pair) = sat(vd +/- sat(2 * vn * vm)),
+                                   as QDMULL: the product saturates first     */
+    OP_NEON_MUL_SCALAR, OP_NEON_MLA_SCALAR, OP_NEON_MLS_SCALAR, /* integer by scalar:
+                                   vm a D register, imm the lane (vm[imm]),
+                                   neon_size the lane, neon_q a Q pair       */
+    OP_NEON_MULL_SCALAR,        /* as MULL, with vm[imm] for the second operand;
+                                   vfp_unsigned the signedness                */
+    OP_NEON_MLAL_SCALAR, OP_NEON_MLSL_SCALAR, /* as MLAL and MLSL, by scalar    */
+    OP_NEON_QDMULL_SCALAR,      /* as QDMULL, by scalar                       */
+    OP_NEON_QDMLAL_SCALAR, OP_NEON_QDMLSL_SCALAR, /* as QDMLAL and QDMLSL, by scalar */
+    OP_NEON_QDMULH_SCALAR, OP_NEON_QRDMULH_SCALAR, /* as QDMULH and QRDMULH, by scalar */
     OP_NEON_FMAX, OP_NEON_FMIN, /* float; a NaN operand gives the default NaN */
     OP_NEON_FCEQ, OP_NEON_FCGE, OP_NEON_FCGT, /* lanes all-ones where true  */
     OP_NEON_FABS, OP_NEON_FNEG, /* sign bit only: no flush, NaN payload kept  */

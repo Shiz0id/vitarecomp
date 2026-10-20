@@ -595,6 +595,113 @@ static inline uint64_t neon_qop(uint64_t n, uint64_t m, int size, int is_unsigne
     return r;
 }
 
+/* --- Advanced SIMD saturating doubling multiplies ---------------------------
+ *
+ * VQDMULH, VQRDMULH and the long VQDMULL, VQDMLAL, VQDMLSL. The product is
+ * 2 * a * b of two signed source lanes of w = 8 << size bits. The only pair
+ * whose product leaves the range of its result is a = b = -2^(w-1): the
+ * doubled product is 2^(2w-1), one past the top of a 2w-bit lane. Every other
+ * pair fits in int64 for w <= 32, so that one pair is special-cased and the
+ * rest is computed exactly. QC is not modelled, as for neon_qop. */
+
+/* a + b for int64, saturated to the int64 range. b's sign is tested before
+ * the add, so no signed overflow is ever computed: a > MAX - b can only hold
+ * for b > 0, and MIN - b is in range for b < 0. */
+static inline int64_t neon_sat_add64(int64_t a, int64_t b) {
+    if (b > 0 && a > 0x7FFFFFFFFFFFFFFFll - b) return 0x7FFFFFFFFFFFFFFFll;
+    if (b < 0 && a < (-0x7FFFFFFFFFFFFFFFll - 1) - b) return -0x7FFFFFFFFFFFFFFFll - 1;
+    return a + b;
+}
+
+/* A 64-bit lane as a signed value. neon_sext cannot take w = 64: its
+ * sign - low is 2^63 when the low bits are zero, which overflows int64. Here
+ * the negative case is -(~v) - 1, with ~v in [0, 2^63 - 1]. */
+static inline int64_t neon_s64(uint64_t v) {
+    return (v >> 63) ? -(int64_t)(~v) - 1 : (int64_t)v;
+}
+
+/* VQDMULH (round = 0) and VQRDMULH (round = 1), lane by lane:
+ * sat((2 * a * b + round * 2^(w-1)) >> w), with the shift a floor. The
+ * rounding constant goes in before the shift, as the architecture writes it.
+ * The floor is taken by division, since >> of a negative int64 is
+ * implementation-defined. For VQRDMULH the rounding term cannot lift any
+ * other pair to the top, so a = b = -2^(w-1) is the only saturating pair in
+ * either form. Size 0 and size 3 are UNDEFINED and decode refuses them. */
+static inline uint64_t neon_qdmulh(uint64_t n, uint64_t m, int size, int round) {
+    int w = 8 << size;
+    int64_t hi = (int64_t)((1ull << (w - 1)) - 1), lo = -hi - 1;
+    int64_t d = (int64_t)(1ull << w);               /* the divisor 2^w */
+    int64_t rnd = round ? (int64_t)(1ull << (w - 1)) : 0;
+    uint64_t mask = neon_lmask(size), r = 0;
+    for (int i = 0; i < 64 / w; i++) {
+        int64_t a = neon_sext(neon_lane_of(n, size, i), w);
+        int64_t b = neon_sext(neon_lane_of(m, size, i), w);
+        int64_t x;
+        if (a == lo && b == lo) {
+            x = hi;
+        } else {
+            /* |2ab| is at most 2^63 - 2^32 here, and the rounding term adds at
+             * most 2^31, so neither product nor sum overflows. For t < 0 the
+             * floor is -ceil(-t / d), written as -t - 1 first: -t + d would
+             * reach 2^63 for t = -(2^63 - 2^32) with d = 2^32 and overflow. */
+            int64_t t = 2 * (a * b) + rnd;
+            x = t >= 0 ? t / d : -((-t - 1) / d + 1);   /* floor(t / d) */
+            if (x > hi) x = hi;
+            if (x < lo) x = lo;
+        }
+        r |= ((uint64_t)x & mask) << (i * w);
+    }
+    return r;
+}
+
+/* VQDMULL: r (a Q pair, lanes of 2w bits) = sat(2 * a * b), where a and b are
+ * the source D words' lanes of w = 8 << size bits, so size is the SOURCE
+ * size. The saturated value is the top of the wide lane, 2^(2w-1) - 1, which
+ * for 2w = 64 is the int64 maximum. r is written, never read, and the sources
+ * are values, so the caller may pass a register it is about to overwrite. */
+static inline void neon_qdmull(uint64_t r[2], uint64_t n, uint64_t m, int size) {
+    int w = 8 << size, ww = 2 * w;
+    int64_t lo = -(int64_t)(1ull << (w - 1));
+    uint64_t wmask = neon_lmask(size + 1), top = wmask >> 1;
+    r[0] = r[1] = 0;
+    for (int i = 0; i < 64 / w; i++) {
+        int64_t a = neon_sext(neon_lane_of(n, size, i), w);
+        int64_t b = neon_sext(neon_lane_of(m, size, i), w);
+        uint64_t x = (a == lo && b == lo) ? top : ((uint64_t)(2 * (a * b)) & wmask);
+        r[(i * ww) / 64] |= x << ((i * ww) % 64);
+    }
+}
+
+/* VQDMLAL (sub = 0) and VQDMLSL (sub = 1): r = sat(r +/- p), where r is the
+ * old Qd on input and p = sat(2 * a * b) from neon_qdmull. The product is
+ * saturated first and the accumulate on its own, as the architecture does
+ * it, so a negative accumulator is not wrapped by a saturated product: at
+ * 16-bit sources, 0x7FFFFFFF + (-1) is 0x7FFFFFFE. The wide lane is 32 bits
+ * for size 1 and 64 for size 2. A 64-bit sum can overflow, so it goes through
+ * neon_sat_add64. The product is never INT64_MIN, so -p is always in range. */
+static inline void neon_qdmlal(uint64_t r[2], uint64_t n, uint64_t m, int size, int sub) {
+    int ww = 16 << size;                            /* the wide lane, 32 or 64 */
+    uint64_t wmask = neon_lmask(size + 1), p[2], out[2] = {0, 0};
+    neon_qdmull(p, n, m, size);
+    for (int i = 0; i < 128 / ww; i++) {
+        int sh = (i * ww) % 64, word = (i * ww) / 64;
+        uint64_t av = (r[word] >> sh) & wmask, bv = (p[word] >> sh) & wmask;
+        int64_t x;
+        if (ww == 32) {
+            int64_t a = neon_sext(av, 32), b = neon_sext(bv, 32);
+            x = sub ? a - b : a + b;                /* exact in int64 */
+            if (x > 0x7FFFFFFFll) x = 0x7FFFFFFFll;
+            if (x < -0x80000000ll) x = -0x80000000ll;
+        } else {
+            int64_t a = neon_s64(av), b = neon_s64(bv);
+            x = neon_sat_add64(a, sub ? -b : b);
+        }
+        out[word] |= ((uint64_t)x & wmask) << sh;
+    }
+    r[0] = out[0];
+    r[1] = out[1];
+}
+
 /* VCGT (ge = 0) and VCGE (ge = 1): a lane is all ones where n > m (or n >= m)
  * and zero elsewhere. A signed lane is compared as its sign-extended value,
  * since comparing the raw bits would put 0x80 above 0x7F. Sizes 0-2 only:
