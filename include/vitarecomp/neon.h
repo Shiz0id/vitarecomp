@@ -394,6 +394,59 @@ static inline uint64_t neon_qop(uint64_t n, uint64_t m, int size, int is_unsigne
     return r;
 }
 
+/* VCGT (ge = 0) and VCGE (ge = 1): a lane is all ones where n > m (or n >= m)
+ * and zero elsewhere. A signed lane is compared as its sign-extended value,
+ * since comparing the raw bits would put 0x80 above 0x7F. Sizes 0-2 only:
+ * neon_sext needs a lane under 64 bits, and decode refuses size 3 here. */
+static inline uint64_t neon_cmp(uint64_t n, uint64_t m, int size, int is_unsigned, int ge) {
+    int w = 8 << size;
+    uint64_t mask = neon_lmask(size), r = 0;
+    for (int i = 0; i < 64 / w; i++) {
+        uint64_t a = neon_lane_of(n, size, i), b = neon_lane_of(m, size, i);
+        int t;
+        if (is_unsigned) t = ge ? a >= b : a > b;
+        else {
+            int64_t sa = neon_sext(a, w), sb = neon_sext(b, w);
+            t = ge ? sa >= sb : sa > sb;
+        }
+        r |= (t ? mask : 0) << (i * w);
+    }
+    return r;
+}
+
+/* VMAX (min = 0) and VMIN (min = 1), lane by lane. Each result lane is one of
+ * the two input lanes copied as it stood, so no value is rebuilt here. */
+static inline uint64_t neon_minmax(uint64_t n, uint64_t m, int size, int is_unsigned, int min) {
+    int w = 8 << size;
+    uint64_t r = 0;
+    for (int i = 0; i < 64 / w; i++) {
+        uint64_t a = neon_lane_of(n, size, i), b = neon_lane_of(m, size, i);
+        int a_greater = is_unsigned ? a > b : neon_sext(a, w) > neon_sext(b, w);
+        int take_a = min ? !a_greater : a_greater;
+        r |= (take_a ? a : b) << (i * w);
+    }
+    return r;
+}
+
+/* VABD: |n - m| per lane. The difference is formed exactly and then truncated
+ * to the lane. For signed lanes |sa - sb| is at most 2^w - 1, so the result
+ * fits the lane as an unsigned value (|-128 - 127| = 255 for s8), and the
+ * int64 difference cannot overflow for lanes up to 32 bits. */
+static inline uint64_t neon_abd(uint64_t n, uint64_t m, int size, int is_unsigned) {
+    int w = 8 << size;
+    uint64_t mask = neon_lmask(size), r = 0;
+    for (int i = 0; i < 64 / w; i++) {
+        uint64_t a = neon_lane_of(n, size, i), b = neon_lane_of(m, size, i), x;
+        if (is_unsigned) x = a > b ? a - b : b - a;
+        else {
+            int64_t sa = neon_sext(a, w), sb = neon_sext(b, w);
+            x = (uint64_t)(sa > sb ? sa - sb : sb - sa);
+        }
+        r |= (x & mask) << (i * w);
+    }
+    return r;
+}
+
 /* VSHL by immediate: each lane shifted left by amt, 0 <= amt < lane width.
  * Bits shifted out of a lane are masked off rather than carried upward. */
 static inline uint64_t neon_shl(uint64_t n, int amt, int size) {

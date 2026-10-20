@@ -919,6 +919,129 @@ static void check_q(const uint64_t *r, const uint64_t *lanes, int w) {
     assert(r[1] == pack_lanes(lanes + per, w, per));
 }
 
+/* The compares, max and min, and absolute difference, against values worked
+ * out by hand. The same bits are read signed and unsigned: 0x80 is -128 and
+ * 128, and each pair of results must differ, so a helper that ignores U fails
+ * here. The mixed-lane words put a different value in every lane, so a lane
+ * shifted or masked wrongly shows up. */
+static void test_neon_cmp_c(void) {
+    /* Signed and unsigned disagree on 0x80 against 0x7F, at each size. */
+    assert(neon_cmp(rep_lane(0x80, 0), rep_lane(0x7F, 0), 0, 0, 0) == 0);          /* -128 > 127: no */
+    assert(neon_cmp(rep_lane(0x80, 0), rep_lane(0x7F, 0), 0, 1, 0) == ~0ull);      /* 128 > 127: yes */
+    assert(neon_minmax(rep_lane(0x80, 0), rep_lane(0x7F, 0), 0, 0, 0) == rep_lane(0x7F, 0));
+    assert(neon_minmax(rep_lane(0x80, 0), rep_lane(0x7F, 0), 0, 1, 0) == rep_lane(0x80, 0));
+    assert(neon_cmp(rep_lane(0x8000, 1), rep_lane(0x7FFF, 1), 1, 0, 0) == 0);
+    assert(neon_cmp(rep_lane(0x8000, 1), rep_lane(0x7FFF, 1), 1, 1, 0) == ~0ull);
+    assert(neon_minmax(rep_lane(0x8000, 1), rep_lane(0x7FFF, 1), 1, 0, 0) == rep_lane(0x7FFF, 1));
+    assert(neon_minmax(rep_lane(0x8000, 1), rep_lane(0x7FFF, 1), 1, 1, 0) == rep_lane(0x8000, 1));
+    assert(neon_cmp(rep_lane(0x80000000, 2), rep_lane(0x7FFFFFFF, 2), 2, 0, 0) == 0);
+    assert(neon_cmp(rep_lane(0x80000000, 2), rep_lane(0x7FFFFFFF, 2), 2, 1, 0) == ~0ull);
+    assert(neon_minmax(rep_lane(0x80000000, 2), rep_lane(0x7FFFFFFF, 2), 2, 0, 0) == rep_lane(0x7FFFFFFF, 2));
+    assert(neon_minmax(rep_lane(0x80000000, 2), rep_lane(0x7FFFFFFF, 2), 2, 1, 0) == rep_lane(0x80000000, 2));
+    /* -1 against 0: signed is less, unsigned is greater. */
+    assert(neon_cmp(rep_lane(0xFFFF, 1), 0, 1, 0, 0) == 0);
+    assert(neon_cmp(rep_lane(0xFFFF, 1), 0, 1, 1, 0) == ~0ull);
+
+    /* Equal lanes: VCGT gives 0 and VCGE all ones, and the absolute difference
+     * is 0, at every size and sign. */
+    for (int s = 0; s < 3; s++)
+        for (int u = 0; u < 2; u++) {
+            uint64_t x = 0x80FF7F01C3A5D26Eull;
+            assert(neon_cmp(x, x, s, u, 0) == 0);
+            assert(neon_cmp(x, x, s, u, 1) == ~0ull);
+            assert(neon_abd(x, x, s, u) == 0);
+        }
+
+    /* Absolute difference is exact, then truncated. |-128 - 127| = 255 and
+     * |0 - 255| = 255 fill the lane. The same bits 1 and 0xFF differ signed and
+     * unsigned: |1 - (-1)| = 2 and |1 - 255| = 254. */
+    assert(neon_abd(rep_lane(0x80, 0), rep_lane(0x7F, 0), 0, 0) == ~0ull);
+    assert(neon_abd(rep_lane(0x00, 0), rep_lane(0xFF, 0), 0, 1) == ~0ull);
+    assert(neon_abd(rep_lane(0x80000000, 2), rep_lane(0x7FFFFFFF, 2), 2, 0) == ~0ull);
+    assert(neon_abd(rep_lane(0x8000, 1), rep_lane(0x7FFF, 1), 1, 0) == ~0ull);
+    assert(neon_abd(rep_lane(0x01, 0), rep_lane(0xFF, 0), 0, 0) == rep_lane(0x02, 0));
+    assert(neon_abd(rep_lane(0x01, 0), rep_lane(0xFF, 0), 0, 1) == rep_lane(0xFE, 0));
+
+    /* VABA wraps in the lane: 0xFF + 2 is 0x01, and 1 + 255 is 0. */
+    assert(neon_add(rep_lane(0xFF, 0), neon_abd(rep_lane(3, 0), rep_lane(1, 0), 0, 1), 0) == rep_lane(0x01, 0));
+    assert(neon_add(rep_lane(0x01, 0), neon_abd(rep_lane(0x80, 0), rep_lane(0x7F, 0), 0, 0), 0) == rep_lane(0x00, 0));
+    assert(neon_add(rep_lane(0xFFFF, 1), neon_abd(rep_lane(3, 1), rep_lane(1, 1), 1, 1), 1) == rep_lane(0x0001, 1));
+    assert(neon_add(rep_lane(0xFFFFFFFF, 2), neon_abd(rep_lane(3, 2), rep_lane(1, 2), 2, 1), 2) == rep_lane(1, 2));
+
+    /* Mixed lanes, 8-bit. Lanes 0, 1 and 6 differ between the signed and the
+     * unsigned results. */
+    uint64_t n8[8] = { 0x80, 0x7F, 0x01, 0xFF, 0x10, 0x20, 0x90, 0x00 };
+    uint64_t m8[8] = { 0x7F, 0x80, 0x02, 0xFE, 0x10, 0x1F, 0x00, 0x00 };
+    uint64_t N8 = pack_lanes(n8, 8, 8), M8 = pack_lanes(m8, 8, 8);
+    uint64_t e_gt_s[8]  = { 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0x00 };
+    uint64_t e_gt_u[8]  = { 0xFF, 0x00, 0x00, 0xFF, 0x00, 0xFF, 0xFF, 0x00 };
+    uint64_t e_ge_s[8]  = { 0x00, 0xFF, 0x00, 0xFF, 0xFF, 0xFF, 0x00, 0xFF };
+    uint64_t e_ge_u[8]  = { 0xFF, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+    uint64_t e_max_s[8] = { 0x7F, 0x7F, 0x02, 0xFF, 0x10, 0x20, 0x00, 0x00 };
+    uint64_t e_min_s[8] = { 0x80, 0x80, 0x01, 0xFE, 0x10, 0x1F, 0x90, 0x00 };
+    uint64_t e_max_u[8] = { 0x80, 0x80, 0x02, 0xFF, 0x10, 0x20, 0x90, 0x00 };
+    uint64_t e_min_u[8] = { 0x7F, 0x7F, 0x01, 0xFE, 0x10, 0x1F, 0x00, 0x00 };
+    uint64_t e_abd_s[8] = { 0xFF, 0xFF, 0x01, 0x01, 0x00, 0x01, 0x70, 0x00 };
+    uint64_t e_abd_u[8] = { 0x01, 0x01, 0x01, 0x01, 0x00, 0x01, 0x90, 0x00 };
+    uint64_t d8[8]      = { 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0xFF };
+    uint64_t e_aba_s[8] = { 0x0F, 0x1F, 0x31, 0x41, 0x50, 0x61, 0xE0, 0xFF };
+    assert(neon_cmp(N8, M8, 0, 0, 0) == pack_lanes(e_gt_s, 8, 8));
+    assert(neon_cmp(N8, M8, 0, 1, 0) == pack_lanes(e_gt_u, 8, 8));
+    assert(neon_cmp(N8, M8, 0, 0, 1) == pack_lanes(e_ge_s, 8, 8));
+    assert(neon_cmp(N8, M8, 0, 1, 1) == pack_lanes(e_ge_u, 8, 8));
+    assert(neon_minmax(N8, M8, 0, 0, 0) == pack_lanes(e_max_s, 8, 8));
+    assert(neon_minmax(N8, M8, 0, 0, 1) == pack_lanes(e_min_s, 8, 8));
+    assert(neon_minmax(N8, M8, 0, 1, 0) == pack_lanes(e_max_u, 8, 8));
+    assert(neon_minmax(N8, M8, 0, 1, 1) == pack_lanes(e_min_u, 8, 8));
+    assert(neon_abd(N8, M8, 0, 0) == pack_lanes(e_abd_s, 8, 8));
+    assert(neon_abd(N8, M8, 0, 1) == pack_lanes(e_abd_u, 8, 8));
+    assert(neon_add(pack_lanes(d8, 8, 8), neon_abd(N8, M8, 0, 0), 0) == pack_lanes(e_aba_s, 8, 8));
+
+    /* Mixed lanes, 16-bit: the sign bit is set in two lanes of each word. */
+    uint64_t n16[4] = { 0x8000, 0x7FFF, 0x0001, 0xFFFF };
+    uint64_t m16[4] = { 0x7FFF, 0x8000, 0x0002, 0xFFFE };
+    uint64_t N16 = pack_lanes(n16, 16, 4), M16 = pack_lanes(m16, 16, 4);
+    uint64_t c16_gt_s[4] = { 0x0000, 0xFFFF, 0x0000, 0xFFFF };
+    uint64_t c16_gt_u[4] = { 0xFFFF, 0x0000, 0x0000, 0xFFFF };
+    uint64_t x16_max_s[4] = { 0x7FFF, 0x7FFF, 0x0002, 0xFFFF };
+    uint64_t x16_min_s[4] = { 0x8000, 0x8000, 0x0001, 0xFFFE };
+    uint64_t x16_max_u[4] = { 0x8000, 0x8000, 0x0002, 0xFFFF };
+    uint64_t x16_min_u[4] = { 0x7FFF, 0x7FFF, 0x0001, 0xFFFE };
+    uint64_t a16_s[4] = { 0xFFFF, 0xFFFF, 0x0001, 0x0001 };
+    uint64_t a16_u[4] = { 0x0001, 0x0001, 0x0001, 0x0001 };
+    assert(neon_cmp(N16, M16, 1, 0, 0) == pack_lanes(c16_gt_s, 16, 4));
+    assert(neon_cmp(N16, M16, 1, 1, 0) == pack_lanes(c16_gt_u, 16, 4));
+    assert(neon_minmax(N16, M16, 1, 0, 0) == pack_lanes(x16_max_s, 16, 4));
+    assert(neon_minmax(N16, M16, 1, 0, 1) == pack_lanes(x16_min_s, 16, 4));
+    assert(neon_minmax(N16, M16, 1, 1, 0) == pack_lanes(x16_max_u, 16, 4));
+    assert(neon_minmax(N16, M16, 1, 1, 1) == pack_lanes(x16_min_u, 16, 4));
+    assert(neon_abd(N16, M16, 1, 0) == pack_lanes(a16_s, 16, 4));
+    assert(neon_abd(N16, M16, 1, 1) == pack_lanes(a16_u, 16, 4));
+
+    /* Mixed lanes, 32-bit: -2^31 and 5 against 2^31 - 1 and -5. */
+    uint64_t n32[2] = { 0x80000000, 0x00000005 };
+    uint64_t m32[2] = { 0x7FFFFFFF, 0xFFFFFFFB };
+    uint64_t N32 = pack_lanes(n32, 32, 2), M32 = pack_lanes(m32, 32, 2);
+    uint64_t c32_gt_s[2] = { 0x00000000, 0xFFFFFFFF };
+    uint64_t c32_gt_u[2] = { 0xFFFFFFFF, 0x00000000 };
+    uint64_t x32_max_s[2] = { 0x7FFFFFFF, 0x00000005 };
+    uint64_t x32_min_s[2] = { 0x80000000, 0xFFFFFFFB };
+    uint64_t x32_max_u[2] = { 0x80000000, 0xFFFFFFFB };
+    uint64_t x32_min_u[2] = { 0x7FFFFFFF, 0x00000005 };
+    uint64_t a32_s[2] = { 0xFFFFFFFF, 0x0000000A };
+    uint64_t a32_u[2] = { 0x00000001, 0xFFFFFFF6 };
+    assert(neon_cmp(N32, M32, 2, 0, 0) == pack_lanes(c32_gt_s, 32, 2));
+    assert(neon_cmp(N32, M32, 2, 1, 0) == pack_lanes(c32_gt_u, 32, 2));
+    assert(neon_minmax(N32, M32, 2, 0, 0) == pack_lanes(x32_max_s, 32, 2));
+    assert(neon_minmax(N32, M32, 2, 0, 1) == pack_lanes(x32_min_s, 32, 2));
+    assert(neon_minmax(N32, M32, 2, 1, 0) == pack_lanes(x32_max_u, 32, 2));
+    assert(neon_minmax(N32, M32, 2, 1, 1) == pack_lanes(x32_min_u, 32, 2));
+    assert(neon_abd(N32, M32, 2, 0) == pack_lanes(a32_s, 32, 2));
+    assert(neon_abd(N32, M32, 2, 1) == pack_lanes(a32_u, 32, 2));
+
+    printf("ok   neon cmp: vcgt/vcge, vmax/vmin, vabd/vaba at the lane edges, signed and unsigned\n");
+}
+
 /* The widening helpers, against values worked out by hand from the lanes.
  * Every source has a lane with its sign bit set, so each signed result differs
  * from the unsigned one. The 32-bit products 0x80000000 * 0x80000000 are 2^62
@@ -1335,6 +1458,7 @@ int main(void) {
     test_neon_f32();
     test_neon_f32_b();
     test_neon_int_c();
+    test_neon_cmp_c();
     test_neon_widen();
     test_neon_shuffle();
     test_neon_ldst();

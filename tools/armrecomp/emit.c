@@ -1261,6 +1261,31 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             break;
         }
 
+        /* Integer compares, max/min and absolute difference (added to vd for
+         * VABA). Each D half reads only its own half of vd, vn and vm, so an
+         * overlapping destination (vaba q0, q0, q1) reads its old value. */
+        case OP_NEON_CGT: case OP_NEON_CGE: case OP_NEON_MAX: case OP_NEON_MIN:
+        case OP_NEON_ABD: case OP_NEON_ABA: {
+            int regs = in->neon_q ? 2 : 1;
+            for (int k = 0; k < regs; k++) {
+                int d = in->vd + k, n = in->vn + k, m = in->vm + k;
+                int sz = in->neon_size, u = in->vfp_unsigned;
+                if (in->op == OP_NEON_CGT || in->op == OP_NEON_CGE)
+                    fprintf(f, "    neon_setd(%d, neon_cmp(neon_getd(%d), neon_getd(%d), %d, %d, %d));\n",
+                            d, n, m, sz, u, in->op == OP_NEON_CGE);
+                else if (in->op == OP_NEON_MAX || in->op == OP_NEON_MIN)
+                    fprintf(f, "    neon_setd(%d, neon_minmax(neon_getd(%d), neon_getd(%d), %d, %d, %d));\n",
+                            d, n, m, sz, u, in->op == OP_NEON_MIN);
+                else if (in->op == OP_NEON_ABD)
+                    fprintf(f, "    neon_setd(%d, neon_abd(neon_getd(%d), neon_getd(%d), %d, %d));\n",
+                            d, n, m, sz, u);
+                else
+                    fprintf(f, "    neon_setd(%d, neon_add(neon_getd(%d), neon_abd(neon_getd(%d), neon_getd(%d), %d, %d), %d));\n",
+                            d, d, n, m, sz, u, sz);
+            }
+            break;
+        }
+
         case OP_NEON_SHL: case OP_NEON_SHR: case OP_NEON_SRA: {
             int regs = in->neon_q ? 2 : 1;
             for (int k = 0; k < regs; k++) {

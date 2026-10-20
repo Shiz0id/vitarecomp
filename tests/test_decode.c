@@ -1965,6 +1965,134 @@ static void test_shifts_and_indexing(void) {
     printf("  shift-by-0 meanings, immediate carry, indexing, hints: ok\n");
 }
 
+/* The integer compares, max and min, and absolute difference, all in the
+ * same-length group. VCGT and VCGE are opc 0011 with B clear and set, VMAX and
+ * VMIN opc 0110, VABD and VABA opc 0111, and U picks the signedness. Each
+ * encoding was taken from arm-vita-eabi-as and checked by objdump. The rejects
+ * are computed from the layout: size 3 (h1 bits 5:4 = 11) is UNDEFINED for
+ * these, and Q with an odd Vd is refused by the existing register check. */
+static void test_neon_cmp_forms(void) {
+    arm_insn in;
+
+    put16(0, 0xEF01); put16(2, 0x0302);                  /* vcgt.s8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_CGT && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.neon_size == 0 && !in.vfp_unsigned);
+    put16(0, 0xFF01); put16(2, 0x0302);                  /* vcgt.u8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_CGT && in.neon_size == 0 && in.vfp_unsigned && !in.neon_q);
+    assert(strcmp(in.mnemonic, "vcgt.u") == 0);
+    put16(0, 0xEF12); put16(2, 0x0344);                  /* vcgt.s16 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_CGT && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.neon_q && in.neon_size == 1 && !in.vfp_unsigned);
+    put16(0, 0xFF62); put16(2, 0x03E4);                  /* vcgt.u32 q8, q9, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_CGT && in.vd == 16 && in.vn == 18 && in.vm == 20 && in.neon_q && in.neon_size == 2 && in.vfp_unsigned);
+    put16(0, 0xEF01); put16(2, 0x1302);                  /* vcgt.s8 d1, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_CGT && in.vd == 1 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.neon_size == 0 && !in.vfp_unsigned);
+
+    put16(0, 0xEF01); put16(2, 0x0312);                  /* vcge.s8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_CGE && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.neon_size == 0 && !in.vfp_unsigned);
+    put16(0, 0xFF14); put16(2, 0x3315);                  /* vcge.u16 d3, d4, d5 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_CGE && in.vd == 3 && in.vn == 4 && in.vm == 5 && !in.neon_q && in.neon_size == 1 && in.vfp_unsigned);
+    put16(0, 0xEF62); put16(2, 0x03F4);                  /* vcge.s32 q8, q9, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_CGE && in.vd == 16 && in.vn == 18 && in.vm == 20 && in.neon_q && in.neon_size == 2 && !in.vfp_unsigned);
+    put16(0, 0xFF02); put16(2, 0x0354);                  /* vcge.u8 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_CGE && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.neon_q && in.neon_size == 0 && in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vcge.u") == 0);
+
+    put16(0, 0xEF01); put16(2, 0x0602);                  /* vmax.s8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MAX && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.neon_size == 0 && !in.vfp_unsigned);
+    put16(0, 0xFF01); put16(2, 0x0602);                  /* vmax.u8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MAX && in.neon_size == 0 && in.vfp_unsigned && !in.neon_q);
+    put16(0, 0xEF14); put16(2, 0x2646);                  /* vmax.s16 q1, q2, q3 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MAX && in.vd == 2 && in.vn == 4 && in.vm == 6 && in.neon_q && in.neon_size == 1 && !in.vfp_unsigned);
+    put16(0, 0xFF61); put16(2, 0x06A2);                  /* vmax.u32 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MAX && in.vd == 16 && in.vn == 17 && in.vm == 18 && !in.neon_q && in.neon_size == 2 && in.vfp_unsigned);
+
+    put16(0, 0xEF01); put16(2, 0x0612);                  /* vmin.s8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MIN && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.neon_size == 0 && !in.vfp_unsigned);
+    put16(0, 0xFF12); put16(2, 0x0654);                  /* vmin.u16 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MIN && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.neon_q && in.neon_size == 1 && in.vfp_unsigned);
+    put16(0, 0xEF61); put16(2, 0x06B2);                  /* vmin.s32 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MIN && in.vd == 16 && in.vn == 17 && in.vm == 18 && !in.neon_q && in.neon_size == 2 && !in.vfp_unsigned);
+    put16(0, 0xFF62); put16(2, 0x06F4);                  /* vmin.u32 q8, q9, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MIN && in.vd == 16 && in.vn == 18 && in.vm == 20 && in.neon_q && in.neon_size == 2 && in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vmin.u") == 0);
+
+    put16(0, 0xEF01); put16(2, 0x0702);                  /* vabd.s8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ABD && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.neon_size == 0 && !in.vfp_unsigned);
+    put16(0, 0xFF01); put16(2, 0x0702);                  /* vabd.u8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ABD && in.neon_size == 0 && in.vfp_unsigned && !in.neon_q);
+    put16(0, 0xEF12); put16(2, 0x0744);                  /* vabd.s16 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ABD && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.neon_q && in.neon_size == 1 && !in.vfp_unsigned);
+    put16(0, 0xFF61); put16(2, 0x07A2);                  /* vabd.u32 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ABD && in.vd == 16 && in.vn == 17 && in.vm == 18 && !in.neon_q && in.neon_size == 2 && in.vfp_unsigned);
+    put16(0, 0xEF6E); put16(2, 0xF7AD);                  /* vabd.s32 d31, d30, d29 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ABD && in.vd == 31 && in.vn == 30 && in.vm == 29 && !in.neon_q && in.neon_size == 2 && !in.vfp_unsigned);
+
+    /* VABA is the accumulating form: the same opc 0111 with B set. */
+    put16(0, 0xEF01); put16(2, 0x0712);                  /* vaba.s8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ABA && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.neon_size == 0 && !in.vfp_unsigned);
+    put16(0, 0xFF12); put16(2, 0x0754);                  /* vaba.u16 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ABA && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.neon_q && in.neon_size == 1 && in.vfp_unsigned);
+    put16(0, 0xEF61); put16(2, 0x07B2);                  /* vaba.s32 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ABA && in.vd == 16 && in.vn == 17 && in.vm == 18 && !in.neon_q && in.neon_size == 2 && !in.vfp_unsigned);
+    put16(0, 0xFF62); put16(2, 0x07F4);                  /* vaba.u32 q8, q9, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ABA && in.vd == 16 && in.vn == 18 && in.vm == 20 && in.neon_q && in.neon_size == 2 && in.vfp_unsigned);
+
+    /* Neighbours. The saturating VQSUB (opc 0010, B set) and the float compare
+     * VCGT.F32 (opc 1110) must not become an integer compare, and the float
+     * VMAX.F32 (opc 1111) must not become OP_NEON_MAX. */
+    put16(0, 0xEF01); put16(2, 0x0212);                  /* vqsub.s8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QSUB && in.op != OP_NEON_CGT);
+    put16(0, 0xFF21); put16(2, 0x0E02);                  /* vcgt.f32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCGT && in.op != OP_NEON_CGT);
+    put16(0, 0xFF01); put16(2, 0x0E02);                  /* vcge.f32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCGE && in.op != OP_NEON_CGE);
+    put16(0, 0xEF01); put16(2, 0x0F02);                  /* vmax.f32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMAX && in.op != OP_NEON_MAX);
+
+    /* Rejects. Each one decodes to OP_NONE, the trap, as the other refused
+     * three-register forms do. */
+    put16(0, 0xEF31); put16(2, 0x0602);                  /* vmax.s64 (size 3): UNDEFINED */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xFF31); put16(2, 0x0712);                  /* vaba.u64 (size 3): UNDEFINED */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xEF02); put16(2, 0x1644);                  /* vmax.s8 q with Vd = d1: odd */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+
+    printf("ok   neon compares, max/min, absolute difference, vaba, and their rejects\n");
+}
+
 int main(void) {
     printf("decode:\n");
     test_thumb_width();
@@ -1990,6 +2118,7 @@ int main(void) {
     test_neon_shuffle_forms();
     test_neon_ldst_multi();
     test_neon_narrow_forms();
+    test_neon_cmp_forms();
     test_tables_hints_exclusives();
     printf("all decode tests passed\n");
     return 0;

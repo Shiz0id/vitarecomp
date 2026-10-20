@@ -131,6 +131,9 @@ typedef enum {
     OP_NEON_FCVT_FROM_INT,      /* S32 or U32 (vfp_unsigned) to F32           */
     OP_NEON_MUL, OP_NEON_MLA, OP_NEON_MLS, /* integer, lanes of 8/16/32, wrapping */
     OP_NEON_QADD, OP_NEON_QSUB, /* saturating; vfp_unsigned picks the signedness */
+    OP_NEON_CGT, OP_NEON_CGE,   /* integer compares, all-ones where true; vfp_unsigned */
+    OP_NEON_MAX, OP_NEON_MIN,   /* integer max and min; vfp_unsigned picks the signedness */
+    OP_NEON_ABD, OP_NEON_ABA,   /* absolute difference; ABA adds it to vd, vfp_unsigned */
     OP_NEON_SHL, OP_NEON_SHR, OP_NEON_SRA, /* by immediate: imm is the amount,
                                    neon_size the lane; SHR and SRA use
                                    vfp_unsigned for the signedness            */

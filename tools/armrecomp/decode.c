@@ -882,6 +882,27 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
                 set(o, A_SIMD, U ? "vqsub.u" : "vqsub.s");
             return 1;
         }
+        /* Integer compares, max/min and absolute difference: opc 0011 (VCGT,
+         * VCGE), 0110 (VMAX, VMIN) and 0111 (VABD, VABA), the second of each
+         * pair with B set. U picks the signedness. Size 3 is UNDEFINED for
+         * all six and is refused. */
+        if ((opc == 0x3 || opc == 0x6 || opc == 0x7) && size != 3) {
+            static const arm_op ops[3][2] = {
+                { OP_NEON_CGT, OP_NEON_CGE },
+                { OP_NEON_MAX, OP_NEON_MIN },
+                { OP_NEON_ABD, OP_NEON_ABA },
+            };
+            static const char *const nm[3][2][2] = {
+                { { "vcgt.s", "vcgt.u" }, { "vcge.s", "vcge.u" } },
+                { { "vmax.s", "vmax.u" }, { "vmin.s", "vmin.u" } },
+                { { "vabd.s", "vabd.u" }, { "vaba.s", "vaba.u" } },
+            };
+            int k = opc == 0x3 ? 0 : opc == 0x6 ? 1 : 2;
+            o->op = ops[k][B];
+            o->vfp_unsigned = (uint8_t)U;
+            set(o, A_SIMD, nm[k][B][U]);
+            return 1;
+        }
         if (opc == 0xD && !(size & 1)) {                   /* float, .F32 only */
             /* For floats the size field is sz (bit 20, 0 for F32) and bit 21
              * (size>>1) is an operation bit, so the operation is picked by U,
