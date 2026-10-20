@@ -795,11 +795,16 @@ static int cmd_emit(const char *path, const char *outpath, uint32_t limit,
     if (dot) *dot = '\0';
     strncat(imppath, "_imports", sizeof(imppath) - strlen(imppath) - 1);
 
-    if (make_dir(imppath) != 0)
+    /* Output to a device (`emit x.elf /dev/null` to read the statistics)
+     * gets no import directory: beside /dev/null it would be /dev/null_imports. */
+    struct stat ost;
+    int to_file = stat(outpath, &ost) == 0 && S_ISREG(ost.st_mode);
+    if (!to_file) imppath[0] = '\0';
+    else if (make_dir(imppath) != 0)
         fprintf(stderr, "armrecomp: cannot create %s\n", imppath);
 
     emit_stats st;
-    em_emit(&img, &vm, db, &r, f, imppath, limit, &st);
+    em_emit(&img, &vm, db, &r, f, imppath[0] ? imppath : NULL, limit, &st);
     fclose(f);
 
     printf("wrote %s\n", outpath);
@@ -839,7 +844,7 @@ static int cmd_emit(const char *path, const char *outpath, uint32_t limit,
         if (st.traps_other)
             printf("  %-24s %8u\n", "(other kinds)", st.traps_other);
     }
-    if (st.imports_used)
+    if (st.imports_used && imppath[0])
         printf("\nwrote %s/\n  %u import defaults, one file each, each trapping by name\n"
                "  build them as a static library listed AFTER the runtime;\n"
                "  implementing one is then just defining it\n",
