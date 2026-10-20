@@ -66,6 +66,16 @@ static int fb_has_label(const fbody *b, uint32_t addr) {
     return 0;
 }
 
+/* Whether control can go on to the next address after this instruction. The
+ * same rule collect() ends a straight-line run on. */
+static int falls_through(const arm_insn *in) {
+    if ((in->cls == A_RETURN || in->cls == A_UNDEF) && !in->conditional) return 0;
+    if (in->cls == A_INDIRECT && !in->conditional) return 0;
+    if (in->table_n) return 0;
+    if (in->cls == A_BRANCH && !in->conditional) return 0;
+    return 1;
+}
+
 /* Collect a function by FOLLOWING ITS CONTROL FLOW, not by sweeping its extent.
  *
  * The distinction is the difference between a usable output and a 2.4 GB one.
@@ -80,18 +90,33 @@ static int fb_has_label(const fbody *b, uint32_t addr) {
  * it is not a body.
  */
 
-#define VISIT_SLOTS 8192
-
-typedef struct { uint32_t k[VISIT_SLOTS]; } visited;
+/* The addresses already collected. It grows. A fixed 8192-slot table, once
+ * full, answered "already emitted" for every new address, and the walk took
+ * that as the end of the run: neontest's main passed 8192 instructions and its
+ * last tests were cut off. The C ran off the end of the function, so main
+ * returned early with no trap at all. */
+typedef struct { uint32_t *k; uint32_t n, cap; } visited;
 
 static int visit_mark(visited *v, uint32_t addr) {
-    uint32_t h = (addr * 2654435761u) & (VISIT_SLOTS - 1);
-    for (uint32_t i = 0; i < VISIT_SLOTS; i++) {
-        uint32_t s = (h + i) & (VISIT_SLOTS - 1);
-        if (v->k[s] == addr) return 0;          /* already seen */
-        if (v->k[s] == 0)    { v->k[s] = addr; return 1; }
+    if (2 * (v->n + 1) > v->cap) {               /* keep the load under half */
+        uint32_t ncap = v->cap ? v->cap * 2 : 1024;
+        uint32_t *nk = (uint32_t *)calloc(ncap, sizeof(uint32_t));
+        if (!nk) { fprintf(stderr, "armrecomp: out of memory\n"); exit(1); }
+        for (uint32_t i = 0; i < v->cap; i++) {
+            if (!v->k[i]) continue;
+            uint32_t s = (v->k[i] * 2654435761u) & (ncap - 1);
+            while (nk[s]) s = (s + 1) & (ncap - 1);
+            nk[s] = v->k[i];
+        }
+        free(v->k);
+        v->k = nk;
+        v->cap = ncap;
     }
-    return 0;                                    /* table full: stop expanding */
+    uint32_t s = (addr * 2654435761u) & (v->cap - 1);
+    for (;; s = (s + 1) & (v->cap - 1)) {
+        if (v->k[s] == addr) return 0;          /* already seen */
+        if (v->k[s] == 0)    { v->k[s] = addr; v->n++; return 1; }
+    }
 }
 
 static int cmp_addr(const void *a, const void *b) {
@@ -206,6 +231,8 @@ static void collect(const vm_image *img, const vf_func *fn, fbody *b) {
         }
     }
 
+    free(seen.k);
+
     /* Blocks were discovered out of order; emit in address order so the output
      * reads alongside a disassembly. */
     if (b->n > 1) qsort(b->v, b->n, sizeof(arm_insn), cmp_addr);
@@ -238,9 +265,9 @@ static void collect(const vm_image *img, const vf_func *fn, fbody *b) {
      *
      * A label is recorded the moment a branch target is seen inside the
      * function's extent, but the block behind it is only reached if the walk
-     * gets there — and the walk can stop short at any of three limits: the
-     * visited table filling, the block stack filling, or the per-function
-     * instruction cap. When that happens the label is referenced by a `goto`
+     * gets there — and the walk can stop short at either of two limits: the
+     * block stack filling, or the per-function instruction cap. (A third, the
+     * visited table filling, is gone: that table grows now.) When that happens the label is referenced by a `goto`
      * and never placed, which is C that does not compile.
      *
      * Pruning here rather than raising the limits is the honest fix: the limits
@@ -2066,6 +2093,24 @@ int em_emit(const vm_image *img, const vm_module *mod, const nid_db *db,
             if (emit_insn(img, mod, db, &fs, &b, in, f, st)) st->translated++;
             else                               st->trapped++;
             st->insns++;
+
+            /* The body is in address order, so falling through means running
+             * on into whatever block was emitted next, or off the end of the C
+             * function and back to the caller. Both are wrong when the next
+             * address was not collected: the run was cut short (decode
+             * failure, the extent bound, a limit) or it falls into another
+             * function's entry. Code that falls into a function enters it, as
+             * a branch would; anything else is a named trap. Before this, a
+             * truncated main simply returned. */
+            uint32_t next = in->addr + in->width;
+            if (falls_through(in) && (k + 1 == b.n || b.v[k + 1].addr != next)) {
+                if (fs_has(&fs, next)) {
+                    fprintf(f, "    vita_func_%08X(); return;\n", next);
+                } else {
+                    fprintf(f, "    vita_trap_unimpl(0x%08X, 0, \"fell off the translated body\");\n", next);
+                    note_trap(st, "fell off the translated body");
+                }
+            }
         }
 
         fprintf(f, "}\n\n");
