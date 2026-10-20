@@ -1425,6 +1425,42 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             break;
         }
 
+        case OP_NEON_VLDN: case OP_NEON_VSTN: {
+            /* VLD2-4/VST2-4: the whole run of n*words D words is moved as one
+             * block, then neon_deinterleave/neon_interleave map it to and from
+             * the member registers. Member k is D register vd + k*inc onward,
+             * words of them. The base is read once, as for VLD1, and every
+             * register is gathered before the first store. */
+            int words = in->neon_q ? 2 : 1, n = (int)in->imm, total = n * words;
+            const char *rn = reg_name(in->rn);
+            fprintf(f, "    { uint32_t _a = %s; uint64_t _m[8], _r[8];\n", rn);
+            if (in->op == OP_NEON_VLDN) {
+                for (int i = 0; i < total; i++)
+                    fprintf(f, "      _m[%d] = vita_read32(_a + %d); _m[%d] |= (uint64_t)vita_read32(_a + %d) << 32;\n",
+                            i, i * 8, i, i * 8 + 4);
+                fprintf(f, "      neon_deinterleave(_m, _r, %d, %d, %u);\n", n, words, in->neon_size);
+                for (int k = 0; k < n; k++)
+                    for (int w = 0; w < words; w++)
+                        fprintf(f, "      neon_setd(%d, _r[%d]);\n",
+                                in->vd + k * in->neon_inc + w, k * words + w);
+            } else {
+                for (int k = 0; k < n; k++)
+                    for (int w = 0; w < words; w++)
+                        fprintf(f, "      _r[%d] = neon_getd(%d);\n",
+                                k * words + w, in->vd + k * in->neon_inc + w);
+                fprintf(f, "      neon_interleave(_r, _m, %d, %d, %u);\n", n, words, in->neon_size);
+                for (int i = 0; i < total; i++)
+                    fprintf(f, "      vita_write32(_a + %d, (uint32_t)_m[%d]); vita_write32(_a + %d, (uint32_t)(_m[%d] >> 32));\n",
+                            i * 8, i, i * 8 + 4, i);
+            }
+            if (in->writeback) {
+                if (in->rm != ARM_NO_REG) fprintf(f, "      %s = _a + %s;\n", rn, src_name(in, in->rm));
+                else                      fprintf(f, "      %s = _a + %d;\n", rn, total * 8);
+            }
+            fprintf(f, "    }\n");
+            break;
+        }
+
         case OP_VMOV_V_RR: case OP_VMOV_RR_V: {
             int w = in->vfp_dp ? in->vm * 2 : in->vm;     /* first word of the pair */
             if (in->op == OP_VMOV_V_RR)

@@ -1157,11 +1157,59 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
     return 0;
 }
 
+/* VLD2-4 / VST2-4, the "multiple structures" forms (A=0, types 0000-0101 and
+ * 1000-1001), same h1/h2 layout as decode_neon_ls. Member k of n lives in the
+ * D register d + k*inc (words D registers of it, see neon_q). The type 0011
+ * form is two Q-register members, so neon_q is set and words is 2. Memory
+ * holds the members interleaved element by element, which neon_deinterleave
+ * undoes at run time; nothing here depends on alignment, as with VLD1.
+ *
+ * Rejects, all from the architecture's encoding tables: size 3 (no 64-bit
+ * element form), align 3 for the VLD2 D forms (1000 and 1001), align bit 1 for
+ * VLD3 (the hint is reserved), any register above d31, and rn = pc. */
+static int decode_neon_lsn(uint16_t h1, uint16_t h2, arm_insn *o) {
+    int L = (h1 >> 5) & 1;
+    int d = (((h1 >> 6) & 1) << 4) | ((h2 >> 12) & 0xF);
+    int type = (h2 >> 8) & 0xF, size = (h2 >> 6) & 3, align = (h2 >> 4) & 3;
+    int n, inc, words = 1;
+    switch (type) {
+        case 0x8: n = 2; inc = 1; if (align == 3) return 0; break;
+        case 0x9: n = 2; inc = 2; if (align == 3) return 0; break;
+        case 0x3: n = 2; inc = 2; words = 2; break;
+        case 0x4: n = 3; inc = 1; if (align & 2) return 0; break;
+        case 0x5: n = 3; inc = 2; if (align & 2) return 0; break;
+        case 0x0: n = 4; inc = 1; break;
+        case 0x1: n = 4; inc = 2; break;
+        default:  return 0;
+    }
+    if (size == 3) return 0;
+    if (d + (n - 1) * inc + words - 1 > 31) return 0;
+    if ((h1 & 0xF) == 15) return 0;
+    int rm = h2 & 0xF;
+    static const char *const names[2][5] = {
+        { 0, 0, "vst2", "vst3", "vst4" },
+        { 0, 0, "vld2", "vld3", "vld4" },
+    };
+    o->rn = (int8_t)(h1 & 0xF);
+    o->vd = (int8_t)d;
+    o->imm = (uint32_t)n;
+    o->has_imm = 1;
+    o->neon_size = (uint8_t)size;
+    o->neon_q = (uint8_t)(words == 2);
+    o->neon_inc = (uint8_t)inc;
+    o->writeback = (uint8_t)(rm != 15);
+    o->rm = (rm == 15 || rm == 13) ? ARM_NO_REG : (int8_t)rm;
+    o->op = L ? OP_NEON_VLDN : OP_NEON_VSTN;
+    set(o, A_SIMD, names[L][n]);
+    return 1;
+}
+
 /* Element and structure loads/stores: h1 1111 1001 AD L0 nnnn, h2 dddd tttt
- * sszz mmmm. Only VLD1/VST1 of whole registers (A=0, the four "multiple
- * single elements" types), which is what memcpy, struct copies and every
- * vectorised zeroing loop use. Lane size is irrelevant to the bytes moved on
- * a little-endian machine, and the alignment hint only adds a fault the
+ * sszz mmmm. VLD1/VST1 of whole registers (A=0, the four "multiple single
+ * elements" types) are handled here, which is what memcpy, struct copies and
+ * every vectorised zeroing loop use; the multiple-structures forms go to
+ * decode_neon_lsn. Lane size is irrelevant to the bytes moved on a
+ * little-endian machine, and the alignment hint only adds a fault the
  * hardware would raise for a misaligned pointer, so neither changes the
  * translation. Rm: 15 no writeback, 13 advance by the transfer size, any
  * other register advance by it. */
@@ -1176,7 +1224,7 @@ static int decode_neon_ls(uint16_t h1, uint16_t h2, arm_insn *o) {
         case 0xA: n = 2; if (align == 3) return 0; break;
         case 0x6: n = 3; if (align & 2) return 0; break;
         case 0x2: n = 4; break;
-        default:  return 0;
+        default:  return decode_neon_lsn(h1, h2, o);
     }
     if (d + n > 32) return 0;
     o->rn = h1 & 0xF;

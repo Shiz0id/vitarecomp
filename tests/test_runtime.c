@@ -1002,6 +1002,81 @@ static void test_neon_shuffle(void) {
     printf("ok   neon shuffles: vext, vrev, vswp, vtrn, vuzp, vzip, vdup scalar, vtbl/vtbx\n");
 }
 
+/* VLD2-4 / VST2-4 element order. Memory holds bytes 0x00, 0x01, ... in order,
+ * as little-endian D words, so each expected value below is the byte index
+ * of each element, worked out by hand: member k takes memory elements k, k+n,
+ * k+2n, ... Lanes are listed from the top down in the hex literals. */
+static void test_neon_ldst(void) {
+    const uint64_t M[4] = { 0x0706050403020100ull, 0x0F0E0D0C0B0A0908ull,
+                            0x1716151413121110ull, 0x1F1E1D1C1B1A1918ull };
+    uint64_t r[8];
+
+    /* VLD2.8 {d0-d1}: even bytes to d0, odd bytes to d1. */
+    neon_deinterleave(M, r, 2, 1, 0);
+    assert(r[0] == 0x0E0C0A0806040200ull && r[1] == 0x0F0D0B0907050301ull);
+    /* VLD2.16 {d0,d2}: every other halfword. */
+    neon_deinterleave(M, r, 2, 1, 1);
+    assert(r[0] == 0x0D0C090805040100ull && r[1] == 0x0F0E0B0A07060302ull);
+    /* VLD2.32 {d0,d2}: every other word. */
+    neon_deinterleave(M, r, 2, 1, 2);
+    assert(r[0] == 0x0B0A090803020100ull && r[1] == 0x0F0E0D0C07060504ull);
+
+    /* VLD2.8 {d0-d3}, the Q-pair form. Member 0 is the even bytes of all 32,
+     * so its second D word (r[1]) holds bytes 16..30, past the first 16. */
+    neon_deinterleave(M, r, 2, 2, 0);
+    assert(r[0] == 0x0E0C0A0806040200ull && r[1] == 0x1E1C1A1816141210ull);
+    assert(r[2] == 0x0F0D0B0907050301ull && r[3] == 0x1F1D1B1917151311ull);
+
+    /* VLD3.8 {d0-d2}: byte 3j+k to member k. */
+    neon_deinterleave(M, r, 3, 1, 0);
+    assert(r[0] == 0x15120F0C09060300ull);
+    assert(r[1] == 0x1613100D0A070401ull);
+    assert(r[2] == 0x1714110E0B080502ull);
+    /* VLD3.32 {d0,d1,d2}: 32-bit element 3j+k to member k, two elements each. */
+    neon_deinterleave(M, r, 3, 1, 2);
+    assert(r[0] == 0x0F0E0D0C03020100ull);
+    assert(r[1] == 0x1312111007060504ull);
+    assert(r[2] == 0x171615140B0A0908ull);
+
+    /* VLD4.8 {d0-d3}: byte 4j+k to member k. */
+    neon_deinterleave(M, r, 4, 1, 0);
+    assert(r[0] == 0x1C1814100C080400ull);
+    assert(r[1] == 0x1D1915110D090501ull);
+    assert(r[2] == 0x1E1A16120E0A0602ull);
+    assert(r[3] == 0x1F1B17130F0B0703ull);
+    /* VLD4.16 {d0,d2,d4,d6}: halfword 4j+k to member k. */
+    neon_deinterleave(M, r, 4, 1, 1);
+    assert(r[0] == 0x1918111009080100ull);
+    assert(r[1] == 0x1B1A13120B0A0302ull);
+    assert(r[2] == 0x1D1C15140D0C0504ull);
+    assert(r[3] == 0x1F1E17160F0E0706ull);
+
+    /* VST is the inverse: interleaving the VLD2.8 members gives back the
+     * first sixteen bytes exactly. */
+    neon_deinterleave(M, r, 2, 1, 0);
+    neon_interleave(r, r + 4, 2, 1, 0);
+    assert(r[4] == M[0] && r[5] == M[1]);
+
+    /* interleave(deinterleave(x)) == x and deinterleave(interleave(x)) == x,
+     * for every member count, width and element size. The pattern makes each
+     * word distinct, so a misplaced element shows. */
+    for (int n = 2; n <= 4; n++)
+        for (int words = 1; words <= 2; words++)
+            for (int size = 0; size <= 3; size++) {
+                uint64_t x[8], m[8], back[8];
+                for (int i = 0; i < n * words; i++)
+                    x[i] = 0x9E3779B97F4A7C15ull * (uint64_t)(i + 1) + 0x0123456789ABCDEFull * (uint64_t)i;
+                neon_deinterleave(x, m, n, words, size);
+                neon_interleave(m, back, n, words, size);
+                for (int i = 0; i < n * words; i++) assert(back[i] == x[i]);
+                neon_interleave(x, m, n, words, size);
+                neon_deinterleave(m, back, n, words, size);
+                for (int i = 0; i < n * words; i++) assert(back[i] == x[i]);
+            }
+
+    printf("ok   neon structures: vld2/3/4 element order, Q pairs, interleave round trips\n");
+}
+
 static void test_bit_ops(void) {
     assert(vita_rbit(1u) == 0x80000000u);
     assert(vita_rbit(0x12345678u) == 0x1E6A2C48u);
@@ -1037,6 +1112,7 @@ int main(void) {
     test_neon_f32_b();
     test_neon_int_c();
     test_neon_shuffle();
+    test_neon_ldst();
     test_bit_ops();
     test_parallel_and_lanes();
     test_vfp_d32();

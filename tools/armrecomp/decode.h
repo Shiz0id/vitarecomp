@@ -107,6 +107,9 @@ typedef enum {
     OP_NEON_VLD1, OP_NEON_VST1, /* imm D registers from vd, at [rn]; rm is the
                                    post-increment register, writeback alone
                                    means "by the transfer size"              */
+    OP_NEON_VLDN, OP_NEON_VSTN, /* VLD2-4/VST2-4 (multiple structures): imm
+                                   members, each neon_q ? a Q pair : a D,
+                                   interleaved in memory; see neon_inc        */
     OP_NEON_FADD, OP_NEON_FSUB, /* float .F32 lanes, standard FPSCR          */
     OP_NEON_FMUL,               /* float, vd = vn * vm                       */
     OP_NEON_FMLA, OP_NEON_FMLS, /* vd = vd +/- round(vn * vm), not fused     */
@@ -200,6 +203,12 @@ typedef struct {
     uint8_t    it_mask;         /* IT: which of the next 4 are conditional */
     uint16_t   table_n;         /* TBB/TBH: entries, 0 when not bounded    */
     uint8_t    xsize;           /* LDREX/STREX: 1, 2, 4, or 8 (the D form)  */
+
+    /* VLDN/VSTN: the register step from one member to the next, 1 or 2. Kept
+     * out of `imm` (the member count) and out of neon_q/neon_size, which give
+     * the words per member and the element size; no one of those fields can
+     * carry a third value without the others changing meaning. */
+    uint8_t    neon_inc;
 
     /* Bitfield ops. Kept out of `imm`/`shift_amt` because a field named for
      * something else is how a reader ends up trusting the wrong one. */

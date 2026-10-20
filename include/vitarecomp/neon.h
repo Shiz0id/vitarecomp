@@ -555,6 +555,42 @@ static inline uint64_t neon_tbl(const uint64_t *t, int count, uint64_t idx, uint
     return r;
 }
 
+/* VLD2-4 and VST2-4 move n members of `words` D registers each (words is 2
+ * for the Q-pair form). In memory the run of n*words D words holds element j
+ * of member k at element index j*n + k, so the members are interleaved one
+ * element at a time: member 0's first element, member 1's first, ..., then
+ * the second element of each. Elements are counted across the whole member,
+ * words * (8 >> size) of them, lowest address first.
+ *
+ * Both are pure functions on word arrays, with no memory access, so the tests
+ * can check them directly. mem and in hold n*words D words; member k of out or
+ * in is words D words at k*words. The arrays must not overlap. */
+
+/* mem (memory order, lowest address first) to members. */
+static inline void neon_deinterleave(const uint64_t *mem, uint64_t *out, int n, int words, int size) {
+    int per = 8 >> size;                       /* elements per D word          */
+    int elems = words * per;                   /* elements in one member       */
+    for (int i = 0; i < n * words; i++) out[i] = 0;
+    for (int k = 0; k < n; k++)
+        for (int j = 0; j < elems; j++) {
+            uint64_t *w = &out[k * words + j / per];
+            *w = neon_put_lane(*w, size, j % per, neon_elem(mem, size, j * n + k));
+        }
+}
+
+/* Members to mem (memory order): the inverse of neon_deinterleave. */
+static inline void neon_interleave(const uint64_t *in, uint64_t *mem, int n, int words, int size) {
+    int per = 8 >> size;
+    int elems = words * per;
+    for (int i = 0; i < n * words; i++) mem[i] = 0;
+    for (int k = 0; k < n; k++)
+        for (int j = 0; j < elems; j++) {
+            int m = j * n + k;
+            uint64_t *w = &mem[m / per];
+            *w = neon_put_lane(*w, size, m % per, neon_elem(in + k * words, size, j));
+        }
+}
+
 #ifdef __cplusplus
 }
 #endif

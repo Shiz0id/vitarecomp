@@ -1555,6 +1555,114 @@ static void test_neon_shuffle_forms(void) {
     printf("ok   neon shuffles: vext, vrev, vswp, vtrn, vuzp, vzip, vdup scalar, vtbl/vtbx, and their rejects\n");
 }
 
+/* VLD2-4 / VST2-4, multiple structures. Each encoding was taken from
+ * arm-vita-eabi-as and checked by objdump. neon_inc is the register step
+ * between members, and neon_q marks the type 0011 form, whose members are Q
+ * pairs. The rejects are computed from the encoding tables. */
+static void test_neon_ldst_multi(void) {
+    arm_insn in;
+
+    put16(0, 0xF920); put16(2, 0x080F);                  /* vld2.8 {d0-d1}, [r0] */
+    in = dec(ARM_T32, BASE);
+    assert(in.cls == A_SIMD && in.op == OP_NEON_VLDN && strcmp(in.mnemonic, "vld2") == 0);
+    assert(in.vd == 0 && in.rn == 0 && in.imm == 2 && in.neon_size == 0);
+    assert(!in.neon_q && in.neon_inc == 1 && !in.writeback && in.rm == ARM_NO_REG);
+
+    put16(0, 0xF921); put16(2, 0x094D);                  /* vld2.16 {d0,d2}, [r1]! */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VLDN && in.vd == 0 && in.rn == 1 && in.imm == 2);
+    assert(in.neon_size == 1 && !in.neon_q && in.neon_inc == 2);
+    assert(in.writeback && in.rm == ARM_NO_REG);         /* rm 13: by transfer size */
+
+    put16(0, 0xF922); put16(2, 0x0383);                  /* vld2.32 {d0-d3}, [r2], r3 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VLDN && in.vd == 0 && in.rn == 2 && in.imm == 2);
+    assert(in.neon_size == 2 && in.neon_q && in.neon_inc == 2);
+    assert(in.writeback && in.rm == 3);
+
+    put16(0, 0xF960); put16(2, 0x032F);                  /* vld2.8 {d16-d19}, [r0 :128] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VLDN && in.vd == 16 && in.rn == 0 && in.imm == 2);
+    assert(in.neon_size == 0 && in.neon_q && in.neon_inc == 2 && !in.writeback);
+
+    put16(0, 0xF906); put16(2, 0x484F);                  /* vst2.16 {d4-d5}, [r6] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VSTN && in.vd == 4 && in.rn == 6 && in.imm == 2);
+    assert(in.neon_size == 1 && !in.neon_q && in.neon_inc == 1 && !in.writeback);
+    assert(strcmp(in.mnemonic, "vst2") == 0);
+
+    put16(0, 0xF901); put16(2, 0x038D);                  /* vst2.32 {d0-d3}, [r1]! */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VSTN && in.vd == 0 && in.rn == 1 && in.imm == 2);
+    assert(in.neon_size == 2 && in.neon_q && in.neon_inc == 2 && in.writeback);
+    assert(in.rm == ARM_NO_REG);
+
+    put16(0, 0xF920); put16(2, 0x040F);                  /* vld3.8 {d0-d2}, [r0] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VLDN && in.vd == 0 && in.rn == 0 && in.imm == 3);
+    assert(in.neon_size == 0 && !in.neon_q && in.neon_inc == 1 && !in.writeback);
+    assert(strcmp(in.mnemonic, "vld3") == 0);
+
+    put16(0, 0xF921); put16(2, 0x054D);                  /* vld3.16 {d0,d2,d4}, [r1]! */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VLDN && in.vd == 0 && in.rn == 1 && in.imm == 3);
+    assert(in.neon_size == 1 && !in.neon_q && in.neon_inc == 2 && in.writeback);
+
+    put16(0, 0xF902); put16(2, 0x1484);                  /* vst3.32 {d1-d3}, [r2], r4 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VSTN && in.vd == 1 && in.rn == 2 && in.imm == 3);
+    assert(in.neon_size == 2 && !in.neon_q && in.neon_inc == 1 && in.writeback && in.rm == 4);
+
+    put16(0, 0xF920); put16(2, 0x000F);                  /* vld4.8 {d0-d3}, [r0] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VLDN && in.vd == 0 && in.rn == 0 && in.imm == 4);
+    assert(in.neon_size == 0 && !in.neon_q && in.neon_inc == 1 && !in.writeback);
+    assert(strcmp(in.mnemonic, "vld4") == 0);
+
+    put16(0, 0xF921); put16(2, 0x018D);                  /* vld4.32 {d0,d2,d4,d6}, [r1]! */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VLDN && in.vd == 0 && in.rn == 1 && in.imm == 4);
+    assert(in.neon_size == 2 && !in.neon_q && in.neon_inc == 2 && in.writeback);
+
+    put16(0, 0xF945); put16(2, 0xC041);                  /* vst4.16 {d28-d31}, [r5], r1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VSTN && in.vd == 28 && in.rn == 5 && in.imm == 4);
+    assert(in.neon_size == 1 && !in.neon_q && in.neon_inc == 1 && in.writeback && in.rm == 1);
+
+    put16(0, 0xF900); put16(2, 0x013F);                  /* vst4.8 {d0,d2,d4,d6}, [r0 :256] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VSTN && in.vd == 0 && in.rn == 0 && in.imm == 4);
+    assert(in.neon_size == 0 && !in.neon_q && in.neon_inc == 2 && !in.writeback);
+
+    /* VLD1 shares the space and must still decode as VLD1 with neon_inc unused. */
+    put16(0, 0xF920); put16(2, 0x0A8F);                  /* vld1.32 {d0-d1}, [r0] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VLD1 && in.vd == 0 && in.imm == 2 && !in.writeback);
+
+    /* Rejects: size 3, VLD2 align 3 (D form), VLD3 align bit 1, a register past
+     * d31, and rn = pc. Each decodes as opaque SIMD, not as a VLDN/VSTN. */
+    put16(0, 0xF920); put16(2, 0x08CF);                  /* vld2, size 3 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xF920); put16(2, 0x083F);                  /* vld2 type 1000, align 3 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xF920); put16(2, 0x042F);                  /* vld3, align 2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xF960); put16(2, 0xA10F);                  /* vld4 type 0001 at d26: d32 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xF960); put16(2, 0xD30F);                  /* vld2 type 0011 at d29: d32 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xF92F); put16(2, 0x080F);                  /* vld2, rn = pc */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+
+    printf("ok   neon structures: vld2-4/vst2-4 forms, Q pairs, writeback, and their rejects\n");
+}
+
 static void test_shifts_and_indexing(void) {
     memset(code, 0, sizeof(code));
     arm_insn in;
@@ -1657,6 +1765,7 @@ int main(void) {
     test_shifts_and_indexing();
     test_homebrew_forms();
     test_neon_shuffle_forms();
+    test_neon_ldst_multi();
     test_tables_hints_exclusives();
     printf("all decode tests passed\n");
     return 0;
