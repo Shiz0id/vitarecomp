@@ -129,13 +129,13 @@ obstacle on this platform.
       largest remaining bucket but the thing the RUNNING program stops on:
       everything earlier in the boot path is translated. *Advanced SIMD and NEON are the same instruction
       set — ARM's formal name and the marketing one — so this is one job.*
-      Landed, about 50 of ~110 mnemonics: integer add/sub/logic/compare/
+      Landed, about 65 of ~110 mnemonics: integer add/sub/logic/compare/
       pairwise/VMOVN, immediates, lane and core moves, VLD1/VST1, F32
       arithmetic, by-scalar, min/max, compare, abs/neg and conversions,
       integer VMUL/VMLA/VMLS, VQADD/VQSUB, shifts by immediate, the shuffles
-      (VEXT, VREV, VSWP/VTRN/VUZP/VZIP, VDUP lane, VTBL/VTBX) and VLD2-4/VST2-4.
-      In progress: widening (VADDL/W, VSUBL/W, VMULL, VMLAL/VMLSL, VMOVL/VSHLL)
-      and narrowing (VQMOVN/VQMOVUN, VSHRN and its rounding/saturating forms).
+      (VEXT, VREV, VSWP/VTRN/VUZP/VZIP, VDUP lane, VTBL/VTBX), VLD2-4/VST2-4,
+      widening (VADDL/W, VSUBL/W, VMULL, VMLAL/VMLSL, VMOVL/VSHLL) and
+      narrowing (VQMOVN/VQMOVUN, VSHRN and its rounding/saturating forms).
       Left: VLDn/VSTn single-lane and all-lanes, the reciprocal estimates and
       steps, VSHL by register, VABD/VABA, integer VMAX/VMIN/VCGT/VCGE, VCNT/VCLZ/
       VCLS, VPADDL/VPADAL, VQDMULH/VQRDMULH, fixed-point VCVT. FPSCR.QC is not
