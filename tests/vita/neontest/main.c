@@ -306,6 +306,26 @@ int main(void) {
     T("vmul.p8 d",           "vmul.p8 d0, d1, d2");
     T("vmul.p8 q",           "vmul.p8 q0, q1, q2");
     T("vmul.p8 q overlap",   "vmul.p8 q0, q0, q1");
+    /* VRECPE and VRSQRTE on the src bytes, then on special values set
+     * through r2 and r3: d2 gets r3 in its low lane and r2 in its high one. */
+    T("vrecpe.u32 d",        "vrecpe.u32 d0, d1");
+    T("vrecpe.u32 q",        "vrecpe.u32 q0, q2");
+    T("vrsqrte.u32 d",       "vrsqrte.u32 d0, d5");
+    T("vrsqrte.u32 q=m",     "vrsqrte.u32 q1, q1");
+    T("vrecpe.f32 d",        "vrecpe.f32 d0, d1");
+    T("vrecpe.f32 q",        "vrecpe.f32 q0, q3");
+    T("vrsqrte.f32 d",       "vrsqrte.f32 d0, d4");
+    T("vrsqrte.f32 q=m",     "vrsqrte.f32 q2, q2");
+    T("vrecpe.u32 edges",    "movw r3, #0\n movt r3, #0x8000\n movw r2, #0xffff\n movt r2, #0x7fff\n vmov d2, r3, r2\n vrecpe.u32 d0, d2");
+    T("vrsqrte.u32 edges",   "movw r3, #0\n movt r3, #0x4000\n movw r2, #0xffff\n movt r2, #0x3fff\n vmov d2, r3, r2\n vrsqrte.u32 d0, d2");
+    T("vrecpe.f32 1,-0",     "vmov.f32 d2, #1.0\n vmov.i32 d3, #0x80000000\n vrecpe.f32 q0, q1");
+    T("vrecpe.f32 -inf,nan", "movw r3, #0\n movt r3, #0xff80\n movw r2, #1\n movt r2, #0x7f80\n vmov d2, r3, r2\n vrecpe.f32 d0, d2");
+    T("vrecpe.f32 2^126,den", "movw r3, #0\n movt r3, #0x7e80\n movw r2, #1\n movt r2, #0x8000\n vmov d2, r3, r2\n vrecpe.f32 d0, d2");
+    T("vrecpe.f32 max,min",  "movw r3, #0xffff\n movt r3, #0x7e7f\n movw r2, #0\n movt r2, #0x0080\n vmov d2, r3, r2\n vrecpe.f32 d0, d2");
+    T("vrsqrte.f32 1,-0",    "vmov.f32 d2, #1.0\n vmov.i32 d3, #0x80000000\n vrsqrte.f32 q0, q1");
+    T("vrsqrte.f32 -inf,nan", "movw r3, #0\n movt r3, #0xff80\n movw r2, #1\n movt r2, #0x7f80\n vmov d2, r3, r2\n vrsqrte.f32 d0, d2");
+    T("vrsqrte.f32 inf,-den", "movw r3, #0\n movt r3, #0x7f80\n movw r2, #1\n movt r2, #0x8000\n vmov d2, r3, r2\n vrsqrte.f32 d0, d2");
+    T("vrsqrte.f32 2,-1",    "vmov.f32 d2, #2.0\n vmov.f32 d3, #-1.0\n vrsqrte.f32 q0, q1");
     sceClibPrintf("NT done\n");
     sceKernelExitProcess(0);
     return 0;

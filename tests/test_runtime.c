@@ -2320,6 +2320,42 @@ static void test_bit_ops(void) {
     printf("ok   rbit, rev16, revsh, b16 extends, smulxy\n");
 }
 
+/* VRECPE and VRSQRTE, values worked by hand from the ARM manual's routines.
+ * When the helpers were written they were checked against those routines, on
+ * doubles, for every U32 and F32 input; these pin the corners. */
+static void test_neon_recip_c(void) {
+    /* The 9-bit tables at their ends: 1 / 0.5 and 1 / 0.998, 1 / sqrt(0.25),
+     * 1 / sqrt(0.5) and 1 / sqrt(0.998). */
+    assert(neon_recip_est9(256) == 511 && neon_recip_est9(511) == 256);
+    assert(neon_rsqrt_est9(128) == 511 && neon_rsqrt_est9(256) == 361);
+    assert(neon_rsqrt_est9(511) == 256);
+
+    /* U32: below 0.5 (0.25 for the root) gives all ones. */
+    assert(neon_urecpe(f32_pair(0x80000000u, 0x7FFFFFFFu)) == f32_pair(0xFF800000u, 0xFFFFFFFFu));
+    assert(neon_urecpe(f32_pair(0xFFFFFFFFu, 0xC0000000u)) == f32_pair(0x80000000u, 0xAA800000u));
+    assert(neon_ursqrte(f32_pair(0x40000000u, 0x3FFFFFFFu)) == f32_pair(0xFF800000u, 0xFFFFFFFFu));
+    assert(neon_ursqrte(f32_pair(0x80000000u, 0xFFFFFFFFu)) == f32_pair(0xB4800000u, 0x80000000u));
+
+    /* F32 reciprocal: 1.0 gives 0.998, the sign is kept, zeros (and flushed
+     * denormals) give infinities, infinities zeros, NaN the default NaN, and
+     * from 2^126 up the result would be denormal and is flushed to zero. */
+    assert(neon_frecpe(f32_pair(0x3F800000u, 0x40000000u)) == f32_pair(0x3F7F8000u, 0x3EFF8000u));
+    assert(neon_frecpe(f32_pair(0xBF800000u, 0x80000000u)) == f32_pair(0xBF7F8000u, 0xFF800000u));
+    assert(neon_frecpe(f32_pair(0x00000001u, 0x7F800000u)) == f32_pair(0x7F800000u, 0x00000000u));
+    assert(neon_frecpe(f32_pair(0xFF800000u, 0x7F800001u)) == f32_pair(0x80000000u, 0x7FC00000u));
+    assert(neon_frecpe(f32_pair(0x7E800000u, 0xFE800000u)) == f32_pair(0x00000000u, 0x80000000u));
+    assert(neon_frecpe(f32_pair(0x7E7FFFFFu, 0x00800000u)) == f32_pair(0x00800000u, 0x7E7F8000u));
+
+    /* F32 root: an odd exponent (1.0, 4.0) and an even one (2.0); -0 gives
+     * -infinity but any other negative, -infinity too, the default NaN. */
+    assert(neon_frsqrte(f32_pair(0x3F800000u, 0x40800000u)) == f32_pair(0x3F7F8000u, 0x3EFF8000u));
+    assert(neon_frsqrte(f32_pair(0x40000000u, 0x80000000u)) == f32_pair(0x3F348000u, 0xFF800000u));
+    assert(neon_frsqrte(f32_pair(0xBF800000u, 0xFF800000u)) == f32_pair(0x7FC00000u, 0x7FC00000u));
+    assert(neon_frsqrte(f32_pair(0x7F800000u, 0x80000001u)) == f32_pair(0x00000000u, 0xFF800000u));
+    assert(neon_frsqrte(f32_pair(0x7FC00001u, 0x7F7FFFFFu)) == f32_pair(0x7FC00000u, 0x1F800000u));
+    printf("ok   neon vrecpe/vrsqrte, u32 and f32\n");
+}
+
 int main(void) {
     printf("runtime:\n");
     test_shifts();
@@ -2340,6 +2376,7 @@ int main(void) {
     test_neon_f32_b();
     test_neon_int_c();
     test_neon_shift_imm_c();
+    test_neon_recip_c();
     test_neon_cmp_c();
     test_neon_shl_reg_c();
     test_neon_halving_c();

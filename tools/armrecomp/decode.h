@@ -135,6 +135,9 @@ typedef enum {
     OP_NEON_FABS, OP_NEON_FNEG, /* sign bit only: no flush, NaN payload kept  */
     OP_NEON_FCVT_TO_INT,        /* F32 to S32 or U32 (vfp_unsigned), toward 0 */
     OP_NEON_FCVT_FROM_INT,      /* S32 or U32 (vfp_unsigned) to F32           */
+    OP_NEON_URECPE, OP_NEON_URSQRTE, /* 8-bit estimates of 1/x and 1/sqrt(x),
+                                    U32 fixed-point lanes                      */
+    OP_NEON_FRECPE, OP_NEON_FRSQRTE, /* the same for F32 lanes                 */
     OP_NEON_CMPZ, OP_NEON_FCMPZ, /* compare with zero: imm is the condition, 0 GT,
                                     1 GE, 2 EQ, 3 LE, 4 LT; FCMPZ is F32 lanes  */
     OP_NEON_ABS, OP_NEON_NEG,   /* integer absolute value and negate, wrapping */

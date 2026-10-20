@@ -422,6 +422,96 @@ static inline uint64_t neon_i2f(uint64_t x, int is_unsigned) {
                        neon_i32_to_f32(neon_hi32(x), is_unsigned));
 }
 
+/* VRECPE and VRSQRTE: the ARM manual's 8-bit estimates. Both are defined by
+ * a C routine on doubles; these are the same values in integers, so they do
+ * not depend on the host's float rounding or on libm.
+ *
+ * The input x is the 9 top bits of a value scaled into [0.25, 1), x / 512.
+ * For the reciprocal x is 256..511 and the manual takes 1 / ((x + 0.5) /
+ * 512), rounded to 1/256: 256 * 1024 / (2x + 1), plus a half, floored. The
+ * result s is 257..511 and stands for s / 256. */
+static inline uint32_t neon_recip_est9(uint32_t x) {
+    return (524288u / (2 * x + 1) + 1) / 2;
+}
+
+/* The reciprocal square root of x / 512, x 128..511, also as s / 256. The
+ * manual keeps 9 bits below 0.5 and only 8 at or above it, so x >= 256 drops
+ * its low bit: q = x / 2 and the value is (q + 0.5) / 256. s is the nearest
+ * integer to 2^14 / sqrt(D) with D = 2x + 1 (below 0.5) or 2^13.5 / sqrt(D)
+ * with D = 2q + 1, so s - 0.5 <= that root, squared: (2s - 1)^2 D <= M, M
+ * 2^28 or 2^27. (2s - 1)^2 D is odd and M a power of two, so they are never
+ * equal, and s is the largest integer with (2s - 1)^2 <= M / D, which is
+ * (isqrt(M / D) + 1) / 2. */
+static inline uint32_t neon_rsqrt_est9(uint32_t x) {
+    uint32_t v = x < 256 ? (1u << 28) / (2 * x + 1) : (1u << 27) / ((x & ~1u) + 1);
+    uint32_t r = 0;                                 /* isqrt(v), v < 2^20 */
+    for (uint32_t bit = 1u << 20; bit; bit >>= 2) {
+        if (v >= r + bit) { v -= r + bit; r = (r >> 1) + bit; }
+        else r >>= 1;
+    }
+    return (r + 1) / 2;
+}
+
+/* VRECPE.U32 and VRSQRTE.U32. The lane is a fixed-point value, x / 2^32. A
+ * lane below 0.5 (bit 31 clear) for the reciprocal, or below 0.25 for the
+ * root, gives all ones; otherwise the estimate s / 256 is returned with its
+ * leading 1 at bit 31, so the result is s << 23. */
+static inline uint32_t neon_urecpe_lane(uint32_t x) {
+    if (!(x >> 31)) return 0xFFFFFFFFu;
+    return neon_recip_est9(x >> 23) << 23;
+}
+
+static inline uint32_t neon_ursqrte_lane(uint32_t x) {
+    if (!(x >> 30)) return 0xFFFFFFFFu;
+    return neon_rsqrt_est9(x >> 23) << 23;
+}
+
+/* VRECPE.F32 under the standard FPSCR. Any NaN gives the default NaN, an
+ * infinity a zero of its sign, and a zero (a denormal is flushed to one) an
+ * infinity of its sign. With exponent e the input is 1.f * 2^(e - 127) and
+ * the estimate of 1 / 0.1f is between 1 and 2, so the result exponent is 253
+ * - e. From e = 253 (|x| >= 2^126) that would be denormal, and it is flushed
+ * to a zero of the input's sign. The 8 fraction bits of s are the top of the
+ * result's fraction. */
+static inline uint32_t neon_frecpe_lane(uint32_t x) {
+    uint32_t sign = x & 0x80000000u, e = (x >> 23) & 0xFF, frac = x & 0x7FFFFF;
+    if (e == 0xFF) return frac ? 0x7FC00000u : sign;
+    if (e == 0) return sign | 0x7F800000u;
+    if (e >= 253) return sign;
+    return sign | (253 - e) << 23 | (neon_recip_est9(256 | frac >> 15) & 0xFF) << 15;
+}
+
+/* VRSQRTE.F32 under the standard FPSCR. NaN first, then a zero (or flushed
+ * denormal) gives an infinity of its sign, any other negative the default NaN
+ * and +infinity +0. An odd exponent scales the input to 0.01f, in [0.25, 0.5),
+ * and an even one to 0.1f, so the exponent left over is even and halves:
+ * the result exponent is (380 - e) / 2. Every result is normal. */
+static inline uint32_t neon_frsqrte_lane(uint32_t x) {
+    uint32_t e = (x >> 23) & 0xFF, frac = x & 0x7FFFFF;
+    if (e == 0xFF && frac) return 0x7FC00000u;
+    if (e == 0) return (x & 0x80000000u) | 0x7F800000u;
+    if (x >> 31) return 0x7FC00000u;
+    if (e == 0xFF) return 0;
+    uint32_t q = (e & 1) ? 128 | frac >> 16 : 256 | frac >> 15;
+    return (380 - e) / 2 << 23 | (neon_rsqrt_est9(q) & 0xFF) << 15;
+}
+
+static inline uint64_t neon_urecpe(uint64_t x) {
+    return neon_pack32(neon_urecpe_lane(neon_lo32(x)), neon_urecpe_lane(neon_hi32(x)));
+}
+
+static inline uint64_t neon_ursqrte(uint64_t x) {
+    return neon_pack32(neon_ursqrte_lane(neon_lo32(x)), neon_ursqrte_lane(neon_hi32(x)));
+}
+
+static inline uint64_t neon_frecpe(uint64_t x) {
+    return neon_pack32(neon_frecpe_lane(neon_lo32(x)), neon_frecpe_lane(neon_hi32(x)));
+}
+
+static inline uint64_t neon_frsqrte(uint64_t x) {
+    return neon_pack32(neon_frsqrte_lane(neon_lo32(x)), neon_frsqrte_lane(neon_hi32(x)));
+}
+
 /* --- Advanced SIMD integer multiply, saturation and shifts ------------------
  *
  * Lanes are 8 << size bits. The helpers read each lane as an unsigned value

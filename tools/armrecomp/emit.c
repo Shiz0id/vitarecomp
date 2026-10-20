@@ -1305,6 +1305,19 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             break;
         }
 
+        /* VRECPE and VRSQRTE work lane by lane, so each D half is done on its
+         * own, as the conversions are. */
+        case OP_NEON_URECPE: case OP_NEON_URSQRTE: case OP_NEON_FRECPE: case OP_NEON_FRSQRTE: {
+            const char *fn = in->op == OP_NEON_URECPE ? "urecpe"
+                           : in->op == OP_NEON_URSQRTE ? "ursqrte"
+                           : in->op == OP_NEON_FRECPE ? "frecpe" : "frsqrte";
+            int regs = in->neon_q ? 2 : 1;
+            for (int k = 0; k < regs; k++)
+                fprintf(f, "    neon_setd(%d, neon_%s(neon_getd(%d)));\n",
+                        in->vd + k, fn, in->vm + k);
+            break;
+        }
+
         /* Integer multiply, saturating add and subtract, and shifts by
          * immediate. Each helper does the whole D word (neon.h). The Q halves
          * are independent (the registers of a Q are aligned pairs, so no half

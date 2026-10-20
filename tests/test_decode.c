@@ -3095,6 +3095,54 @@ static void test_neon_misc_forms(void) {
     printf("ok   neon misc A=00: pairwise adds, vcls/vclz/vcnt/vmvn, vqabs/vqneg, and their rejects\n");
 }
 
+/* VRECPE and VRSQRTE: the two-register misc block of 32-bit lanes with h1 bit
+ * 1 set, opc 10FR. Encodings from arm-vita-eabi-as. */
+static void test_neon_recip_forms(void) {
+    arm_insn in;
+    put16(0, 0xFFBB); put16(2, 0x0401);                  /* vrecpe.u32 d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_URECPE && in.vd == 0 && in.vm == 1 && !in.neon_q);
+    put16(0, 0xFFFB); put16(2, 0x0462);                  /* vrecpe.u32 q8, q9 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_URECPE && in.vd == 16 && in.vm == 18 && in.neon_q);
+    put16(0, 0xFFBB); put16(2, 0x0501);                  /* vrecpe.f32 d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FRECPE && in.vd == 0 && in.vm == 1 && !in.neon_q);
+    put16(0, 0xFFBB); put16(2, 0x2544);                  /* vrecpe.f32 q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FRECPE && in.vd == 2 && in.vm == 4 && in.neon_q);
+    put16(0, 0xFFBB); put16(2, 0x3484);                  /* vrsqrte.u32 d3, d4 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_URSQRTE && in.vd == 3 && in.vm == 4 && !in.neon_q);
+    put16(0, 0xFFBB); put16(2, 0x04C2);                  /* vrsqrte.u32 q0, q1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_URSQRTE && in.vd == 0 && in.vm == 2 && in.neon_q);
+    put16(0, 0xFFFB); put16(2, 0x05A1);                  /* vrsqrte.f32 d16, d17 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FRSQRTE && in.vd == 16 && in.vm == 17 && !in.neon_q);
+    put16(0, 0xFFFB); put16(2, 0x05E4);                  /* vrsqrte.f32 q8, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FRSQRTE && in.vd == 16 && in.vm == 20 && in.neon_q);
+
+    /* Rejects. A Q form with an odd register is UNDEFINED. Size 01 is the F16
+     * estimate of later architectures; the Vita has no F16 arithmetic. */
+    put16(0, 0xFFBB); put16(2, 0x0543);                  /* vrecpe.f32 q0, d3 (odd Qm) */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xFFBB); put16(2, 0x1442);                  /* vrecpe.u32 d1 as Qd (odd) */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xFFB7); put16(2, 0x0501);                  /* size 01: vrecpe.f16 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_FRECPE && in.op != OP_NEON_URECPE);
+    /* VCVT stays VCVT: opc 11xx with the same h1. */
+    put16(0, 0xFFBB); put16(2, 0x0701);                  /* vcvt.s32.f32 d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCVT_TO_INT);
+
+    printf("ok   neon vrecpe/vrsqrte, u32 and f32, and their rejects\n");
+}
+
 int main(void) {
     printf("decode:\n");
     test_thumb_width();
@@ -3121,6 +3169,7 @@ int main(void) {
     test_neon_widen_forms();
     test_neon_shuffle_forms();
     test_neon_shift_imm_forms();
+    test_neon_recip_forms();
     test_neon_ldst_multi();
     test_neon_ldst_lane();
     test_neon_narrow_forms();

@@ -1394,6 +1394,24 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
             }
             return 1;
         }
+        /* The estimates: opc 10FR, where F (bit 1) picks F32 over U32 and R
+         * (bit 0) the reciprocal square root over the reciprocal. Size 01
+         * here would be the F16 forms of later architectures, and the group
+         * test already wants size 10. */
+        if (cvt && (opc & 0xC) == 0x8) {
+            static const arm_op ops[4] = {
+                OP_NEON_URECPE, OP_NEON_URSQRTE, OP_NEON_FRECPE, OP_NEON_FRSQRTE,
+            };
+            static const char *const nm[4] = {
+                "vrecpe.u32", "vrsqrte.u32", "vrecpe.f32", "vrsqrte.f32",
+            };
+            o->op = ops[opc & 3];
+            o->vd = (int8_t)d; o->vm = (int8_t)m;
+            o->neon_q = (uint8_t)Q;
+            o->neon_size = 2;
+            set(o, A_SIMD, nm[opc & 3]);
+            return 1;
+        }
     }
 
     /* VEXT: h1 1110 1111 1D11 nnnn, h2 dddd imm4 N Q M 0 mmmm. U (h1 bit 12)
