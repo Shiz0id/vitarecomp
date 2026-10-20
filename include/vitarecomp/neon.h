@@ -591,6 +591,84 @@ static inline void neon_interleave(const uint64_t *in, uint64_t *mem, int n, int
         }
 }
 
+/* --- Advanced SIMD narrowing ------------------------------------------------
+ *
+ * VSHRN, VRSHRN, VQSHRN, VQRSHRN, VQSHRUN and VQRSHRUN, with VQMOVN and VQMOVUN
+ * as the zero-amount case. The source is the Q register lo:hi and the result is
+ * one D: the lanes of lo narrow into its low half, those of hi into its high
+ * half. `size` is the RESULT lane size (8 << size bits), so a source lane is
+ * twice that. Size 3 would need a 128-bit source and returns 0.
+ *
+ * A lane is shifted right by amt (arithmetic for a signed source), rounded if
+ * asked, then truncated or saturated. The rounding bit is bit amt-1 of the
+ * source and is added after the shift: adding 1 << (amt-1) to the source first
+ * would overflow a 64-bit lane. amt is at most the result width, so no C shift
+ * reaches 64 bits.
+ *
+ * The shifted lane is kept as a 64-bit two's complement pattern. An unsigned
+ * source can reach 2^63 after rounding, which a signed read would take for a
+ * negative value, so it is compared as unsigned. FPSCR.QC is not modelled, as
+ * for neon_qop. */
+
+/* One lane. x holds a source lane of 2*ew bits, sign-extended when src_signed.
+ * With sat, the result clamps to the signed range of ew bits, or to
+ * [0, 2^ew-1] when dst_unsigned. An unsigned source always takes
+ * dst_unsigned, as no encoding narrows unsigned to signed. */
+static inline uint64_t neon_narrow_lane(uint64_t x, int ew, int amt, int round, int sat, int src_signed, int dst_unsigned) {
+    int sw = 2 * ew;
+    if (src_signed && sw < 64 && ((x >> (sw - 1)) & 1)) x |= ~((1ull << sw) - 1);
+    int neg = src_signed && (x >> 63);
+    uint64_t y = x;
+    if (amt > 0) {
+        /* A negative value shifts as ~((~x) >> amt), the arithmetic shift in
+         * unsigned arithmetic, as neon_shr does. */
+        y = neg ? ~((~x) >> amt) : (x >> amt);
+        if (round) y += (x >> (amt - 1)) & 1;
+    }
+    uint64_t emask = (1ull << ew) - 1;
+    if (!sat) return y & emask;
+    if (src_signed) {
+        int64_t s = (int64_t)y;                    /* in range, see above */
+        if (dst_unsigned) {
+            if (s < 0) return 0;
+            return (uint64_t)s > emask ? emask : (uint64_t)s;
+        }
+        int64_t hi = (int64_t)(emask >> 1), lo = -hi - 1;
+        if (s > hi) s = hi;
+        else if (s < lo) s = lo;
+        return (uint64_t)s & emask;
+    }
+    return y > emask ? emask : y;
+}
+
+/* The whole narrowing: lanes of lo into the low half of the result, lanes of
+ * hi into the high half, each lane narrowed by neon_narrow_lane. Both source
+ * words are arguments, so Dd may be one of them. */
+static inline uint64_t neon_narrow(uint64_t lo, uint64_t hi, int amt, int size, int round, int sat, int src_signed, int dst_unsigned) {
+    if (size == 3) return 0;
+    int ew = 8 << size, per = 32 / ew;            /* source lanes per D word */
+    uint64_t r = 0;
+    for (int i = 0; i < per; i++) {
+        r |= neon_narrow_lane(neon_lane_of(lo, size + 1, i), ew, amt, round, sat, src_signed, dst_unsigned) << (i * ew);
+        r |= neon_narrow_lane(neon_lane_of(hi, size + 1, i), ew, amt, round, sat, src_signed, dst_unsigned) << ((i + per) * ew);
+    }
+    return r;
+}
+
+/* VSHRN and VRSHRN: truncated to the result width, no saturation. amt is
+ * 1..esize for a shift; a rounding overflow past the width wraps, as VRSHRN
+ * does. */
+static inline uint64_t neon_shrn(uint64_t lo, uint64_t hi, int amt, int size, int round) {
+    return neon_narrow(lo, hi, amt, size, round, 0, 0, 0);
+}
+
+/* VQSHRN, VQRSHRN, VQSHRUN, VQRSHRUN, VQMOVN and VQMOVUN (amt 0, round 0).
+ * src_signed reads the source as signed. dst_unsigned clamps to [0, 2^ew-1]
+ * rather than the signed range. */
+static inline uint64_t neon_qshrn(uint64_t lo, uint64_t hi, int amt, int size, int round, int src_signed, int dst_unsigned) {
+    return neon_narrow(lo, hi, amt, size, round, 1, src_signed, dst_unsigned);
+}
+
 #ifdef __cplusplus
 }
 #endif

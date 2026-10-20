@@ -1461,6 +1461,29 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             break;
         }
 
+        /* Narrowing shifts and the saturating narrows (neon.h). Both source D
+         * words are read as arguments before neon_setd stores Dd, so Dd may be
+         * one of the halves of Qm. */
+        case OP_NEON_NARROW_SHR: case OP_NEON_NARROW_RSHR:
+            fprintf(f, "    neon_setd(%d, neon_shrn(neon_getd(%d), neon_getd(%d), %u, %d, %d));\n",
+                    in->vd, in->vm, in->vm + 1, (unsigned)in->imm, in->neon_size,
+                    in->op == OP_NEON_NARROW_RSHR);
+            break;
+
+        case OP_NEON_NARROW_QSHR: case OP_NEON_NARROW_QRSHR:
+        case OP_NEON_NARROW_QSHRU: case OP_NEON_NARROW_QRSHRU: {
+            /* The source is signed for every form but the unsigned-to-unsigned
+             * ones; the result is unsigned for VQSHRUN/VQRSHRUN and the U forms. */
+            int rnd = in->op == OP_NEON_NARROW_QRSHR || in->op == OP_NEON_NARROW_QRSHRU;
+            int uns = in->op == OP_NEON_NARROW_QSHRU || in->op == OP_NEON_NARROW_QRSHRU;
+            int src_signed = uns ? 1 : !in->vfp_unsigned;
+            int dst_unsigned = uns ? 1 : in->vfp_unsigned;
+            fprintf(f, "    neon_setd(%d, neon_qshrn(neon_getd(%d), neon_getd(%d), %u, %d, %d, %d, %d));\n",
+                    in->vd, in->vm, in->vm + 1, (unsigned)in->imm, in->neon_size,
+                    rnd, src_signed, dst_unsigned);
+            break;
+        }
+
         case OP_VMOV_V_RR: case OP_VMOV_RR_V: {
             int w = in->vfp_dp ? in->vm * 2 : in->vm;     /* first word of the pair */
             if (in->op == OP_VMOV_V_RR)

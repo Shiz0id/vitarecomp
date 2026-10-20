@@ -1663,6 +1663,119 @@ static void test_neon_ldst_multi(void) {
     printf("ok   neon structures: vld2-4/vst2-4 forms, Q pairs, writeback, and their rejects\n");
 }
 
+/* The narrowing forms. VQMOVN and VQMOVUN are in the two-register group, with
+ * op = h2 bits 7:6. VSHRN to VQRSHRUN are in the shift group, with opc 1000
+ * or 1001, and there h2 bit 6 is the rounding flag, not Q. Each encoding was
+ * taken from arm-vita-eabi-as and checked by objdump. The rejects are computed
+ * from the layout, and each says which field makes it invalid. */
+static void test_neon_narrow_forms(void) {
+    arm_insn in;
+
+    /* VMOVN (op 00) is handled before the VQMOVN block, and must not change. */
+    put16(0, 0xFFB2); put16(2, 0x0202);                  /* vmovn.i16 d0, q1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MOVN && in.vd == 0 && in.vm == 2 && in.neon_size == 0);
+    assert(strcmp(in.mnemonic, "vmovn") == 0);
+
+    put16(0, 0xFFB2); put16(2, 0x0282);                  /* vqmovn.s16 d0, q1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_QSHR && in.vd == 0 && in.vm == 2);
+    assert(in.neon_size == 0 && in.imm == 0 && !in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vqmovn.s16") == 0);
+    put16(0, 0xFFB6); put16(2, 0x12C4);                  /* vqmovn.u32 d1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_QSHR && in.vd == 1 && in.vm == 4);
+    assert(in.neon_size == 1 && in.vfp_unsigned && in.imm == 0);
+    assert(strcmp(in.mnemonic, "vqmovn.u32") == 0);
+    put16(0, 0xFFBA); put16(2, 0x2286);                  /* vqmovn.s64 d2, q3 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_QSHR && in.vd == 2 && in.vm == 6);
+    assert(in.neon_size == 2 && !in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vqmovn.s64") == 0);
+
+    put16(0, 0xFFB2); put16(2, 0x0242);                  /* vqmovun.s16 d0, q1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_QSHRU && in.vd == 0 && in.vm == 2);
+    assert(in.neon_size == 0 && in.imm == 0);
+    assert(strcmp(in.mnemonic, "vqmovun.s16") == 0);
+    put16(0, 0xFFBA); put16(2, 0x0242);                  /* vqmovun.s64 d0, q1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_QSHRU && in.vd == 0 && in.vm == 2 && in.neon_size == 2);
+    assert(strcmp(in.mnemonic, "vqmovun.s64") == 0);
+
+    /* The shift group. The result lane is L:imm6's size, and the amount is
+     * 2*esize - L:imm6, so each form is checked at both ends of its range. */
+    put16(0, 0xEF8D); put16(2, 0x0812);                  /* vshrn.i16 d0, q1, #3 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_SHR && in.vd == 0 && in.vm == 2);
+    assert(in.neon_size == 0 && in.imm == 3 && in.has_imm && !in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vshrn.i16") == 0);
+    put16(0, 0xEF90); put16(2, 0x0812);                  /* vshrn.i32 d0, q1, #16 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_SHR && in.neon_size == 1 && in.imm == 16);
+    assert(strcmp(in.mnemonic, "vshrn.i32") == 0);
+    put16(0, 0xEFBF); put16(2, 0x0812);                  /* vshrn.i64 d0, q1, #1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_SHR && in.neon_size == 2 && in.imm == 1);
+    assert(strcmp(in.mnemonic, "vshrn.i64") == 0);
+    put16(0, 0xEF88); put16(2, 0x0852);                  /* vrshrn.i16 d0, q1, #8 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_RSHR && in.neon_size == 0 && in.imm == 8);
+    assert(strcmp(in.mnemonic, "vrshrn.i16") == 0);
+    /* Odd Dd, and the full width: Q is not checked here, because h2 bit 6 is
+     * the rounding flag. */
+    put16(0, 0xEFA0); put16(2, 0x3854);                  /* vrshrn.i64 d3, q2, #32 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_RSHR && in.vd == 3 && in.vm == 4);
+    assert(in.neon_size == 2 && in.imm == 32 && !in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vrshrn.i64") == 0);
+
+    put16(0, 0xEF8F); put16(2, 0x0912);                  /* vqshrn.s16 d0, q1, #1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_QSHR && in.neon_size == 0 && in.imm == 1 && !in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vqshrn.s16") == 0);
+    put16(0, 0xFF9B); put16(2, 0x0912);                  /* vqshrn.u32 d0, q1, #5 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_QSHR && in.neon_size == 1 && in.imm == 5 && in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vqshrn.u32") == 0);
+    put16(0, 0xEF9C); put16(2, 0x0952);                  /* vqrshrn.s32 d0, q1, #4 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_QRSHR && in.neon_size == 1 && in.imm == 4 && !in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vqrshrn.s32") == 0);
+    put16(0, 0xFFA1); put16(2, 0x0952);                  /* vqrshrn.u64 d0, q1, #31 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_QRSHR && in.neon_size == 2 && in.imm == 31 && in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vqrshrn.u64") == 0);
+
+    put16(0, 0xFFA0); put16(2, 0x0812);                  /* vqshrun.s64 d0, q1, #32 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_QSHRU && in.neon_size == 2 && in.imm == 32);
+    assert(strcmp(in.mnemonic, "vqshrun.s64") == 0);
+    put16(0, 0xFF8E); put16(2, 0x0852);                  /* vqrshrun.s16 d0, q1, #2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_QRSHRU && in.neon_size == 0 && in.imm == 2);
+    assert(strcmp(in.mnemonic, "vqrshrun.s16") == 0);
+
+    /* Rejects. ef8d 0813: Qm = M:mmmm = 00011 = 3, odd. ef8d 0892: h2 bit 7 is
+     * L and is set, so L:imm6 = 64 + 13 is past the 64-bit range. ffbe 0282:
+     * h1 bits 3:2 (ss) are 11, which would need a 128-bit source. ffb2 0243:
+     * VQMOVUN with Qm = 3, odd. */
+    put16(0, 0xEF8D); put16(2, 0x0813);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xEF8D); put16(2, 0x0892);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xFFBE); put16(2, 0x0282);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xFFB2); put16(2, 0x0243);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+
+    printf("ok   neon narrowing: vmovn, vqmovn/vqmovun, vshrn/vrshrn, vqshrn/vqrshrn, vqshrun/vqrshrun, and their rejects\n");
+}
+
 static void test_shifts_and_indexing(void) {
     memset(code, 0, sizeof(code));
     arm_insn in;
@@ -1766,6 +1879,7 @@ int main(void) {
     test_homebrew_forms();
     test_neon_shuffle_forms();
     test_neon_ldst_multi();
+    test_neon_narrow_forms();
     test_tables_hints_exclusives();
     printf("all decode tests passed\n");
     return 0;

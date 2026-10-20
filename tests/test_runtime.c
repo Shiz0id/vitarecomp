@@ -1077,6 +1077,76 @@ static void test_neon_ldst(void) {
     printf("ok   neon structures: vld2/3/4 element order, Q pairs, interleave round trips\n");
 }
 
+/* --- narrowing shifts and saturating narrows -------------------------------- */
+
+static void test_neon_narrow(void) {
+    /* Truncating shift, 16-bit lanes to 8, by 8. The lanes of lo, low first,
+     * are 0x0123 0x4567 0x89AB 0xCDEF; those of hi are 0x1000 0x0FFF 0x7FFF
+     * 0x8000. */
+    uint64_t lo = 0xCDEF89AB45670123ull, hi = 0x80007FFF0FFF1000ull;
+    assert(neon_shrn(lo, hi, 8, 0, 0) == 0x807F0F10CD894501ull);
+    /* Rounded: bit 7 of a lane adds one to its result. 0x89AB and 0xCDEF have
+     * it set, and so do 0x0FFF and 0x7FFF, giving 0x8A, 0xCE, 0x10, 0x80. */
+    assert(neon_shrn(lo, hi, 8, 0, 1) == 0x80801010CE8A4501ull);
+    /* VMOVN is the zero-amount truncation, so the two must agree. */
+    for (int size = 0; size <= 2; size++)
+        assert(neon_shrn(lo, hi, 0, size, 0) == neon_movn(lo, hi, size));
+    /* No 128-bit source: size 3 is not a form. */
+    assert(neon_shrn(lo, hi, 1, 3, 0) == 0);
+
+    /* Signed saturation, 16 to 8 (VQMOVN.S16). Lanes of lo: 0x007F 0x0080 0xFF80
+     * 0x8000 give 0x7F 0x7F 0x80 0x80; lanes of hi: 0x1234 0xFFFF 0x0000 0x7FFF
+     * give 0x7F 0xFF 0x00 0x7F. -128 is in range, so 0xFF80 keeps 0x80. */
+    assert(neon_qshrn(0x8000FF800080007Full, 0x7FFF0000FFFF1234ull, 0, 0, 0, 1, 0) == 0x7F00FF7F80807F7Full);
+
+    /* VQMOVUN.S16: a signed source clamps to [0, 255]. 0x0100 gives 0xFF, the
+     * negative 0xFF80 and 0x8000 give 0. */
+    assert(neon_qshrn(0x8000FF800100007Full, 0x7FFFFFFF000100FFull, 0, 0, 0, 1, 1) == 0xFF0001FF0000FF7Full);
+
+    /* VQMOVN.U16: unsigned lanes saturate at 255 from above only. */
+    assert(neon_qshrn(0xFFFF8000010000FFull, 0x00807FFF00420000ull, 0, 0, 0, 0, 1) == 0x80FF4200FFFFFFFFull);
+
+    /* Rounding at exactly .5, shift 1. 3 5 7 9 give 2 3 4 5 when rounded and
+     * 1 2 3 4 when truncated. Signed, -3 and -5 round half up to -1 and -2. */
+    assert(neon_shrn(0x0009000700050003ull, 0, 1, 0, 1) == 0x05040302ull);
+    assert(neon_shrn(0x0009000700050003ull, 0, 1, 0, 0) == 0x04030201ull);
+    assert(neon_qshrn(0x00050003FFFBFFFDull, 0, 1, 0, 1, 1, 0) == 0x0302FEFFull);
+
+    /* Signed saturation, 32 to 16 (size 1): 0x00008000 gives 0x7FFF and
+     * 0xFFFF7FFF (-32769) gives 0x8000. */
+    assert(neon_qshrn(0xFFFF7FFF00008000ull, 0, 0, 1, 0, 1, 0) == 0x80007FFFull);
+    /* Truncating and rounding at 16 bits (size 1, shift 16). Lane 0x01234567
+     * gives 0x0123 with bit 15 clear; lane 0x89ABCDEF gives 0x89AB, which rounds
+     * to 0x89AC since bit 15 of 0xCDEF is set. */
+    assert(neon_shrn(0x89ABCDEF01234567ull, 0, 16, 1, 0) == 0x89AB0123ull);
+    assert(neon_shrn(0x89ABCDEF01234567ull, 0, 16, 1, 1) == 0x89AC0123ull);
+
+    /* VQSHRUN and VQRSHRUN, 16 to 8, by 8. 0x0180 gives 1 without rounding and
+     * 2 with it (bit 7 is set). 0x8000 and 0xFF00 are negative and give 0.
+     * 0x7F00 gives 0x7F. */
+    assert(neon_qshrn(0xFF007F0080000180ull, 0, 8, 0, 0, 1, 1) == 0x007F0001ull);
+    assert(neon_qshrn(0xFF007F0080000180ull, 0, 8, 0, 1, 1, 1) == 0x007F0002ull);
+    /* 32 to 16 (size 1): 0x00010000 saturates to 0xFFFF and -1 gives 0. */
+    assert(neon_qshrn(0xFFFFFFFF00010000ull, 0, 0, 1, 0, 1, 1) == 0x0000FFFFull);
+
+    /* 64-bit source, size 2, with the top bit set and rounding by 32. The
+     * unsigned lo lane 0x8000000080000001 gives 0x80000001: bit 31 rounds up,
+     * and the sum still fits. The all-ones hi lane rounds to 2^32 and
+     * saturates. A naive x + (1 << (amt-1)) would wrap here, not saturate. */
+    assert(neon_qshrn(0x8000000080000001ull, 0xFFFFFFFFFFFFFFFFull, 32, 2, 1, 0, 1) == 0xFFFFFFFF80000001ull);
+    /* Signed, shift 1, rounding. INT64_MIN gives -2^62 and saturates to
+     * 0x80000000; 2^63-1 rounds to 2^62 and saturates to 0x7FFFFFFF. */
+    assert(neon_qshrn(0x8000000000000000ull, 0x7FFFFFFFFFFFFFFFull, 1, 2, 1, 1, 0) == 0x7FFFFFFF80000000ull);
+    /* VQSHRUN.S64 by 0: the negative lane gives 0; 2^32 saturates to 2^32-1. */
+    assert(neon_qshrn(0x8000000000000000ull, 0x0000000100000000ull, 0, 2, 0, 1, 1) == 0xFFFFFFFF00000000ull);
+    /* VRSHRN.I64 by 32 truncates, and a rounding carry out of the 32 bits
+     * wraps: 0xFFFFFFFF + 1 is 0. */
+    assert(neon_shrn(0xFFFFFFFFFFFFFFFFull, 0, 32, 2, 0) == 0x00000000FFFFFFFFull);
+    assert(neon_shrn(0xFFFFFFFFFFFFFFFFull, 0, 32, 2, 1) == 0);
+
+    printf("ok   neon narrowing: vshrn/vrshrn, vqmovn/vqmovun, vqshrn/vqrshrn, vqshrun/vqrshrun at 8, 16, 32, and 64-bit sources\n");
+}
+
 static void test_bit_ops(void) {
     assert(vita_rbit(1u) == 0x80000000u);
     assert(vita_rbit(0x12345678u) == 0x1E6A2C48u);
@@ -1113,6 +1183,7 @@ int main(void) {
     test_neon_int_c();
     test_neon_shuffle();
     test_neon_ldst();
+    test_neon_narrow();
     test_bit_ops();
     test_parallel_and_lanes();
     test_vfp_d32();

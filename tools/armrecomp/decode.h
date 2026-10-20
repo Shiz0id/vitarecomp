@@ -110,6 +110,14 @@ typedef enum {
     OP_NEON_VLDN, OP_NEON_VSTN, /* VLD2-4/VST2-4 (multiple structures): imm
                                    members, each neon_q ? a Q pair : a D,
                                    interleaved in memory; see neon_inc        */
+    OP_NEON_NARROW_SHR, OP_NEON_NARROW_RSHR, /* VSHRN, VRSHRN: Qm narrowed to Dd by
+                                   imm, truncated to neon_size; RSHR rounds  */
+    OP_NEON_NARROW_QSHR, OP_NEON_NARROW_QRSHR, /* VQSHRN, VQRSHRN, and VQMOVN (imm 0):
+                                   source and result signed or unsigned by
+                                   vfp_unsigned, saturated                    */
+    OP_NEON_NARROW_QSHRU, OP_NEON_NARROW_QRSHRU, /* VQSHRUN, VQRSHRUN, and VQMOVUN
+                                   (imm 0): signed source, unsigned result;
+                                   vfp_unsigned is not read                   */
     OP_NEON_FADD, OP_NEON_FSUB, /* float .F32 lanes, standard FPSCR          */
     OP_NEON_FMUL,               /* float, vd = vn * vm                       */
     OP_NEON_FMLA, OP_NEON_FMLS, /* vd = vd +/- round(vn * vm), not fused     */

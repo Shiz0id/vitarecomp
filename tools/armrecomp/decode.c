@@ -970,14 +970,50 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
      * 2*esize - L:imm6, so the full lane width is encodable: it is L:imm6 =
      * esize, the bottom of each size's range. A left shift is L:imm6 - esize,
      * 0 to esize-1. A value under 8 (0000xxx) is not this group: it is the
-     * one-register modified immediate, already tried above. */
+     * one-register modified immediate, already tried above.
+     *
+     * The narrowing shifts (opc 1000, 1001) read Qm and write a D, so h2 bit
+     * 6 there is the rounding flag, not Q. The Q-alignment check therefore
+     * sits in the branches that use Q, not in the early return: checking Q
+     * here rejected vrshrn.i64 d3, q2, #32, which is legal. */
     if ((h1 & 0x0080) && (h2 & 0x0010)) {
         int opc = (h2 >> 8) & 0xF;
         int v = (((h2 >> 7) & 1) << 6) | (h1 & 0x3F);      /* L:imm6 */
-        if (v < 8 || (Q && ((d | m) & 1))) return 0;
+        if (v < 8) return 0;
         int size = v >= 64 ? 3 : v >= 32 ? 2 : v >= 16 ? 1 : 0;
         int esize = 8 << size;
-        if (opc == 0x0 || opc == 0x1) {                    /* VSHR, VSRA */
+        if (opc == 0x8 || opc == 0x9) {                    /* narrowing, below */
+            /* L is h2 bit 7, so v < 64 is L clear. Qm must be even; Dd is any
+             * D. size is the result lane. The source lane is twice that, so
+             * the amount 2*esize - v runs 1..esize, as for VSHR. */
+            if (v >= 64 || (m & 1)) return 0;
+            int rnd = (h2 >> 6) & 1;
+            if (opc == 0x8)
+                o->op = U ? (rnd ? OP_NEON_NARROW_QRSHRU : OP_NEON_NARROW_QSHRU)
+                          : (rnd ? OP_NEON_NARROW_RSHR : OP_NEON_NARROW_SHR);
+            else
+                o->op = rnd ? OP_NEON_NARROW_QRSHR : OP_NEON_NARROW_QSHR;
+            o->imm = (uint32_t)(2 * esize - v);
+            /* Indexed by opc 1001 (4), U (2) and rounding (1). The name is
+             * the source type: vqshrn.s16 narrows signed 16-bit lanes. */
+            static const char *const names[8][3] = {
+                {"vshrn.i16", "vshrn.i32", "vshrn.i64"},
+                {"vrshrn.i16", "vrshrn.i32", "vrshrn.i64"},
+                {"vqshrun.s16", "vqshrun.s32", "vqshrun.s64"},
+                {"vqrshrun.s16", "vqrshrun.s32", "vqrshrun.s64"},
+                {"vqshrn.s16", "vqshrn.s32", "vqshrn.s64"},
+                {"vqrshrn.s16", "vqrshrn.s32", "vqrshrn.s64"},
+                {"vqshrn.u16", "vqshrn.u32", "vqshrn.u64"},
+                {"vqrshrn.u16", "vqrshrn.u32", "vqrshrn.u64"},
+            };
+            set(o, A_SIMD, names[(opc == 0x9 ? 4 : 0) + 2 * U + rnd][size]);
+            o->vd = (int8_t)d; o->vm = (int8_t)m;
+            o->neon_size = (uint8_t)size;
+            o->vfp_unsigned = (uint8_t)U;
+            o->has_imm = 1;
+            return 1;
+        } else if (opc == 0x0 || opc == 0x1) {             /* VSHR, VSRA */
+            if (Q && ((d | m) & 1)) return 0;
             o->op = opc == 0x0 ? OP_NEON_SHR : OP_NEON_SRA;
             o->imm = (uint32_t)(2 * esize - v);
             if (opc == 0x0)
@@ -985,6 +1021,7 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
             else
                 set(o, A_SIMD, U ? "vsra.u" : "vsra.s");
         } else if (opc == 0x5 && !U) {                     /* VSHL (VSLI is U=1) */
+            if (Q && ((d | m) & 1)) return 0;
             o->op = OP_NEON_SHL;
             o->imm = (uint32_t)(v - esize);
             set(o, A_SIMD, "vshl.i");
@@ -1010,6 +1047,29 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
         o->vm = (int8_t)m;
         o->neon_size = (uint8_t)size;                      /* of the result */
         set(o, A_SIMD, "vmovn");
+        return 1;
+    }
+
+    /* VQMOVUN, VQMOVN.S and VQMOVN.U: the same group with op = h2 bits 7:6
+     * (01, 10, 11). op 00 is VMOVN above, which returns first, so op is never
+     * 0 here. They take the saturating forms of the narrowing shift with a
+     * zero amount, so the emitter needs no separate case. ss = 11 has no
+     * 128-bit source and is not a form. */
+    if ((h1 & 0xFFB3) == 0xFFB2 && (h2 & 0x0F10) == 0x0200) {
+        int size = (h1 >> 2) & 3, op = (h2 >> 6) & 3;
+        if (size == 3 || (m & 1)) return 0;
+        static const char *const names[4][3] = {
+            {0, 0, 0},
+            {"vqmovun.s16", "vqmovun.s32", "vqmovun.s64"},
+            {"vqmovn.s16", "vqmovn.s32", "vqmovn.s64"},
+            {"vqmovn.u16", "vqmovn.u32", "vqmovn.u64"},
+        };
+        o->op = op == 1 ? OP_NEON_NARROW_QSHRU : OP_NEON_NARROW_QSHR;
+        o->imm = 0;
+        o->vfp_unsigned = (uint8_t)(op == 3);
+        set(o, A_SIMD, names[op][size]);
+        o->vd = (int8_t)d; o->vm = (int8_t)m;
+        o->neon_size = (uint8_t)size;                      /* of the result */
         return 1;
     }
 
