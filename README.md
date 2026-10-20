@@ -175,6 +175,7 @@ because a module reaches firmware through pointers as well as through `BL` and
 | **[Translation](docs/TRANSLATION.md)** | Coverage figures, `ThumbExpandImm` and its traps, what is still trapping ranked by value, the NEON/VFP breakdown |
 | **[Corpus](docs/CORPUS.md)** | The 15 measured modules, the plaintext finding, the `ET_SCE_EXEC` → `ET_SCE_RELEXEC` era split and why it makes the launch window the hard case |
 | **[Decryption](docs/DECRYPT.md)** | The SELF container, what is encrypted and what is not, and why the QA corpus needs no keys |
+| **[Vita3K bridge](docs/VITA3K_BRIDGE.md)** | Running recompiled code inside Vita3K: the CPU backend, import routing, shared memory, threads, and the known limits |
 | **[HLE](docs/HLE.md)** | The firmware surface, measured, and the order of work |
 | **[Lessons](docs/LESSONS.md)** | Corrections and bugs found by running rather than reasoning: `MOVT`, the wrong dominant-instruction-set metric, the SIMD undercount, the PS3-layout SELF header |
 | **[Roadmap](docs/ROADMAP.md)** | The six phases, checked off against what actually runs |
@@ -234,7 +235,7 @@ committing:
 |---|---|---|
 | [vita-headers](https://github.com/vitasdk/vita-headers) | MIT | The NID database — the published mapping from import NIDs to function names. The reference for the HLE work list. |
 | [VitaSDK](https://github.com/vitasdk) | MIT | Headers and the published ABI for `sceGxm` / `sceKernel` / `sceCtrl`. |
-| **[Vita3K](https://github.com/Vita3K/Vita3K)** | **GPLv2** | **Oracle only** — run as a separate process and compared against. No code copied, linked, or vendored. |
+| **[Vita3K](https://github.com/Vita3K/Vita3K)** | **GPLv2** | **Vendored, unlinked** — a verbatim copy lives in [`third_party/Vita3K/`](third_party/VITA3K.md). The toolkit does not build or link it; it is there to read, run as an oracle, and lift from into GPL-licensed game repos. |
 | [psprecomp](https://github.com/sp00nznet/psprecomp) | MIT | Sibling project for PSP. Same "`module_start` is not the program" shape, same oracle arrangement with PPSSPP. |
 | [ps3recomp](https://github.com/sp00nznet/ps3recomp) | MIT | Sibling project for PS3. Same project structure and conventions. |
 
@@ -251,6 +252,19 @@ What does carry over is everything else — independently implemented algorithms
 with credit, and functional facts (NIDs, struct layouts, enum values, calling
 conventions) which are not copyrightable and are most of what the shallow work
 needs.
+
+**Vita3K is vendored, not linked.** A verbatim copy sits in
+`third_party/Vita3K/` (see [`third_party/VITA3K.md`](third_party/VITA3K.md)),
+under its own GPLv2. The toolkit sources stay MIT and contain none of it; a
+per-game repo that incorporates Vita3K code becomes a GPLv2 combined work, which
+MIT permits. That keeps the toolkit forkable under MIT while letting a title
+whose bottleneck is `sceGxm` and GXP shaders reuse the work that already exists.
+
+**The Vita3K bridge.** [`vita3k-bridge/`](vita3k-bridge) (GPLv2) makes the
+recompiled code a Vita3K CPU backend. Vita3K's kernel runs the threads and its
+HLE modules answer the imports, while the generated C stands in for the JIT. It
+closes the firmware gaps by reusing Vita3K's HLE instead of rewriting it. See
+[docs/VITA3K_BRIDGE.md](docs/VITA3K_BRIDGE.md).
 
 *Licenses above are the working understanding and are re-checked before any code
 or data from a project is actually used.*
@@ -279,7 +293,7 @@ reverse-engineering. With thanks to:
   hashes.
 - **[Vita3K](https://github.com/Vita3K/Vita3K)** — the best public description
   of Vita behaviour that exists. Used as a behavioural oracle and as
-  documentation. **Reference only; no code copied.**
+  documentation. **Vendored in `third_party/Vita3K/`; not linked into the toolkit.**
 - The **Vita homebrew and reverse-engineering community**, whose published work
   on the SELF format, the module info structures and the NID scheme is what
   makes any of this tractable.

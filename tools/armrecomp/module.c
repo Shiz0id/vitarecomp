@@ -214,3 +214,19 @@ const vm_stub *vm_find_stub(const vm_module *m, uint32_t addr) {
     }
     return NULL;
 }
+
+/* The stub whose body holds `addr`, if any. A stub is three ARM words — load
+ * the NID-patched address into ip, branch — sometimes padded to four; the
+ * first three are always its own. */
+const vm_stub *vm_stub_covering(const vm_module *m, uint32_t addr) {
+    if (!m || !m->stubs || !m->stub_count) return NULL;
+    uint32_t lo = 0, hi = m->stub_count;
+    addr &= ~1u;
+    while (lo < hi) {                       /* first stub above addr */
+        uint32_t mid = lo + (hi - lo) / 2;
+        if (m->stubs[mid].addr <= addr) lo = mid + 1; else hi = mid;
+    }
+    if (lo == 0) return NULL;
+    const vm_stub *s = &m->stubs[lo - 1];
+    return addr - s->addr < 12 ? s : NULL;
+}

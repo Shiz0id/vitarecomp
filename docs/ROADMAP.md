@@ -129,6 +129,18 @@ obstacle on this platform.
       largest remaining bucket but the thing the RUNNING program stops on:
       everything earlier in the boot path is translated. *Advanced SIMD and NEON are the same instruction
       set — ARM's formal name and the marketing one — so this is one job.*
+      Landed, about 65 of ~110 mnemonics: integer add/sub/logic/compare/
+      pairwise/VMOVN, immediates, lane and core moves, VLD1/VST1, F32
+      arithmetic, by-scalar, min/max, compare, abs/neg and conversions,
+      integer VMUL/VMLA/VMLS, VQADD/VQSUB, shifts by immediate, the shuffles
+      (VEXT, VREV, VSWP/VTRN/VUZP/VZIP, VDUP lane, VTBL/VTBX), VLD2-4/VST2-4,
+      widening (VADDL/W, VSUBL/W, VMULL, VMLAL/VMLSL, VMOVL/VSHLL) and
+      narrowing (VQMOVN/VQMOVUN, VSHRN and its rounding/saturating forms).
+      Left: VLDn/VSTn single-lane and all-lanes, the reciprocal estimates and
+      steps, VSHL by register, VABD/VABA, integer VMAX/VMIN/VCGT/VCGE, VCNT/VCLZ/
+      VCLS, VPADDL/VPADAL, VQDMULH/VQRDMULH, fixed-point VCVT. FPSCR.QC is not
+      modelled. How these tasks are run: `docs/DELEGATING.md`. Each new form is
+      checked against stock Vita3K by `tests/vita/neontest`
 - [ ] ARM (A32) operand decoding — a small minority of this corpus. The A32
       media space is also currently classed `A_UNDEF`, which is wrong: `op == 3`
       with bit 4 set is media, not an undefined encoding
@@ -157,6 +169,27 @@ and functions are emitted in address order, so a prefix is not a sample.
       are present — indistinguishable from missing coverage
 - [x] **Traps name the firmware function**, not just its NID. A NID is a hash;
       "implement 0xBFE02B3A" is not a task anyone can start
+- [x] **The Vita3K bridge** ([`VITA3K_BRIDGE.md`](VITA3K_BRIDGE.md)): recompiled
+      code as a Vita3K CPU backend, imports forwarded to Vita3K's HLE by NID,
+      guest memory shared with Vita3K's reservation, thread-local register
+      files (`VITARECOMP_THREADED`). Unit-tested against the real headers and
+      clean under TSan
+- [x] **First end-to-end run through the full Vita3K build.** bridgetest
+      (threads, semaphore, clock, memory blocks, display, file I/O, exit) runs
+      recompiled inside Vita3K with output identical to the JIT, under both the
+      `double-buffer` and `external-host` mappings. It found six silent
+      miscompiles ([`LESSONS.md`](LESSONS.md#a-real-emulator-is-a-better-test-than-a-test))
+- [x] **Thread-safe primitives.** Thumb `LDREX`/`STREX`/`CLREX` on a per-thread
+      monitor, barriers as fences
+- [x] Shifter carry-out for flag-setting logical ops; `LSR`/`ASR #0`
+      meaning 32, and `RRX`, in operand 2; branches into IT blocks
+- [x] **VitaSDK samples through the bridge**: hello_world, debug_print,
+      hello_cpp_world, ctrl and rtc identical to stock; json blocked on
+      `SceLibJson` exactly as stock is. Four miscompiles found and fixed
+      ([`TRANSLATION.md`](TRANSLATION.md#vitasdk-samples))
+- [ ] A32 exclusives. Waits on A32 operand decode, which waits on a title
+      that reaches A32 code
+- [ ] Run a commercial module through the bridge
 - [ ] The shallow ~92 of `SceGxm`: state setters, texture accessors, mapping
 - [x] **The link arrangement.** Import defaults are one file per import, built
       as a static library listed after the runtime. A linker pulls an archive

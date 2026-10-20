@@ -53,6 +53,19 @@ typedef struct {
      * the counts would hide which sweep is doing the work. */
     uint32_t seeds_shape_data;
     uint32_t rejected_shape;
+    /* Thumb code pointers built in a register by a MOVW/MOVT pair and never
+     * stored or called directly: thread entries, callbacks, handlers passed
+     * to firmware. Kept apart from the shape tiers because the evidence is
+     * different — the value is constructed by an instruction, not found in a
+     * stored word. */
+    uint32_t seeds_movw;
+    /* Thumb code pointers named by SCE relocations (ET_SCE_RELEXEC only).
+     * Exact, not heuristic: the loader's own list of words it patches. */
+    uint32_t seeds_reloc;
+    uint32_t rejected_reloc;   /* odd addresses past code_end: data */
+    uint32_t code_end;         /* end of the last import stub, when the layout agrees */
+    uint32_t seeds_in_stub;    /* targets inside an import stub: refused */
+    uint8_t  reloc_malformed;
     /* Mode-switching calls whose target is not a known import stub, and so
      * were not followed into ARM. Counted rather than hidden: if a module has
      * genuine ARM code outside its stub table, this is the number that says
@@ -60,6 +73,10 @@ typedef struct {
     uint32_t seeds_arm_refused;
     uint32_t simd_insns;
     uint32_t indirect_sites;
+    /* TBB/TBH switches followed through their table, and those whose size
+     * could not be proven from the guarding compare (left as indirect). */
+    uint32_t jump_tables;
+    uint32_t jump_tables_unbounded;
 } vf_result;
 
 /* Discover functions in the image's executable segment. Returns 0 on success.

@@ -35,6 +35,10 @@ typedef struct {
      * discovery walked into the import table and believed what it found. */
     uint32_t stub_shadowed;
 
+    /* Branch targets inside an IT block, which no compiler produces; each is
+     * routed to the trap rather than given a label. */
+    uint32_t branches_into_it;
+
     em_trap_kind traps[EM_MAX_TRAP_KINDS];
     uint32_t     trap_kinds;
     uint32_t     traps_other;   /* beyond the table's capacity */

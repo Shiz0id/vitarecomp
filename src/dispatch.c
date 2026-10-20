@@ -2,12 +2,13 @@
 
 #include "vitarecomp/dispatch.h"
 #include "vitarecomp/recomp_rt.h"
+#include "atomic.h"
 
 #include <stdio.h>
 
 static const vita_dispatch_entry *g_table;
 static uint32_t g_count;
-static uint32_t g_hits, g_misses;
+static volatile uint32_t g_hits, g_misses;
 
 void vita_dispatch_init(const vita_dispatch_entry *table, uint32_t count) {
     g_table = table;
@@ -32,8 +33,8 @@ void vita_dispatch_init(const vita_dispatch_entry *table, uint32_t count) {
     }
 }
 
-uint32_t vita_dispatch_hits(void)   { return g_hits; }
-uint32_t vita_dispatch_misses(void) { return g_misses; }
+uint32_t vita_dispatch_hits(void)   { return vita_atomic_load(&g_hits); }
+uint32_t vita_dispatch_misses(void) { return vita_atomic_load(&g_misses); }
 
 void vita_dispatch(uint32_t from, uint32_t addr) {
     /* Bit 0 marks the instruction set, not the address. Every pointer to Thumb
@@ -44,14 +45,14 @@ void vita_dispatch(uint32_t from, uint32_t addr) {
     while (lo < hi) {
         uint32_t mid = lo + (hi - lo) / 2;
         if (g_table[mid].addr == key) {
-            g_hits++;
+            vita_atomic_inc(&g_hits);
             g_table[mid].fn();
             return;
         }
         if (g_table[mid].addr < key) lo = mid + 1; else hi = mid;
     }
 
-    g_misses++;
+    vita_atomic_inc(&g_misses);
     /* A miss is not recoverable by returning. The caller expected the callee to
      * do something — set a return value, mutate memory, never come back — and
      * pretending it ran is how a recompiled program produces confident garbage.

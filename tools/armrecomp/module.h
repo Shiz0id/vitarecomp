@@ -51,6 +51,13 @@ typedef struct {
      * cannot see the first code the program runs. */
     vm_seg         data_segs[VM_MAX_DATA_SEGS];
     uint32_t       data_seg_count;
+
+    /* For SCE relocations (reloc.h), which name segments by program header
+     * index: the link-time base of each, and the PT_SCE_RELA segments. */
+    uint32_t       phdr_vaddr[16];
+    uint32_t       phdr_count;
+    vm_seg         relas[4];
+    uint32_t       rela_count;
 } vm_image;
 
 typedef struct {
@@ -110,6 +117,7 @@ void vm_free(vm_module *m);
 
 /* Look up a call target. Returns NULL when the address is not an import stub. */
 const vm_stub *vm_find_stub(const vm_module *m, uint32_t addr);
+const vm_stub *vm_stub_covering(const vm_module *m, uint32_t addr);
 
 /* Parse the module info at `entry` (the raw e_entry value; the segment index in
  * its top two bits is honoured). Returns 0 on success. */

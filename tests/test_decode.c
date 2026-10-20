@@ -260,9 +260,10 @@ static void test_t32_operands(void) {
     in = dec(ARM_T32, BASE);
     assert(in.cls == A_STOREM && in.op == OP_PUSH && in.rn == 13);
 
-    put16(0, 0xE8B1); put16(2, 0x0030);      /* ldm r1!, {r4,r5} â€” base r1 */
+    put16(0, 0xE8B1); put16(2, 0x0030);      /* ldm r1!, {r4,r5}: base r1 */
     in = dec(ARM_T32, BASE);
-    assert(in.cls == A_LOADM && in.op == OP_NONE);
+    assert(in.cls == A_LOADM && in.op == OP_LDM && in.rn == 1 &&
+           in.writeback && !in.decrement && in.reglist == 0x0030);
 
     printf("  32-bit thumb operands          ok\n");
 }
@@ -668,6 +669,1302 @@ static void test_bounds(void) {
     printf("  bounds                         ok\n");
 }
 
+/* --- forms the first run of a real module found missing ---------------------
+ *
+ * Encodings taken from GCC's own output for tests/vita/bridgetest, or worked
+ * out from the architecture manual. Three of these were translating WRONGLY
+ * rather than trapping, which is why each has an exact operand check. */
+
+/* Found running bridgetest inside Vita3K. */
+static void test_tables_hints_exclusives(void) {
+    memset(code, 0, sizeof(code));
+    arm_insn in;
+
+    /* nop.w and dmb sit in the conditional-branch encoding space with cond
+     * 111x. The test that separated them read the wrong four bits, and both
+     * decoded as branches. */
+    put16(0, 0xF3AF); put16(2, 0x8000);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NOP && in.cls != A_BRANCH && !in.has_target);
+    put16(0, 0xF3BF); put16(2, 0x8F5F);                  /* dmb sy */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_DMB && !in.has_target);
+    put16(0, 0xF3BF); put16(2, 0x8F2F);                  /* clrex */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_CLREX);
+    put16(0, 0xF040); put16(2, 0x8000);                  /* bne.w: still a branch */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_B && in.cond == 1 && in.has_target);
+
+    /* ldrex r2, [r0, #4]; strex r3, r1, [r0]; ldrexb; strexh; ldrexd; strexd */
+    put16(0, 0xE850); put16(2, 0x2F01);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDREX && in.xsize == 4 && in.rn == 0 && in.rt == 2 && in.imm == 4);
+    put16(0, 0xE840); put16(2, 0x1300);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_STREX && in.xsize == 4 && in.rn == 0 && in.rt == 1 && in.rd == 3);
+    put16(0, 0xE8D0); put16(2, 0x2F4F);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDREX && in.xsize == 1 && in.rt == 2);
+    put16(0, 0xE8C0); put16(2, 0x1F53);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_STREX && in.xsize == 2 && in.rt == 1 && in.rd == 3);
+    put16(0, 0xE8D0); put16(2, 0x237F);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDREX && in.xsize == 8 && in.rt == 2 && in.rt2 == 3);
+    put16(0, 0xE8C0); put16(2, 0x2374);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_STREX && in.xsize == 8 && in.rt == 2 && in.rt2 == 3 && in.rd == 4);
+
+    /* A switch: cmp r2, #4; bhi; tbb [pc, r2]; five byte entries. The size
+     * comes only from the guard; without it the table is not followed. */
+    memset(code, 0, sizeof(code));
+    put16(0, 0x2A04);                                    /* cmp r2, #4  */
+    put16(2, 0xD808);                                    /* bhi.n       */
+    put16(4, 0xE8DF); put16(6, 0xF002);                  /* tbb [pc,r2] */
+    code[8] = 3; code[9] = 4; code[10] = 5; code[11] = 3; code[12] = 6;
+    in = dec(ARM_T32, BASE + 4);
+    assert(in.op == OP_TBB && in.table_n == 5);
+    assert(arm_table_target(code, BASE, &in, 0) == BASE + 8 + 6);
+    assert(arm_table_target(code, BASE, &in, 4) == BASE + 8 + 12);
+    put16(0, 0x2B04);                                    /* cmp r3: wrong register */
+    in = dec(ARM_T32, BASE + 4);
+    assert(in.op == OP_TBB && in.table_n == 0 && in.cls == A_INDIRECT);
+    put16(0, 0x2A04); put16(2, 0xD008);                  /* beq: not a bound */
+    in = dec(ARM_T32, BASE + 4);
+    assert(in.table_n == 0);
+    /* An entry pointing back into the table is data, not a switch. */
+    put16(2, 0xD808); code[10] = 0;
+    in = dec(ARM_T32, BASE + 4);
+    assert(in.table_n == 0);
+
+    /* IT blocks. `ite eq; moveq r1,#1; movne r1,#0` from bridgetest's main:
+     * both moves were emitted unconditionally, and both set flags. */
+    {
+        uint8_t it = 0;
+        arm_insn seq[3];
+        memset(code, 0, sizeof(code));
+        put16(0, 0xBF0C); put16(2, 0x2101); put16(4, 0x2100); put16(6, 0x2101);
+        for (int i = 0; i < 3; i++) {
+            seq[i] = dec(ARM_T32, BASE + 2u * (unsigned)i);
+            arm_it_step(&it, &seq[i]);
+        }
+        assert(seq[1].cond == 0x0 && seq[1].conditional && !seq[1].sets_flags);
+        assert(seq[2].cond == 0x1 && seq[2].conditional && !seq[2].sets_flags);
+        in = dec(ARM_T32, BASE + 6);
+        arm_it_step(&it, &in);
+        assert(in.cond == ARM_COND_AL && !in.conditional && in.sets_flags);
+
+        /* itte ne: NE, NE, EQ; a CMP inside still sets flags. */
+        it = 0;
+        put16(0, 0xBF1A); put16(2, 0x2A01); put16(4, 0x2101); put16(6, 0x2100);
+        for (int i = 0; i < 4; i++) {
+            in = dec(ARM_T32, BASE + 2u * (unsigned)i);
+            arm_it_step(&it, &in);
+            if (i == 1) assert(in.cond == 0x1 && in.op == OP_CMP && in.sets_flags);
+            if (i == 2) assert(in.cond == 0x1);
+            if (i == 3) assert(in.cond == 0x0);
+        }
+        assert(it == 0);
+    }
+
+    /* rsb.w r1, r1, #2048 keeps its immediate (only 16-bit NEG has zero), and
+     * teq is its own op: XOR, not TST's AND. */
+    put16(0, 0xF5C1); put16(2, 0x6100);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_RSB && in.has_imm && in.imm == 2048 && in.rn == 1 && in.rd == 1);
+    put16(0, 0xF090); put16(2, 0x0F01);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_TEQ && in.imm == 1 && in.sets_flags);
+
+    printf("  tables, hints and exclusives  ok\n");
+}
+
+static void test_bringup_forms(void) {
+    memset(code, 0, sizeof(code));
+    arm_insn in;
+
+    /* pop.w {r4-r11, pc}: a return that still restores eight registers and
+     * SP. It was classified as a return before its operands were filled in. */
+    put16(0, 0xE8BD); put16(2, 0x8FF0);
+    in = dec(ARM_T32, BASE);
+    assert(in.cls == A_RETURN && in.op == OP_POP && in.reglist == 0x8FF0);
+
+    /* stmia.w r6, {r0,r1}: no writeback, a struct copy. */
+    put16(0, 0xE886); put16(2, 0x0003);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_STM && in.rn == 6 && !in.writeback && !in.decrement);
+
+    /* stmia.w sp, {r0}: against SP but NOT a push — it must not move SP. */
+    put16(0, 0xE88D); put16(2, 0x0001);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_STM && in.rn == 13 && !in.writeback);
+
+    /* ldmdb r0!, {r1,r2} */
+    put16(0, 0xE930); put16(2, 0x0006);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDM && in.rn == 0 && in.writeback && in.decrement);
+
+    /* 16-bit: ldmia r2!, {r0,r1} writes back; ldmia r0, {r0,r1} does not,
+     * because the base is in the list. */
+    put16(0, 0xCA03);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDM && in.rn == 2 && in.writeback && in.reglist == 0x03);
+    put16(0, 0xC803);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDM && in.rn == 0 && !in.writeback);
+
+    /* clz r1, r1 */
+    put16(0, 0xFAB1); put16(2, 0xF181);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_CLZ && in.rd == 1 && in.rm == 1);
+
+    /* umull r3, r2, ip, r4 — division by a constant, from bridgetest's main */
+    put16(0, 0xFBAC); put16(2, 0x3204);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_UMULL && in.rn == 12 && in.rm == 4 && in.rt == 3 && in.rt2 == 2);
+    put16(0, 0xFB81); put16(2, 0x2003);       /* smull r2, r0, r1, r3 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_SMULL && in.rt == 2 && in.rt2 == 0);
+    put16(0, 0xFBC1); put16(2, 0x2003);
+    assert(dec(ARM_T32, BASE).op == OP_SMLAL);
+    put16(0, 0xFBE1); put16(2, 0x2003);
+    assert(dec(ARM_T32, BASE).op == OP_UMLAL);
+
+    /* mla r0, r1, r2, r3 / mls r0, r1, r2, r3 — Ra in rt */
+    put16(0, 0xFB01); put16(2, 0x3002);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_MLA && in.rd == 0 && in.rn == 1 && in.rm == 2 && in.rt == 3);
+    put16(0, 0xFB01); put16(2, 0x3012);
+    assert(dec(ARM_T32, BASE).op == OP_MLS);
+
+    /* vmov.f32 s12, #1.0 and vmov.f32 s11, #3.0 — both from bridgetest. The
+     * second has D set, and 0x08 is 3.0 by VFPExpandImm. */
+    put16(0, 0xEEB7); put16(2, 0x6A00);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_VMOV_IMM && in.vd == 12 && in.imm == 0x3F800000u);
+    put16(0, 0xEEF0); put16(2, 0x5A08);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_VMOV_IMM && in.vd == 11 && in.imm == 0x40400000u);
+    /* vmov.f64 d16, #1.0: high word only, D16 needs the D bit */
+    put16(0, 0xEEF7); put16(2, 0x0B00);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_VMOV_IMM && in.vfp_dp && in.vd == 16 && in.imm == 0x3FF00000u);
+
+    /* The multiply family by opc1 and op. vmul/vnmul share opc1 0x2;
+     * vnmls/vnmla share 0x1. Two of these four were decoded as each other. */
+    put16(0, 0xEE20); put16(2, 0x0A81);       /* vmul.f32  s0, s1, s2 */
+    assert(dec(ARM_T32, BASE).op == OP_VMUL);
+    put16(0, 0xEE20); put16(2, 0x0AC1);       /* vnmul.f32 s0, s1, s2 */
+    assert(dec(ARM_T32, BASE).op == OP_VNMUL);
+    put16(0, 0xEE10); put16(2, 0x0A81);       /* vnmls.f32 s0, s1, s2 */
+    assert(dec(ARM_T32, BASE).op == OP_VNMLS);
+    put16(0, 0xEE10); put16(2, 0x0AC1);       /* vnmla.f32 s0, s1, s2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_VNMLA && in.vd == 0 && in.vn == 1 && in.vm == 2);
+
+    /* uadd8 r5, r2, ip and sel r4, r4, ip: newlib's strcmp */
+    put16(0, 0xFA82); put16(2, 0xF54C);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_UADD8 && in.rd == 5 && in.rn == 2 && in.rm == 12);
+    put16(0, 0xFAA4); put16(2, 0xF48C);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_SEL && in.rd == 4 && in.rn == 4 && in.rm == 12);
+
+    /* NEON, from newlib's allocator. vmov.i32 d16, #0 and #5. */
+    put16(0, 0xEFC0); put16(2, 0x0010);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_IMM && in.neon_fn == NL_MOV && in.vd == 16 && in.imm64 == 0 && !in.neon_q);
+    put16(0, 0xEFC0); put16(2, 0x0015);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_IMM && in.imm64 == 0x0000000500000005ull);
+    /* vadd.i32 d16, d16, d17 */
+    put16(0, 0xEF60); put16(2, 0x08A1);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ADD && in.neon_size == 2 && in.vd == 16 && in.vn == 16 && in.vm == 17);
+    /* vorr d8, d16, d16 (the vmov alias) */
+    put16(0, 0xEF20); put16(2, 0x81B0);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_LOGIC && in.neon_fn == NL_ORR && in.vd == 8 && in.vn == 16 && in.vm == 16);
+    /* vmov.i8 q8, #0xFF: cmode 1110, Q set, a=1 bcd=111 efgh=1111 */
+    put16(0, 0xFFC7); put16(2, 0x0E5F);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_IMM && in.neon_q && in.vd == 16 && in.imm64 == ~0ull);
+
+    printf("  bring-up forms (ldm/stm, clz, long mul, vmov imm, vnm*)  ok\n");
+}
+
+/* Shift amounts of zero that do not mean zero, the immediate carry-out, and
+ * load/store indexing. Each of these decoded to a plausible instruction that
+ * did something else. */
+/* What newlib and the VitaSDK samples needed, each with the encoding the
+ * toolchain actually emitted. */
+static void test_homebrew_forms(void) {
+    arm_insn in;
+
+    /* orn: opcode 0011 is MVN only when Rn is r15. Decoding every ORN as MVN
+     * dropped Rn, and newlib's strlen then lost strings at 4 mod 8. */
+    put16(0, 0xEA62); put16(2, 0x0205);                  /* orn r2, r2, r5 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_ORN && in.rd == 2 && in.rn == 2 && in.rm == 5);
+    put16(0, 0xF061); put16(2, 0x00FF);                  /* orn r0, r1, #255 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_ORN && in.rd == 0 && in.rn == 1 && in.has_imm && in.imm == 0xFF);
+    put16(0, 0xF06F); put16(2, 0x0C00);                  /* mvn.w ip, #0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_MVN && in.rd == 12 && in.rn == ARM_NO_REG);
+
+    put16(0, 0xF921); put16(2, 0x223D);                  /* vld1.8 {d2-d5}, [r1 :256]! */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VLD1 && in.vd == 2 && in.imm == 4 && in.writeback && in.rm == ARM_NO_REG);
+    put16(0, 0xF943); put16(2, 0x0A8D);                  /* vst1.32 {d16-d17}, [r3]! */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VST1 && in.vd == 16 && in.imm == 2 && in.writeback);
+    put16(0, 0xF943); put16(2, 0x0A82);                  /* vst1.32 {d16-d17}, [r3], r2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VST1 && in.writeback && in.rm == 2);
+
+    put16(0, 0xEEE0); put16(2, 0x1B10);                  /* vdup.8 q0, r1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_DUP && in.vd == 0 && in.neon_q && in.neon_size == 0 && in.rt == 1);
+    put16(0, 0xEEA0); put16(2, 0x3B90);                  /* vdup.32 q8, r3 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_DUP && in.vd == 16 && in.neon_q && in.neon_size == 2 && in.rt == 3);
+
+    /* vmov.32 r0, d2[0]: once decoded as VNMLS. */
+    put16(0, 0xEE12); put16(2, 0x0B10);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FROM_SCALAR && in.vn == 2 && in.rt == 0 && in.neon_size == 2 && in.imm == 0);
+
+    put16(0, 0xEEF3); put16(2, 0x1B30);                  /* vmov.u8 r1, d3[5] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FROM_SCALAR && in.vn == 3 && in.neon_size == 0 && in.imm == 5 && in.vfp_unsigned);
+    put16(0, 0xEE24); put16(2, 0x2B70);                  /* vmov.16 d4[3], r2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_TO_SCALAR && in.vd == 4 && in.neon_size == 1 && in.imm == 3 && in.rt == 2);
+
+    put16(0, 0xEC4C); put16(2, 0x3B16);                  /* vmov d6, r3, ip */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_VMOV_V_RR && in.vm == 6 && in.rt == 3 && in.rt2 == 12 && in.vfp_dp);
+    put16(0, 0xEC53); put16(2, 0x0B18);                  /* vmov r0, r3, d8 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_VMOV_RR_V && in.vm == 8 && in.rt == 0 && in.rt2 == 3);
+
+    put16(0, 0xFF02); put16(2, 0x2850);                  /* vceq.i8 q1, q1, q0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_CEQ && in.vd == 2 && in.vn == 2 && in.vm == 0 && in.neon_q);
+    put16(0, 0xEF02); put16(2, 0x2B13);                  /* vpadd.i8 d2, d2, d3 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_PADD && in.vd == 2 && in.vn == 2 && in.vm == 3 && in.neon_size == 0);
+    put16(0, 0xFFF6); put16(2, 0x6220);                  /* vmovn.i32 d22, q8 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MOVN && in.vd == 22 && in.vm == 16 && in.neon_size == 1);
+
+    put16(0, 0xEEF7); put16(2, 0x7BC0);                  /* vcvt.f32.f64 s15, d0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_VCVT_F2F && in.vfp_dp && in.vd == 15 && in.vm == 0);
+    put16(0, 0xEEB7); put16(2, 0x0AC7);                  /* vcvt.f64.f32 d0, s14 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_VCVT_F2F && !in.vfp_dp && in.vd == 0 && in.vm == 14);
+
+    put16(0, 0xFA90); put16(2, 0xF0A0);                  /* rbit r0, r0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_RBIT && in.rd == 0 && in.rm == 0);
+    put16(0, 0xFA90); put16(2, 0xF890);                  /* rev16.w r8, r0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_REV16 && in.rd == 8);
+    put16(0, 0xBA52);                                    /* rev16 r2, r2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_REV16);
+    put16(0, 0xBAD1);                                    /* revsh r1, r2: once REV */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_REVSH && in.rd == 1 && in.rm == 2);
+
+    /* The wide extends: once indexed by two bits of a three-bit field. */
+    put16(0, 0xFA5F); put16(2, 0xF880);                  /* uxtb.w r8, r0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_UXTB && in.rd == 8 && in.rn == ARM_NO_REG && in.shift_amt == 0);
+    put16(0, 0xFA4F); put16(2, 0xF390);                  /* sxtb.w r3, r0, ror #8 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_SXTB && in.shift_amt == 8);
+    put16(0, 0xFA13); put16(2, 0xF381);                  /* uxtah r3, r3, r1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_UXTH && in.rn == 3 && in.rm == 1 && in.rd == 3);
+    put16(0, 0xFA55); put16(2, 0xF680);                  /* uxtab r6, r5, r0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_UXTB && in.rn == 5 && in.rm == 0 && in.rd == 6);
+
+    put16(0, 0xFB15); put16(2, 0xF204);                  /* smulbb r2, r5, r4 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_SMULXY && in.rd == 2 && in.rn == 5 && in.rm == 4 && in.half_sel == 0);
+    put16(0, 0xFB17); put16(2, 0x1202);                  /* smlabb r2, r7, r2, r1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_SMLAXY && in.rt == 1);
+
+    put16(0, 0xEC90); put16(2, 0x0B20);                  /* vldmia r0, {d0-d15}: no writeback */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_VLDM && in.vd == 0 && in.imm == 16 && !in.writeback && in.mem_add);
+    put16(0, 0xECC0); put16(2, 0x0B20);                  /* vstmia r0, {d16-d31} */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_VSTM && in.vd == 16 && in.imm == 16 && !in.writeback);
+    put16(0, 0xEC90); put16(2, 0x0B21);                  /* fldmiax r0, {d0-d15} */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_VLDM && in.imm == 16);
+
+    /* Advanced SIMD float, three registers. Encodings from arm-vita-eabi-as.
+     * The integer vadd.i32 at the end must still be OP_NEON_ADD. */
+    put16(0, 0xEF01); put16(2, 0x0D02);                  /* vadd.f32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FADD && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.neon_size == 2);
+    put16(0, 0xEF02); put16(2, 0x0D44);                  /* vadd.f32 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FADD && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.neon_q);
+    put16(0, 0xEF61); put16(2, 0x0DA2);                  /* vsub.f32 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FSUB && in.vd == 16 && in.vn == 17 && in.vm == 18 && !in.neon_q);
+    put16(0, 0xEF62); put16(2, 0x0DE4);                  /* vsub.f32 q8, q9, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FSUB && in.vd == 16 && in.vn == 18 && in.vm == 20 && in.neon_q);
+    put16(0, 0xFF01); put16(2, 0x0D12);                  /* vmul.f32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMUL && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q);
+    put16(0, 0xFF4A); put16(2, 0x8DFC);                  /* vmul.f32 q12, q13, q14 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMUL && in.vd == 24 && in.vn == 26 && in.vm == 28 && in.neon_q);
+    put16(0, 0xEF01); put16(2, 0x0D12);                  /* vmla.f32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMLA && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q);
+    put16(0, 0xEF02); put16(2, 0x0D54);                  /* vmla.f32 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMLA && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.neon_q);
+    put16(0, 0xEF41); put16(2, 0x0DB2);                  /* vmla.f32 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMLA && in.vd == 16 && in.vn == 17 && in.vm == 18 && !in.neon_q);
+    put16(0, 0xEF21); put16(2, 0x0D12);                  /* vmls.f32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMLS && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q);
+    put16(0, 0xEF22); put16(2, 0x0D54);                  /* vmls.f32 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMLS && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.neon_q);
+    put16(0, 0xEF62); put16(2, 0x0DF4);                  /* vmls.f32 q8, q9, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMLS && in.vd == 16 && in.vn == 18 && in.vm == 20 && in.neon_q);
+
+    /* Float by scalar: M is the lane (imm), Vm[3:0] the D register. The Q bit
+     * is h1 bit 12. d4[1] and d7[1] show the lane bit is not a register bit. */
+    put16(0, 0xFFA2); put16(2, 0x0964);                  /* vmul.f32 q0, q1, d4[1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMUL_SCALAR && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.imm == 1 && in.neon_q);
+    put16(0, 0xEFA1); put16(2, 0x0142);                  /* vmla.f32 d0, d1, d2[0] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMLA_SCALAR && in.vd == 0 && in.vn == 1 && in.vm == 2 && in.imm == 0 && !in.neon_q);
+    put16(0, 0xEFE1); put16(2, 0x09E7);                  /* vmul.f32 d16, d17, d7[1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMUL_SCALAR && in.vd == 16 && in.vn == 17 && in.vm == 7 && in.imm == 1 && !in.neon_q);
+    put16(0, 0xFFE2); put16(2, 0x01EF);                  /* vmla.f32 q8, q9, d15[1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMLA_SCALAR && in.vd == 16 && in.vn == 18 && in.vm == 15 && in.imm == 1 && in.neon_q);
+
+    /* Negative: the integer vadd.i32 shares the three-register group and must
+     * still be integer, with the float opc (1101) nowhere near it. */
+    put16(0, 0xEF21); put16(2, 0x0802);                  /* vadd.i32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ADD && in.neon_size == 2 && in.vd == 0 && in.vn == 1 && in.vm == 2);
+    /* The integer by-scalar forms have the same size bits and differ only in
+     * opc: VMLA.I32 is 0000 where VMLA.F32 is 0001, VMUL.I32 1000 against
+     * 1001. They must not be claimed as float. */
+    put16(0, 0xEFA1); put16(2, 0x0042);                  /* vmla.i32 d0, d1, d2[0] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_FMLA_SCALAR && in.cls == A_SIMD);
+    put16(0, 0xEFA1); put16(2, 0x0842);                  /* vmul.i32 d0, d1, d2[0] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_FMUL_SCALAR && in.cls == A_SIMD);
+
+    /* VMLS by scalar is opc 0101 with the same lane fields as VMLA. The lane
+     * index and Vm[3:0] are read the same way, so d2[1] and d7[0] pin them. */
+    put16(0, 0xEFA1); put16(2, 0x0562);                  /* vmls.f32 d0, d1, d2[1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMLS_SCALAR && in.vd == 0 && in.vn == 1 && in.vm == 2 && in.imm == 1 && !in.neon_q);
+    put16(0, 0xFFA2); put16(2, 0x0564);                  /* vmls.f32 q0, q1, d4[1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMLS_SCALAR && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.imm == 1 && in.neon_q);
+    put16(0, 0xEFE1); put16(2, 0x05C7);                  /* vmls.f32 d16, d17, d7[0] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMLS_SCALAR && in.vd == 16 && in.vn == 17 && in.vm == 7 && in.imm == 0 && !in.neon_q);
+    put16(0, 0xFFE2); put16(2, 0x05EF);                  /* vmls.f32 q8, q9, d15[1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMLS_SCALAR && in.vd == 16 && in.vn == 18 && in.vm == 15 && in.imm == 1 && in.neon_q);
+    /* The integer VMLS.I32 by scalar is opc 0100, one bit away from the float. */
+    put16(0, 0xEFA1); put16(2, 0x0442);                  /* vmls.i32 d0, d1, d2[0] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_FMLS_SCALAR && in.cls == A_SIMD);
+
+    /* Float max and min, three registers: U=0, opc 1111, bit 21 picks min. */
+    put16(0, 0xEF01); put16(2, 0x0F02);                  /* vmax.f32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMAX && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.neon_size == 2);
+    put16(0, 0xEF42); put16(2, 0x0FE4);                  /* vmax.f32 q8, q9, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMAX && in.vd == 16 && in.vn == 18 && in.vm == 20 && in.neon_q);
+    put16(0, 0xEF61); put16(2, 0x0FA2);                  /* vmin.f32 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMIN && in.vd == 16 && in.vn == 17 && in.vm == 18 && !in.neon_q);
+    put16(0, 0xEF22); put16(2, 0x0F44);                  /* vmin.f32 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMIN && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.neon_q);
+
+    /* Float compares: VCEQ is U=0, VCGE U=1 bit 21 clear, VCGT U=1 bit 21 set. */
+    put16(0, 0xEF01); put16(2, 0x0E02);                  /* vceq.f32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCEQ && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.neon_size == 2);
+    put16(0, 0xEF42); put16(2, 0x0EE4);                  /* vceq.f32 q8, q9, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCEQ && in.vd == 16 && in.vn == 18 && in.vm == 20 && in.neon_q);
+    put16(0, 0xFF41); put16(2, 0x0EA2);                  /* vcge.f32 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCGE && in.vd == 16 && in.vn == 17 && in.vm == 18 && !in.neon_q);
+    put16(0, 0xFF02); put16(2, 0x0E44);                  /* vcge.f32 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCGE && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.neon_q);
+    put16(0, 0xFF21); put16(2, 0x0E02);                  /* vcgt.f32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCGT && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q);
+    put16(0, 0xFF62); put16(2, 0x0EE4);                  /* vcgt.f32 q8, q9, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCGT && in.vd == 16 && in.vn == 18 && in.vm == 20 && in.neon_q);
+
+    /* Two registers, miscellaneous: VABS and VNEG. Q is h2 bit 6, and the
+     * d16/q8 forms set D (h1 bit 6) and M (h2 bit 5). */
+    put16(0, 0xFFB9); put16(2, 0x0701);                  /* vabs.f32 d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FABS && in.vd == 0 && in.vm == 1 && !in.neon_q && in.neon_size == 2);
+    put16(0, 0xFFB9); put16(2, 0x0742);                  /* vabs.f32 q0, q1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FABS && in.vd == 0 && in.vm == 2 && in.neon_q);
+    put16(0, 0xFFF9); put16(2, 0x0721);                  /* vabs.f32 d16, d17 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FABS && in.vd == 16 && in.vm == 17 && !in.neon_q);
+    put16(0, 0xFFF9); put16(2, 0x0762);                  /* vabs.f32 q8, q9 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FABS && in.vd == 16 && in.vm == 18 && in.neon_q);
+    put16(0, 0xFFB9); put16(2, 0x0781);                  /* vneg.f32 d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FNEG && in.vd == 0 && in.vm == 1 && !in.neon_q);
+    put16(0, 0xFFF9); put16(2, 0x07E2);                  /* vneg.f32 q8, q9 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FNEG && in.vd == 16 && in.vm == 18 && in.neon_q);
+    /* The integer VABS.S32 and VNEG.S32 share h1 but have opc 0110 and 0111. */
+    put16(0, 0xFFB9); put16(2, 0x0301);                  /* vabs.s32 d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_FABS && in.cls == A_SIMD);
+    put16(0, 0xFFB9); put16(2, 0x0381);                  /* vneg.s32 d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_FNEG && in.cls == A_SIMD);
+
+    /* VCVT between F32 and S32/U32, no fixed-point bits. h1 bit 0 is set and
+     * bit 1 separates the conversions from VABS/VNEG; opc 1110 is F32 to S32,
+     * 1111 to U32, 1100 S32 to F32 and 1101 U32 to F32. */
+    put16(0, 0xFFBB); put16(2, 0x0701);                  /* vcvt.s32.f32 d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCVT_TO_INT && in.vd == 0 && in.vm == 1 && !in.vfp_unsigned && !in.neon_q);
+    put16(0, 0xFFBB); put16(2, 0x0781);                  /* vcvt.u32.f32 d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCVT_TO_INT && in.vd == 0 && in.vm == 1 && in.vfp_unsigned);
+    put16(0, 0xFFBB); put16(2, 0x0601);                  /* vcvt.f32.s32 d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCVT_FROM_INT && in.vd == 0 && in.vm == 1 && !in.vfp_unsigned && !in.neon_q);
+    put16(0, 0xFFBB); put16(2, 0x0681);                  /* vcvt.f32.u32 d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCVT_FROM_INT && in.vd == 0 && in.vm == 1 && in.vfp_unsigned);
+    put16(0, 0xFFBB); put16(2, 0x0742);                  /* vcvt.s32.f32 q0, q1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCVT_TO_INT && in.vd == 0 && in.vm == 2 && in.neon_q && !in.vfp_unsigned);
+    put16(0, 0xFFBB); put16(2, 0x06C2);                  /* vcvt.f32.u32 q0, q1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCVT_FROM_INT && in.vd == 0 && in.vm == 2 && in.neon_q && in.vfp_unsigned);
+    put16(0, 0xFFFB); put16(2, 0x0721);                  /* vcvt.s32.f32 d16, d17 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCVT_TO_INT && in.vd == 16 && in.vm == 17 && !in.neon_q);
+    put16(0, 0xFFFB); put16(2, 0x07E2);                  /* vcvt.u32.f32 q8, q9 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCVT_TO_INT && in.vd == 16 && in.vm == 18 && in.neon_q && in.vfp_unsigned);
+    put16(0, 0xFFFB); put16(2, 0x0621);                  /* vcvt.f32.s32 d16, d17 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FCVT_FROM_INT && in.vd == 16 && in.vm == 17 && !in.vfp_unsigned);
+
+    /* Negatives. The fixed-point VCVT (#16) is U=0 with a 1 in h2 bit 4, so it
+     * is never the plain conversion. The integer max, min and compares share the
+     * three-register group with other opc values and stay integer. */
+    put16(0, 0xEFB0); put16(2, 0x0F11);                  /* vcvt.s32.f32 d0, d1, #16 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_FCVT_TO_INT && in.op != OP_NEON_FCVT_FROM_INT);
+    put16(0, 0xEF21); put16(2, 0x0602);                  /* vmax.s32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_FMAX && in.op != OP_NEON_FMIN);
+    put16(0, 0xEF21); put16(2, 0x0612);                  /* vmin.s32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_FMAX && in.op != OP_NEON_FMIN);
+    put16(0, 0xEF21); put16(2, 0x0312);                  /* vcge.s32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_FCGE && in.op != OP_NEON_FCEQ && in.op != OP_NEON_FCGT);
+    put16(0, 0xFF21); put16(2, 0x0302);                  /* vcgt.u32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_FCGT && in.op != OP_NEON_FCGE);
+    put16(0, 0xFF21); put16(2, 0x0812);                  /* vceq.i32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_CEQ && in.neon_size == 2 && in.op != OP_NEON_FCEQ);
+    put16(0, 0xEF21); put16(2, 0x0802);                  /* vadd.i32 d0, d1, d2 (guard) */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ADD);
+
+    /* Integer VMUL, VMLA, VMLS, every size in D and Q. The opc is 1001 for all
+     * three: B set and U clear is VMUL, B clear is VMLA (U=0) or VMLS (U=1). */
+    put16(0, 0xEF01); put16(2, 0x0912);                  /* vmul.i8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MUL && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.neon_size == 0);
+    put16(0, 0xEF52); put16(2, 0x09F4);                  /* vmul.i16 q8, q9, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MUL && in.vd == 16 && in.vn == 18 && in.vm == 20 && in.neon_q && in.neon_size == 1);
+    put16(0, 0xEF61); put16(2, 0x09B2);                  /* vmul.i32 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MUL && in.vd == 16 && in.vn == 17 && in.vm == 18 && !in.neon_q && in.neon_size == 2);
+    put16(0, 0xEF12); put16(2, 0x0954);                  /* vmul.i16 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MUL && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.neon_q && in.neon_size == 1);
+    /* VMUL.P8 is the same opc with U set. It is a polynomial multiply, not a
+     * wrapping one, so it must not be claimed as OP_NEON_MUL. */
+    put16(0, 0xFF01); put16(2, 0x0912);                  /* vmul.p8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_MUL && in.cls == A_SIMD);
+    put16(0, 0xFF02); put16(2, 0x0954);                  /* vmul.p8 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_MUL && in.cls == A_SIMD);
+    /* The float VMUL and VMLA share the three-register group with opc 1101. */
+    put16(0, 0xFF01); put16(2, 0x0D12);                  /* vmul.f32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMUL && in.op != OP_NEON_MUL);
+    put16(0, 0xEF01); put16(2, 0x0D12);                  /* vmla.f32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMLA && in.op != OP_NEON_MLA);
+
+    put16(0, 0xEF01); put16(2, 0x0902);                  /* vmla.i8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MLA && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.neon_size == 0);
+    put16(0, 0xEF12); put16(2, 0x0944);                  /* vmla.i16 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MLA && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.neon_q && in.neon_size == 1);
+    put16(0, 0xEF61); put16(2, 0x09A2);                  /* vmla.i32 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MLA && in.vd == 16 && in.vn == 17 && in.vm == 18 && !in.neon_q && in.neon_size == 2);
+    put16(0, 0xFF01); put16(2, 0x0902);                  /* vmls.i8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MLS && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.neon_size == 0);
+    put16(0, 0xFF12); put16(2, 0x0944);                  /* vmls.i16 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MLS && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.neon_q && in.neon_size == 1);
+    put16(0, 0xFF62); put16(2, 0x09E4);                  /* vmls.i32 q8, q9, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MLS && in.vd == 16 && in.vn == 18 && in.vm == 20 && in.neon_q && in.neon_size == 2);
+    /* Neighbours: VADD and VSUB are opc 1000, VMLA.F32 is not an integer VMLA. */
+    put16(0, 0xEF01); put16(2, 0x0802);                  /* vadd.i8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ADD && in.op != OP_NEON_MLA);
+    put16(0, 0xFF61); put16(2, 0x08A2);                  /* vsub.i32 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SUB && in.op != OP_NEON_MLS);
+
+    /* Saturating add and subtract, every size in D and Q. U picks the sign:
+     * VQADD is opc 0000 and VQSUB opc 0010, both with B set. */
+    put16(0, 0xEF01); put16(2, 0x0012);                  /* vqadd.s8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QADD && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.neon_size == 0 && !in.vfp_unsigned);
+    put16(0, 0xFF01); put16(2, 0x0012);                  /* vqadd.u8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QADD && in.neon_size == 0 && in.vfp_unsigned);
+    put16(0, 0xEF12); put16(2, 0x0054);                  /* vqadd.s16 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QADD && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.neon_q && in.neon_size == 1 && !in.vfp_unsigned);
+    put16(0, 0xFF12); put16(2, 0x0054);                  /* vqadd.u16 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QADD && in.neon_q && in.neon_size == 1 && in.vfp_unsigned);
+    put16(0, 0xEF61); put16(2, 0x00B2);                  /* vqadd.s32 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QADD && in.vd == 16 && in.vn == 17 && in.vm == 18 && !in.neon_q && in.neon_size == 2 && !in.vfp_unsigned);
+    put16(0, 0xFF62); put16(2, 0x00F4);                  /* vqadd.u32 q8, q9, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QADD && in.vd == 16 && in.vn == 18 && in.vm == 20 && in.neon_q && in.neon_size == 2 && in.vfp_unsigned);
+    put16(0, 0xEF32); put16(2, 0x0054);                  /* vqadd.s64 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QADD && in.neon_q && in.neon_size == 3 && !in.vfp_unsigned);
+    put16(0, 0xFF71); put16(2, 0x00B2);                  /* vqadd.u64 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QADD && in.vd == 16 && in.neon_size == 3 && in.vfp_unsigned && !in.neon_q);
+    put16(0, 0xEF01); put16(2, 0x0212);                  /* vqsub.s8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QSUB && in.neon_size == 0 && !in.vfp_unsigned && !in.neon_q);
+    put16(0, 0xFF11); put16(2, 0x0212);                  /* vqsub.u16 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QSUB && in.neon_size == 1 && in.vfp_unsigned && !in.neon_q);
+    put16(0, 0xEF12); put16(2, 0x0254);                  /* vqsub.s16 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QSUB && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.neon_q && in.neon_size == 1);
+    put16(0, 0xEF61); put16(2, 0x02B2);                  /* vqsub.s32 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QSUB && in.vd == 16 && in.neon_size == 2 && !in.vfp_unsigned);
+    put16(0, 0xFF62); put16(2, 0x02F4);                  /* vqsub.u32 q8, q9, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QSUB && in.vd == 16 && in.neon_q && in.neon_size == 2 && in.vfp_unsigned);
+    put16(0, 0xEF32); put16(2, 0x0254);                  /* vqsub.s64 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QSUB && in.neon_q && in.neon_size == 3 && !in.vfp_unsigned);
+    put16(0, 0xFF71); put16(2, 0x02B2);                  /* vqsub.u64 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_QSUB && in.vd == 16 && in.neon_size == 3 && in.vfp_unsigned);
+    /* The wrapping forms share the opc slots with the other pairs, so VADD and
+     * VSUB (opc 1000) must not be claimed as saturating, nor the reverse. */
+    put16(0, 0xEF01); put16(2, 0x0802);                  /* vadd.i8 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ADD && in.op != OP_NEON_QADD);
+    put16(0, 0xEF32); put16(2, 0x0844);                  /* vadd.i64 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ADD && in.op != OP_NEON_QADD);
+    put16(0, 0xEF11); put16(2, 0x0B02);                  /* vqdmulh.s16 d0, d1, d2 (not claimed) */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_QADD && in.op != OP_NEON_MUL);
+
+    /* Shifts by immediate. L:imm6 (h2 bit 7 and h1 bits 5:0) gives the size and
+     * amount: VSHR is opc 0000 and VSRA 0001 (right, amount 2*esize - L:imm6),
+     * VSHL 0101 with U clear (left, amount L:imm6 - esize). Both ends are tested:
+     * the full lane width and 1 for right shifts, 0 and esize-1 for VSHL. */
+    put16(0, 0xEF8F); put16(2, 0x0011);                  /* vshr.s8 d0, d1, #1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHR && in.vd == 0 && in.vm == 1 && !in.neon_q && in.neon_size == 0 && in.imm == 1 && !in.vfp_unsigned);
+    put16(0, 0xEF88); put16(2, 0x0011);                  /* vshr.s8 d0, d1, #8: full width */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHR && in.neon_size == 0 && in.imm == 8 && !in.vfp_unsigned);
+    put16(0, 0xFFC8); put16(2, 0x0031);                  /* vshr.u8 d16, d17, #8 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHR && in.vd == 16 && in.vm == 17 && in.neon_size == 0 && in.imm == 8 && in.vfp_unsigned);
+    put16(0, 0xEF90); put16(2, 0x0011);                  /* vshr.s16 d0, d1, #16: full width */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHR && in.neon_size == 1 && in.imm == 16 && !in.vfp_unsigned);
+    put16(0, 0xFFDF); put16(2, 0x0072);                  /* vshr.u16 q8, q9, #1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHR && in.vd == 16 && in.vm == 18 && in.neon_q && in.neon_size == 1 && in.imm == 1 && in.vfp_unsigned);
+    put16(0, 0xEFA0); put16(2, 0x0052);                  /* vshr.s32 q0, q1, #32: full width */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHR && in.vd == 0 && in.vm == 2 && in.neon_q && in.neon_size == 2 && in.imm == 32 && !in.vfp_unsigned);
+    put16(0, 0xFFE0); put16(2, 0x0031);                  /* vshr.u32 d16, d17, #32: full width */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHR && in.neon_size == 2 && in.imm == 32 && in.vfp_unsigned);
+    put16(0, 0xEFBF); put16(2, 0x00D2);                  /* vshr.s64 q0, q1, #1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHR && in.neon_q && in.neon_size == 3 && in.imm == 1 && !in.vfp_unsigned);
+    put16(0, 0xFFC0); put16(2, 0x00F2);                  /* vshr.u64 q8, q9, #64: full width */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHR && in.vd == 16 && in.vm == 18 && in.neon_q && in.neon_size == 3 && in.imm == 64 && in.vfp_unsigned);
+    put16(0, 0xEF80); put16(2, 0x0091);                  /* vshr.s64 d0, d1, #64: full width */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHR && !in.neon_q && in.neon_size == 3 && in.imm == 64);
+
+    put16(0, 0xEF8F); put16(2, 0x0511);                  /* vshl.i8 d0, d1, #7: esize-1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHL && in.vd == 0 && in.vm == 1 && in.neon_size == 0 && in.imm == 7);
+    put16(0, 0xEF88); put16(2, 0x0511);                  /* vshl.i8 d0, d1, #0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHL && in.neon_size == 0 && in.imm == 0);
+    put16(0, 0xEFDF); put16(2, 0x0572);                  /* vshl.i16 q8, q9, #15: esize-1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHL && in.vd == 16 && in.vm == 18 && in.neon_q && in.neon_size == 1 && in.imm == 15);
+    put16(0, 0xEF90); put16(2, 0x0511);                  /* vshl.i16 d0, d1, #0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHL && in.neon_size == 1 && in.imm == 0);
+    put16(0, 0xEFFF); put16(2, 0x0531);                  /* vshl.i32 d16, d17, #31: esize-1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHL && in.vd == 16 && in.vm == 17 && in.neon_size == 2 && in.imm == 31);
+    put16(0, 0xEFA0); put16(2, 0x0552);                  /* vshl.i32 q0, q1, #0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHL && in.neon_q && in.neon_size == 2 && in.imm == 0);
+    put16(0, 0xEFBF); put16(2, 0x0591);                  /* vshl.i64 d0, d1, #63: esize-1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHL && in.neon_size == 3 && in.imm == 63 && !in.neon_q);
+
+    put16(0, 0xEF88); put16(2, 0x0111);                  /* vsra.s8 d0, d1, #8: full width */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SRA && in.vd == 0 && in.vm == 1 && in.neon_size == 0 && in.imm == 8 && !in.vfp_unsigned);
+    put16(0, 0xFFD0); put16(2, 0x0172);                  /* vsra.u16 q8, q9, #16: full width */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SRA && in.vd == 16 && in.vm == 18 && in.neon_q && in.neon_size == 1 && in.imm == 16 && in.vfp_unsigned);
+    put16(0, 0xEFE0); put16(2, 0x0131);                  /* vsra.s32 d16, d17, #32: full width */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SRA && in.vd == 16 && in.neon_size == 2 && in.imm == 32 && !in.vfp_unsigned);
+    put16(0, 0xFF80); put16(2, 0x01D2);                  /* vsra.u64 q0, q1, #64: full width */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SRA && in.neon_q && in.neon_size == 3 && in.imm == 64 && in.vfp_unsigned);
+    put16(0, 0xFF8F); put16(2, 0x0111);                  /* vsra.u8 d0, d1, #1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SRA && in.neon_size == 0 && in.imm == 1 && in.vfp_unsigned);
+    put16(0, 0xEFFF); put16(2, 0x01B1);                  /* vsra.s64 d16, d17, #1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SRA && in.vd == 16 && in.vm == 17 && in.neon_size == 3 && in.imm == 1 && !in.vfp_unsigned);
+
+    /* Negatives. The one-register immediate forms share h1 and h2 bit 7 with
+     * these, and must still decode as VMOV/VMVN immediate. VSLI (opc 0101 with
+     * U set), VSRI (0100, U set) and VRSHR (0010) are other operations and are
+     * not claimed. */
+    put16(0, 0xEFC0); put16(2, 0x0010);                  /* vmov.i32 d16, #0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_IMM && in.neon_fn == NL_MOV && in.vd == 16 && in.imm64 == 0 && !in.neon_q);
+    put16(0, 0xEF80); put16(2, 0x0030);                  /* vmvn.i32 d0, #0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_IMM && in.neon_fn == NL_MVN);
+    put16(0, 0xFF88); put16(2, 0x0511);                  /* vsli.8 d0, d1, #0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_SHL && in.op != OP_NEON_SHR && in.op != OP_NEON_SRA && in.cls == A_SIMD);
+    put16(0, 0xFF8F); put16(2, 0x0411);                  /* vsri.8 d0, d1, #1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_SHR && in.op != OP_NEON_SRA && in.cls == A_SIMD);
+    put16(0, 0xEF8F); put16(2, 0x0211);                  /* vrshr.s8 d0, d1, #1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_SHR && in.op != OP_NEON_SRA && in.cls == A_SIMD);
+    /* The fixed-point VCVT (#16) has the same h2 bit 4 and bit 7 as a shift;
+     * it must stay out of the shift group. */
+    put16(0, 0xEFB0); put16(2, 0x0F11);                  /* vcvt.s32.f32 d0, d1, #16 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_SHR && in.op != OP_NEON_SHL && in.op != OP_NEON_SRA);
+
+    printf("ok   homebrew forms: vld1/vst1, vdup, lane and pair moves, vceq, vpadd, vmovn, vcvt, rev/rbit, extends, smulxy, f32 vector, f32 max/min/cmp/abs/neg/cvt, integer vmul/vmla/vmls, vqadd/vqsub, shifts by immediate\n");
+}
+
+/* The shuffles, table lookup and lane duplicate. Each encoding was checked
+ * with arm-vita-eabi-as and objdump, except the rejects: vtbl with n=31 and
+ * len=2 cannot be assembled, so its halfwords come from the layout in
+ * decode.c (N=1 for n=31, len=2 in h2 bits 9:8). */
+/* Widening: the three-registers-of-different-lengths group and VSHLL/VMOVL.
+ * Each encoding was taken from arm-vita-eabi-as and checked by objdump. The
+ * rejects are computed from the layout, and each comment gives the bit that
+ * refuses it: an odd Qd or Qn, opc 0100, ss = 11 (which is VEXT here), h2 bit 6
+ * set on a VSHLL, and L (h2 bit 7) set on a VSHLL. */
+static void test_neon_widen_forms(void) {
+    arm_insn in;
+
+    put16(0, 0xEF81); put16(2, 0x0002);                  /* vaddl.s8 q0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ADDL && in.vd == 0 && in.vn == 1 && in.vm == 2);
+    assert(in.neon_size == 0 && !in.vfp_unsigned && strcmp(in.mnemonic, "vaddl.s8") == 0);
+    put16(0, 0xFF92); put16(2, 0x2003);                  /* vaddl.u16 q1, d2, d3 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ADDL && in.vd == 2 && in.vn == 2 && in.vm == 3);
+    assert(in.neon_size == 1 && in.vfp_unsigned && strcmp(in.mnemonic, "vaddl.u16") == 0);
+    put16(0, 0xEFA2); put16(2, 0x0104);                  /* vaddw.s32 q0, q1, d4 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ADDW && in.vd == 0 && in.vn == 2 && in.vm == 4);
+    assert(in.neon_size == 2 && !in.vfp_unsigned && strcmp(in.mnemonic, "vaddw.s32") == 0);
+    put16(0, 0xEF90); put16(2, 0x0302);                  /* vsubw.s16 q0, q0, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SUBW && in.vd == 0 && in.vn == 0 && in.vm == 2);
+    assert(in.neon_size == 1 && strcmp(in.mnemonic, "vsubw.s16") == 0);
+    put16(0, 0xFF80); put16(2, 0x4201);                  /* vsubl.u8 q2, d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SUBL && in.vd == 4 && in.vn == 0 && in.vm == 1);
+    assert(in.neon_size == 0 && in.vfp_unsigned && strcmp(in.mnemonic, "vsubl.u8") == 0);
+    put16(0, 0xEF91); put16(2, 0x0C02);                  /* vmull.s16 q0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MULL && in.vd == 0 && in.vn == 1 && in.vm == 2);
+    assert(in.neon_size == 1 && !in.vfp_unsigned && strcmp(in.mnemonic, "vmull.s16") == 0);
+    put16(0, 0xFFE0); put16(2, 0x0C2F);                  /* vmull.u32 q8, d0, d31: d = 16 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MULL && in.vd == 16 && in.vn == 0 && in.vm == 31);
+    assert(in.neon_size == 2 && in.vfp_unsigned && strcmp(in.mnemonic, "vmull.u32") == 0);
+    put16(0, 0xFF84); put16(2, 0x2C05);                  /* vmull.u8 q1, d4, d5 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MULL && in.vd == 2 && in.vn == 4 && in.vm == 5);
+    assert(in.neon_size == 0 && in.vfp_unsigned && strcmp(in.mnemonic, "vmull.u8") == 0);
+    put16(0, 0xEF81); put16(2, 0x0802);                  /* vmlal.s8 q0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MLAL && in.vd == 0 && in.vn == 1 && in.vm == 2);
+    assert(in.neon_size == 0 && !in.vfp_unsigned && strcmp(in.mnemonic, "vmlal.s8") == 0);
+    put16(0, 0xFFA6); put16(2, 0x6807);                  /* vmlal.u32 q3, d6, d7 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MLAL && in.vd == 6 && in.vn == 6 && in.vm == 7);
+    assert(in.neon_size == 2 && in.vfp_unsigned && strcmp(in.mnemonic, "vmlal.u32") == 0);
+    put16(0, 0xFF92); put16(2, 0x2A03);                  /* vmlsl.u16 q1, d2, d3 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MLSL && in.vd == 2 && in.vn == 2 && in.vm == 3);
+    assert(in.neon_size == 1 && in.vfp_unsigned && strcmp(in.mnemonic, "vmlsl.u16") == 0);
+
+    /* VSHLL and VMOVL: the shift group, with opc 1010 and L clear. The shift
+     * is L:imm6 - esize, and the size is the top set bit of L:imm6. */
+    put16(0, 0xFF8B); put16(2, 0x0A11);                  /* vshll.u8 q0, d1, #3 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHLL && in.vd == 0 && in.vm == 1 && in.neon_size == 0);
+    assert(in.vfp_unsigned && in.imm == 3 && in.has_imm && strcmp(in.mnemonic, "vshll.u8") == 0);
+    put16(0, 0xEF88); put16(2, 0x0A11);                  /* vmovl.s8 q0, d1: shift 0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHLL && in.vd == 0 && in.vm == 1 && in.neon_size == 0);
+    assert(!in.vfp_unsigned && in.imm == 0 && strcmp(in.mnemonic, "vmovl.s8") == 0);
+    put16(0, 0xFF90); put16(2, 0x2A14);                  /* vmovl.u16 q1, d4 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHLL && in.vd == 2 && in.vm == 4 && in.neon_size == 1);
+    assert(in.vfp_unsigned && in.imm == 0 && strcmp(in.mnemonic, "vmovl.u16") == 0);
+    put16(0, 0xEFA0); put16(2, 0x4A15);                  /* vmovl.s32 q2, d5 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHLL && in.vd == 4 && in.vm == 5 && in.neon_size == 2);
+    assert(!in.vfp_unsigned && in.imm == 0 && strcmp(in.mnemonic, "vmovl.s32") == 0);
+    put16(0, 0xEF9F); put16(2, 0x0A11);                  /* vshll.s16 q0, d1, #15 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHLL && in.vd == 0 && in.vm == 1 && in.neon_size == 1);
+    assert(!in.vfp_unsigned && in.imm == 15 && strcmp(in.mnemonic, "vshll.s16") == 0);
+    put16(0, 0xFFA1); put16(2, 0x2A12);                  /* vshll.u32 q1, d2, #1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SHLL && in.vd == 2 && in.vm == 2 && in.neon_size == 2);
+    assert(in.vfp_unsigned && in.imm == 1 && strcmp(in.mnemonic, "vshll.u32") == 0);
+
+    /* Rejects. */
+    put16(0, 0xEF91); put16(2, 0x1C02);                  /* vmull: d = 1, Qd odd */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xEFA3); put16(2, 0x0104);                  /* vaddw: n = 3, Qn odd */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xEF81); put16(2, 0x0402);                  /* opc 0100, VADDHN: not claimed */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xEFB1); put16(2, 0x0C02);                  /* ss = 11, VEXT with imm 12 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xEFB1); put16(2, 0x0002);                  /* ss = 11, opc 0: VEXT, not VADDL */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_EXT && in.vd == 0 && in.vn == 1 && in.vm == 2 && in.imm == 0);
+    put16(0, 0xEF9F); put16(2, 0x1A11);                  /* VSHLL: d = 1, Qd odd */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xEF9F); put16(2, 0x0A50);                  /* VSHLL with h2 bit 6 set: not VSHLL */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xEF9F); put16(2, 0x0A91);                  /* VSHLL with L (h2 bit 7) set: 64-bit source */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+
+    printf("ok   neon widening: vaddl/vsubl/vaddw/vsubw/vmull/vmlal/vmlsl, vshll/vmovl, and their rejects\n");
+}
+
+static void test_neon_shuffle_forms(void) {
+    arm_insn in;
+
+    put16(0, 0xEFB1); put16(2, 0x0302);                  /* vext.8 d0, d1, d2, #3 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_EXT && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q);
+    assert(in.imm == 3 && in.has_imm && strcmp(in.mnemonic, "vext.8") == 0);
+    put16(0, 0xEFB2); put16(2, 0x0B44);                  /* vext.8 q0, q1, q2, #11 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_EXT && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.neon_q);
+    assert(in.imm == 11 && strcmp(in.mnemonic, "vext.8") == 0);
+    put16(0, 0xEFB1); put16(2, 0x0402);                  /* vext.32 d0, d1, d2, #1: byte 4 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_EXT && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.imm == 4);
+    put16(0, 0xEFB1); put16(2, 0x0802);                  /* D form, imm4 8: not encoded */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD && strcmp(in.mnemonic, "simd/vfp") == 0);
+    put16(0, 0xEFB2); put16(2, 0x1B44);                  /* Q form, vd = d1: odd */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+
+    put16(0, 0xFFB0); put16(2, 0x0001);                  /* vrev64.8 d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_REV && in.vd == 0 && in.vm == 1 && !in.neon_q);
+    assert(in.neon_size == 0 && in.imm == 64 && strcmp(in.mnemonic, "vrev64.8") == 0);
+    put16(0, 0xFFB8); put16(2, 0x0042);                  /* vrev64.32 q0, q1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_REV && in.vd == 0 && in.vm == 2 && in.neon_q);
+    assert(in.neon_size == 2 && in.imm == 64 && strcmp(in.mnemonic, "vrev64.32") == 0);
+    put16(0, 0xFFB4); put16(2, 0x0081);                  /* vrev32.16 d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_REV && in.vd == 0 && in.vm == 1 && !in.neon_q);
+    assert(in.neon_size == 1 && in.imm == 32 && strcmp(in.mnemonic, "vrev32.16") == 0);
+    put16(0, 0xFFB0); put16(2, 0x0142);                  /* vrev16.8 q0, q1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_REV && in.vd == 0 && in.vm == 2 && in.neon_q);
+    assert(in.neon_size == 0 && in.imm == 16 && strcmp(in.mnemonic, "vrev16.8") == 0);
+    put16(0, 0xFFB4); put16(2, 0x0101);                  /* vrev16.16: no such size */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+
+    put16(0, 0xFFB2); put16(2, 0x0001);                  /* vswp d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SWP && in.vd == 0 && in.vm == 1 && !in.neon_q && strcmp(in.mnemonic, "vswp") == 0);
+    put16(0, 0xFFB2); put16(2, 0x0042);                  /* vswp q0, q1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_SWP && in.vd == 0 && in.vm == 2 && in.neon_q && in.neon_size == 0);
+    put16(0, 0xFFB6); put16(2, 0x0042);                  /* VSWP with size 16: undefined */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xFFB6); put16(2, 0x0081);                  /* vtrn.16 d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_TRN && in.vd == 0 && in.vm == 1 && !in.neon_q);
+    assert(in.neon_size == 1 && strcmp(in.mnemonic, "vtrn.16") == 0);
+    put16(0, 0xFFBA); put16(2, 0x00C2);                  /* vtrn.32 q0, q1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_TRN && in.vd == 0 && in.vm == 2 && in.neon_q && in.neon_size == 2);
+    assert(strcmp(in.mnemonic, "vtrn.32") == 0);
+    put16(0, 0xFFB2); put16(2, 0x0101);                  /* vuzp.8 d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_UZP && in.vd == 0 && in.vm == 1 && !in.neon_q && in.neon_size == 0);
+    assert(strcmp(in.mnemonic, "vuzp.8") == 0);
+    put16(0, 0xFFB6); put16(2, 0x0142);                  /* vuzp.16 q0, q1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_UZP && in.vd == 0 && in.vm == 2 && in.neon_q && in.neon_size == 1);
+    assert(strcmp(in.mnemonic, "vuzp.16") == 0);
+    put16(0, 0xFFB2); put16(2, 0x0181);                  /* vzip.8 d0, d1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ZIP && in.vd == 0 && in.vm == 1 && !in.neon_q && in.neon_size == 0);
+    assert(strcmp(in.mnemonic, "vzip.8") == 0);
+    put16(0, 0xFFBA); put16(2, 0x01C2);                  /* vzip.32 q0, q1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ZIP && in.vd == 0 && in.vm == 2 && in.neon_q && in.neon_size == 2);
+    assert(strcmp(in.mnemonic, "vzip.32") == 0);
+    put16(0, 0xFFBA); put16(2, 0x0181);                  /* vzip.32 d0, d1: undefined */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+
+    put16(0, 0xFFBB); put16(2, 0x0C01);                  /* vdup.8 d0, d1[5] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_DUP_LANE && in.vd == 0 && in.vm == 1 && !in.neon_q);
+    assert(in.neon_size == 0 && in.imm == 5 && strcmp(in.mnemonic, "vdup.8") == 0);
+    put16(0, 0xFFBA); put16(2, 0x0C41);                  /* vdup.16 q0, d1[2] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_DUP_LANE && in.vd == 0 && in.vm == 1 && in.neon_q);
+    assert(in.neon_size == 1 && in.imm == 2 && strcmp(in.mnemonic, "vdup.16") == 0);
+    put16(0, 0xFFBC); put16(2, 0x0C2F);                  /* vdup.32 d0, d31[1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_DUP_LANE && in.vd == 0 && in.vm == 31 && !in.neon_q);
+    assert(in.neon_size == 2 && in.imm == 1 && strcmp(in.mnemonic, "vdup.32") == 0);
+    put16(0, 0xFFB8); put16(2, 0x0C01);                  /* imm4 = x000: no lane size */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+
+    put16(0, 0xFFB1); put16(2, 0x0802);                  /* vtbl.8 d0, {d1}, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_TBL && in.vd == 0 && in.vn == 1 && in.vm == 2 && in.imm == 1);
+    assert(strcmp(in.mnemonic, "vtbl.8") == 0);
+    put16(0, 0xFFB1); put16(2, 0x0B05);                  /* vtbl.8 d0, {d1-d4}, d5 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_TBL && in.vn == 1 && in.vm == 5 && in.imm == 4);
+    put16(0, 0xFFB1); put16(2, 0x0943);                  /* vtbx.8 d0, {d1-d2}, d3 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_TBX && in.vd == 0 && in.vn == 1 && in.vm == 3 && in.imm == 2);
+    assert(strcmp(in.mnemonic, "vtbx.8") == 0);
+    put16(0, 0xFFBF); put16(2, 0x0A00);                  /* vtbl.8 d0, {d15-d17}, d0 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_TBL && in.vn == 15 && in.vm == 0 && in.imm == 3);
+    put16(0, 0xFFBF); put16(2, 0x0A80);                  /* n = 31, len 2: runs past d31 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+
+    printf("ok   neon shuffles: vext, vrev, vswp, vtrn, vuzp, vzip, vdup scalar, vtbl/vtbx, and their rejects\n");
+}
+
+/* VLD2-4 / VST2-4, multiple structures. Each encoding was taken from
+ * arm-vita-eabi-as and checked by objdump. neon_inc is the register step
+ * between members, and neon_q marks the type 0011 form, whose members are Q
+ * pairs. The rejects are computed from the encoding tables. */
+static void test_neon_ldst_multi(void) {
+    arm_insn in;
+
+    put16(0, 0xF920); put16(2, 0x080F);                  /* vld2.8 {d0-d1}, [r0] */
+    in = dec(ARM_T32, BASE);
+    assert(in.cls == A_SIMD && in.op == OP_NEON_VLDN && strcmp(in.mnemonic, "vld2") == 0);
+    assert(in.vd == 0 && in.rn == 0 && in.imm == 2 && in.neon_size == 0);
+    assert(!in.neon_q && in.neon_inc == 1 && !in.writeback && in.rm == ARM_NO_REG);
+
+    put16(0, 0xF921); put16(2, 0x094D);                  /* vld2.16 {d0,d2}, [r1]! */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VLDN && in.vd == 0 && in.rn == 1 && in.imm == 2);
+    assert(in.neon_size == 1 && !in.neon_q && in.neon_inc == 2);
+    assert(in.writeback && in.rm == ARM_NO_REG);         /* rm 13: by transfer size */
+
+    put16(0, 0xF922); put16(2, 0x0383);                  /* vld2.32 {d0-d3}, [r2], r3 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VLDN && in.vd == 0 && in.rn == 2 && in.imm == 2);
+    assert(in.neon_size == 2 && in.neon_q && in.neon_inc == 2);
+    assert(in.writeback && in.rm == 3);
+
+    put16(0, 0xF960); put16(2, 0x032F);                  /* vld2.8 {d16-d19}, [r0 :128] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VLDN && in.vd == 16 && in.rn == 0 && in.imm == 2);
+    assert(in.neon_size == 0 && in.neon_q && in.neon_inc == 2 && !in.writeback);
+
+    put16(0, 0xF906); put16(2, 0x484F);                  /* vst2.16 {d4-d5}, [r6] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VSTN && in.vd == 4 && in.rn == 6 && in.imm == 2);
+    assert(in.neon_size == 1 && !in.neon_q && in.neon_inc == 1 && !in.writeback);
+    assert(strcmp(in.mnemonic, "vst2") == 0);
+
+    put16(0, 0xF901); put16(2, 0x038D);                  /* vst2.32 {d0-d3}, [r1]! */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VSTN && in.vd == 0 && in.rn == 1 && in.imm == 2);
+    assert(in.neon_size == 2 && in.neon_q && in.neon_inc == 2 && in.writeback);
+    assert(in.rm == ARM_NO_REG);
+
+    put16(0, 0xF920); put16(2, 0x040F);                  /* vld3.8 {d0-d2}, [r0] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VLDN && in.vd == 0 && in.rn == 0 && in.imm == 3);
+    assert(in.neon_size == 0 && !in.neon_q && in.neon_inc == 1 && !in.writeback);
+    assert(strcmp(in.mnemonic, "vld3") == 0);
+
+    put16(0, 0xF921); put16(2, 0x054D);                  /* vld3.16 {d0,d2,d4}, [r1]! */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VLDN && in.vd == 0 && in.rn == 1 && in.imm == 3);
+    assert(in.neon_size == 1 && !in.neon_q && in.neon_inc == 2 && in.writeback);
+
+    put16(0, 0xF902); put16(2, 0x1484);                  /* vst3.32 {d1-d3}, [r2], r4 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VSTN && in.vd == 1 && in.rn == 2 && in.imm == 3);
+    assert(in.neon_size == 2 && !in.neon_q && in.neon_inc == 1 && in.writeback && in.rm == 4);
+
+    put16(0, 0xF920); put16(2, 0x000F);                  /* vld4.8 {d0-d3}, [r0] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VLDN && in.vd == 0 && in.rn == 0 && in.imm == 4);
+    assert(in.neon_size == 0 && !in.neon_q && in.neon_inc == 1 && !in.writeback);
+    assert(strcmp(in.mnemonic, "vld4") == 0);
+
+    put16(0, 0xF921); put16(2, 0x018D);                  /* vld4.32 {d0,d2,d4,d6}, [r1]! */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VLDN && in.vd == 0 && in.rn == 1 && in.imm == 4);
+    assert(in.neon_size == 2 && !in.neon_q && in.neon_inc == 2 && in.writeback);
+
+    put16(0, 0xF945); put16(2, 0xC041);                  /* vst4.16 {d28-d31}, [r5], r1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VSTN && in.vd == 28 && in.rn == 5 && in.imm == 4);
+    assert(in.neon_size == 1 && !in.neon_q && in.neon_inc == 1 && in.writeback && in.rm == 1);
+
+    put16(0, 0xF900); put16(2, 0x013F);                  /* vst4.8 {d0,d2,d4,d6}, [r0 :256] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VSTN && in.vd == 0 && in.rn == 0 && in.imm == 4);
+    assert(in.neon_size == 0 && !in.neon_q && in.neon_inc == 2 && !in.writeback);
+
+    /* VLD1 shares the space and must still decode as VLD1 with neon_inc unused. */
+    put16(0, 0xF920); put16(2, 0x0A8F);                  /* vld1.32 {d0-d1}, [r0] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_VLD1 && in.vd == 0 && in.imm == 2 && !in.writeback);
+
+    /* Rejects: size 3, VLD2 align 3 (D form), VLD3 align bit 1, a register past
+     * d31, and rn = pc. Each decodes as opaque SIMD, not as a VLDN/VSTN. */
+    put16(0, 0xF920); put16(2, 0x08CF);                  /* vld2, size 3 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xF920); put16(2, 0x083F);                  /* vld2 type 1000, align 3 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xF920); put16(2, 0x042F);                  /* vld3, align 2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xF960); put16(2, 0xA10F);                  /* vld4 type 0001 at d26: d32 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xF960); put16(2, 0xD30F);                  /* vld2 type 0011 at d29: d32 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xF92F); put16(2, 0x080F);                  /* vld2, rn = pc */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+
+    printf("ok   neon structures: vld2-4/vst2-4 forms, Q pairs, writeback, and their rejects\n");
+}
+
+/* The narrowing forms. VQMOVN and VQMOVUN are in the two-register group, with
+ * op = h2 bits 7:6. VSHRN to VQRSHRUN are in the shift group, with opc 1000
+ * or 1001, and there h2 bit 6 is the rounding flag, not Q. Each encoding was
+ * taken from arm-vita-eabi-as and checked by objdump. The rejects are computed
+ * from the layout, and each says which field makes it invalid. */
+static void test_neon_narrow_forms(void) {
+    arm_insn in;
+
+    /* VMOVN (op 00) is handled before the VQMOVN block, and must not change. */
+    put16(0, 0xFFB2); put16(2, 0x0202);                  /* vmovn.i16 d0, q1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_MOVN && in.vd == 0 && in.vm == 2 && in.neon_size == 0);
+    assert(strcmp(in.mnemonic, "vmovn") == 0);
+
+    put16(0, 0xFFB2); put16(2, 0x0282);                  /* vqmovn.s16 d0, q1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_QSHR && in.vd == 0 && in.vm == 2);
+    assert(in.neon_size == 0 && in.imm == 0 && !in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vqmovn.s16") == 0);
+    put16(0, 0xFFB6); put16(2, 0x12C4);                  /* vqmovn.u32 d1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_QSHR && in.vd == 1 && in.vm == 4);
+    assert(in.neon_size == 1 && in.vfp_unsigned && in.imm == 0);
+    assert(strcmp(in.mnemonic, "vqmovn.u32") == 0);
+    put16(0, 0xFFBA); put16(2, 0x2286);                  /* vqmovn.s64 d2, q3 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_QSHR && in.vd == 2 && in.vm == 6);
+    assert(in.neon_size == 2 && !in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vqmovn.s64") == 0);
+
+    put16(0, 0xFFB2); put16(2, 0x0242);                  /* vqmovun.s16 d0, q1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_QSHRU && in.vd == 0 && in.vm == 2);
+    assert(in.neon_size == 0 && in.imm == 0);
+    assert(strcmp(in.mnemonic, "vqmovun.s16") == 0);
+    put16(0, 0xFFBA); put16(2, 0x0242);                  /* vqmovun.s64 d0, q1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_QSHRU && in.vd == 0 && in.vm == 2 && in.neon_size == 2);
+    assert(strcmp(in.mnemonic, "vqmovun.s64") == 0);
+
+    /* The shift group. The result lane is L:imm6's size, and the amount is
+     * 2*esize - L:imm6, so each form is checked at both ends of its range. */
+    put16(0, 0xEF8D); put16(2, 0x0812);                  /* vshrn.i16 d0, q1, #3 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_SHR && in.vd == 0 && in.vm == 2);
+    assert(in.neon_size == 0 && in.imm == 3 && in.has_imm && !in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vshrn.i16") == 0);
+    put16(0, 0xEF90); put16(2, 0x0812);                  /* vshrn.i32 d0, q1, #16 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_SHR && in.neon_size == 1 && in.imm == 16);
+    assert(strcmp(in.mnemonic, "vshrn.i32") == 0);
+    put16(0, 0xEFBF); put16(2, 0x0812);                  /* vshrn.i64 d0, q1, #1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_SHR && in.neon_size == 2 && in.imm == 1);
+    assert(strcmp(in.mnemonic, "vshrn.i64") == 0);
+    put16(0, 0xEF88); put16(2, 0x0852);                  /* vrshrn.i16 d0, q1, #8 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_RSHR && in.neon_size == 0 && in.imm == 8);
+    assert(strcmp(in.mnemonic, "vrshrn.i16") == 0);
+    /* Odd Dd, and the full width: Q is not checked here, because h2 bit 6 is
+     * the rounding flag. */
+    put16(0, 0xEFA0); put16(2, 0x3854);                  /* vrshrn.i64 d3, q2, #32 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_RSHR && in.vd == 3 && in.vm == 4);
+    assert(in.neon_size == 2 && in.imm == 32 && !in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vrshrn.i64") == 0);
+
+    put16(0, 0xEF8F); put16(2, 0x0912);                  /* vqshrn.s16 d0, q1, #1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_QSHR && in.neon_size == 0 && in.imm == 1 && !in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vqshrn.s16") == 0);
+    put16(0, 0xFF9B); put16(2, 0x0912);                  /* vqshrn.u32 d0, q1, #5 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_QSHR && in.neon_size == 1 && in.imm == 5 && in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vqshrn.u32") == 0);
+    put16(0, 0xEF9C); put16(2, 0x0952);                  /* vqrshrn.s32 d0, q1, #4 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_QRSHR && in.neon_size == 1 && in.imm == 4 && !in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vqrshrn.s32") == 0);
+    put16(0, 0xFFA1); put16(2, 0x0952);                  /* vqrshrn.u64 d0, q1, #31 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_QRSHR && in.neon_size == 2 && in.imm == 31 && in.vfp_unsigned);
+    assert(strcmp(in.mnemonic, "vqrshrn.u64") == 0);
+
+    put16(0, 0xFFA0); put16(2, 0x0812);                  /* vqshrun.s64 d0, q1, #32 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_QSHRU && in.neon_size == 2 && in.imm == 32);
+    assert(strcmp(in.mnemonic, "vqshrun.s64") == 0);
+    put16(0, 0xFF8E); put16(2, 0x0852);                  /* vqrshrun.s16 d0, q1, #2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_NARROW_QRSHRU && in.neon_size == 0 && in.imm == 2);
+    assert(strcmp(in.mnemonic, "vqrshrun.s16") == 0);
+
+    /* Rejects. ef8d 0813: Qm = M:mmmm = 00011 = 3, odd. ef8d 0892: h2 bit 7 is
+     * L and is set, so L:imm6 = 64 + 13 is past the 64-bit range. ffbe 0282:
+     * h1 bits 3:2 (ss) are 11, which would need a 128-bit source. ffb2 0243:
+     * VQMOVUN with Qm = 3, odd. */
+    put16(0, 0xEF8D); put16(2, 0x0813);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xEF8D); put16(2, 0x0892);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xFFBE); put16(2, 0x0282);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+    put16(0, 0xFFB2); put16(2, 0x0243);
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NONE && in.cls == A_SIMD);
+
+    printf("ok   neon narrowing: vmovn, vqmovn/vqmovun, vshrn/vrshrn, vqshrn/vqrshrn, vqshrun/vqrshrun, and their rejects\n");
+}
+
+static void test_shifts_and_indexing(void) {
+    memset(code, 0, sizeof(code));
+    arm_insn in;
+
+    put16(0, 0x0808);                                    /* lsrs r0, r1, #32 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LSR && in.has_imm && in.imm == 32);
+    put16(0, 0x1008);                                    /* asrs r0, r1, #32 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_ASR && in.imm == 32);
+    put16(0, 0x0008);                                    /* movs r0, r1      */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LSL && in.imm == 0);
+
+    put16(0, 0xEA4F); put16(2, 0x0011);                  /* mov.w r0, r1, lsr #32 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_MOV && in.shift_type == SH_LSR && in.shift_amt == 32);
+    put16(0, 0xEA4F); put16(2, 0x0031);                  /* mov.w r0, r1, rrx */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_MOV && in.shift_type == SH_RRX && in.shift_amt == 1);
+    put16(0, 0xEA4F); put16(2, 0x0001);                  /* mov.w r0, r1 */
+    in = dec(ARM_T32, BASE);
+    assert(in.shift_type == SH_LSL && in.shift_amt == 0);
+
+    put16(0, 0xF011); put16(2, 0x407F);                  /* ands r0, r1, #0xFF000000 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_AND && in.sets_flags && in.imm == 0xFF000000u && in.imm_carry);
+    put16(0, 0xF011); put16(2, 0x00FF);                  /* ands r0, r1, #0xFF */
+    in = dec(ARM_T32, BASE);
+    assert(in.imm == 0xFF && !in.imm_carry);
+
+    put16(0, 0xF84D); put16(2, 0x0D04);                  /* str r0, [sp, #-4]! */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_STR && in.rn == 13 && in.imm == 4 && !in.mem_add
+           && in.writeback && !in.postindex);
+    put16(0, 0xF851); put16(2, 0x0B04);                  /* ldr r0, [r1], #4 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDR && in.imm == 4 && in.mem_add && in.writeback && in.postindex);
+    put16(0, 0xF851); put16(2, 0x0C08);                  /* ldr r0, [r1, #-8] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDR && in.imm == 8 && !in.mem_add && !in.writeback);
+    put16(0, 0xF851); put16(2, 0x0022);                  /* ldr r0, [r1, r2, lsl #2] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDR && in.rm == 2 && in.shift_amt == 2 && !in.has_imm);
+    put16(0, 0xF85F); put16(2, 0x0008);                  /* ldr r0, [pc, #-8] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDR && in.rn == 15 && in.imm == 8 && !in.mem_add);
+
+    put16(0, 0xF941); put16(2, 0x078F);                  /* vst1.32 {d16}, [r1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.cls == A_SIMD && in.op == OP_NEON_VST1 && in.vd == 16 && in.imm == 1 && !in.writeback);
+    put16(0, 0xF961); put16(2, 0x078F);                  /* vld1.32 {d16}, [r1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.cls == A_SIMD && in.op == OP_NEON_VLD1 && in.rn == 1);
+    put16(0, 0xF911); put16(2, 0x0004);                  /* ldrsb.w r0, [r1, r4] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDRSB);
+    put16(0, 0xF891); put16(2, 0xF040);                  /* pld [r1, #64] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NOP && in.cls == A_NOP);
+    put16(0, 0xF85D); put16(2, 0xFB04);                  /* ldr pc, [sp], #4 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_POP && in.cls == A_RETURN && in.reglist == 0x8000);
+
+    put16(0, 0xE96D); put16(2, 0x4502);                  /* strd r4, r5, [sp, #-8]! */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_STRD && in.imm == 8 && !in.mem_add && in.writeback && !in.postindex);
+    put16(0, 0xE8FD); put16(2, 0x4502);                  /* ldrd r4, r5, [sp], #8 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDRD && in.imm == 8 && in.mem_add && in.writeback && in.postindex);
+    put16(0, 0xE9D0); put16(2, 0x0100);                  /* ldrd r0, r1, [r0] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LDRD && !in.writeback && !in.postindex);
+
+    put16(0, 0xFA21); put16(2, 0xF002);                  /* lsr.w r0, r1, r2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_LSR && in.rd == 0 && in.rn == 1 && in.rm == 2 && !in.has_imm);
+    printf("  shift-by-0 meanings, immediate carry, indexing, hints: ok\n");
+}
+
 int main(void) {
     printf("decode:\n");
     test_thumb_width();
@@ -686,6 +1983,14 @@ int main(void) {
     test_vfp();
     test_it_block();
     test_bounds();
+    test_bringup_forms();
+    test_shifts_and_indexing();
+    test_homebrew_forms();
+    test_neon_widen_forms();
+    test_neon_shuffle_forms();
+    test_neon_ldst_multi();
+    test_neon_narrow_forms();
+    test_tables_hints_exclusives();
     printf("all decode tests passed\n");
     return 0;
 }

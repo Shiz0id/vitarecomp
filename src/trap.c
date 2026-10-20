@@ -16,6 +16,7 @@
  */
 
 #include "vitarecomp/recomp_rt.h"
+#include "atomic.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,8 +27,8 @@ static FILE *g_out;
 
 /* Distinct traps already reported, so a loop does not bury the log. */
 #define SEEN_SLOTS 4096
-static uint32_t g_seen[SEEN_SLOTS];
-static uint32_t g_hits;
+static volatile uint32_t g_seen[SEEN_SLOTS];
+static volatile uint32_t g_hits;
 
 static int trace_on(void) {
     if (g_trace < 0) {
@@ -43,16 +44,22 @@ static int first_time(uint32_t key) {
     uint32_t h = (key * 2654435761u) & (SEEN_SLOTS - 1);
     for (uint32_t i = 0; i < SEEN_SLOTS; i++) {
         uint32_t s = (h + i) & (SEEN_SLOTS - 1);
-        if (g_seen[s] == key) return 0;
-        if (g_seen[s] == 0)   { g_seen[s] = key; return 1; }
+        uint32_t v = vita_atomic_load(&g_seen[s]);
+        if (v == key) return 0;
+        /* Claim an empty slot; if another thread got there first with the
+         * same key it has reported it, and with a different key, move on. */
+        if (v == 0) {
+            if (vita_atomic_cas(&g_seen[s], 0, key)) return 1;
+            if (vita_atomic_load(&g_seen[s]) == key) return 0;
+        }
     }
     return 1;   /* table full: report rather than lose it */
 }
 
-uint32_t vita_trap_count(void) { return g_hits; }
+uint32_t vita_trap_count(void) { return vita_atomic_load(&g_hits); }
 
 void vita_trap_unimpl(uint32_t addr, uint32_t raw, const char *what) {
-    g_hits++;
+    vita_atomic_inc(&g_hits);
     if (trace_on()) {
         if (first_time(addr))
             fprintf(g_out, "TRACE unimpl  0x%08X  raw 0x%08X  %s\n",
@@ -66,7 +73,7 @@ void vita_trap_unimpl(uint32_t addr, uint32_t raw, const char *what) {
 }
 
 void vita_trap_indirect(uint32_t addr, uint32_t target) {
-    g_hits++;
+    vita_atomic_inc(&g_hits);
     if (trace_on()) {
         if (first_time(addr))
             fprintf(g_out, "TRACE indirect 0x%08X -> 0x%08X\n", addr, target);
@@ -81,8 +88,16 @@ void vita_trap_indirect(uint32_t addr, uint32_t target) {
 /* `name` is the resolved "Library::function", or NULL when the NID database did
  * not know it. Naming the function is the entire point of binding imports — a
  * NID is a hash, and "implement 0xBFE02B3A" is not a task anyone can start. */
+static vita_import_handler g_import_handler;
+
+void vita_set_import_handler(vita_import_handler fn) { g_import_handler = fn; }
+
 void vita_trap_import(uint32_t addr, uint32_t nid, const char *name) {
-    g_hits++;
+    /* Not a trap if something can service it. Checked before counting, so
+     * vita_trap_count() keeps meaning "gaps hit", not "imports called". */
+    if (g_import_handler && g_import_handler(addr, nid, name)) return;
+
+    vita_atomic_inc(&g_hits);
     if (!name) name = "(unresolved NID)";
     if (trace_on()) {
         /* Keyed on the NID, not the call site: the interesting question is

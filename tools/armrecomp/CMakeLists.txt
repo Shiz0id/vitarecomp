@@ -7,6 +7,7 @@ add_executable(armrecomp
     decode.c
     module.c
     analyze.c
+    reloc.c
     emit.c
     nids.c
 )

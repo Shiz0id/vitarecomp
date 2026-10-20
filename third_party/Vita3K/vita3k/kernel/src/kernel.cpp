@@ -1,0 +1,328 @@
+// Vita3K emulator project
+// Copyright (C) 2026 Vita3K team
+//
+// This program is free software; you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation; either version 2 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License along
+// with this program; if not, write to the Free Software Foundation, Inc.,
+// 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+
+#ifdef TRACY_ENABLE
+#include <tracy/Tracy.hpp>
+#endif
+
+#include <cpu/common.h>
+#include <kernel/state.h>
+#include <mem/functions.h>
+
+#include <kernel/thread/thread_state.h>
+
+#include <cpu/functions.h>
+#include <mem/ptr.h>
+#include <util/lock_and_find.h>
+#include <util/log.h>
+
+#include <SDL3/SDL_mutex.h>
+#include <SDL3/SDL_thread.h>
+
+int CorenumAllocator::new_corenum() {
+    const std::lock_guard<std::mutex> guard(lock);
+
+    uint32_t size = 1;
+    return alloc.allocate_from(0, size);
+}
+
+void CorenumAllocator::free_corenum(const int num) {
+    const std::lock_guard<std::mutex> guard(lock);
+    alloc.free(num, 1);
+}
+
+void CorenumAllocator::set_max_core_count(const std::size_t max) {
+    const std::lock_guard<std::mutex> guard(lock);
+    alloc.set_maximum(max);
+}
+
+// TODO implement cross platform debug thread name setter and eliminate SDL thread
+struct ThreadParams {
+    KernelState *kernel = nullptr;
+    // Passed in rather than looked up, since the guest may delete the thread before it starts
+    ThreadStatePtr thread;
+    SDL_Semaphore *host_may_destroy_params = nullptr;
+};
+
+static int SDLCALL thread_function(void *data) {
+    assert(data != nullptr);
+    ThreadParams params = *static_cast<const ThreadParams *>(data);
+    SDL_SignalSemaphore(params.host_may_destroy_params);
+    ThreadStatePtr thread = std::move(params.thread);
+#ifdef TRACY_ENABLE
+    if (!thread->name.empty()) {
+        tracy::SetThreadName(thread->name.c_str());
+    } else {
+        std::string th_name = "TID:" + std::to_string(thread->id);
+        tracy::SetThreadName(th_name.c_str());
+    }
+#endif
+
+    thread->run_loop();
+    const uint32_t r0 = read_reg(*thread->cpu, 0);
+    const SceUID id = thread->id;
+    const int processor_id = get_processor_id(*thread->cpu);
+    // release our reference first so the erase below destroys the ThreadState before process_exit() is woken
+    thread.reset();
+
+    {
+        std::lock_guard<std::mutex> lock(params.kernel->mutex);
+        params.kernel->threads.erase(id);
+        params.kernel->corenum_allocator.free_corenum(processor_id);
+        params.kernel->thread_deleted_cond.notify_all();
+    }
+
+    return r0;
+}
+
+KernelState::KernelState()
+    : debugger(*this) {
+}
+
+bool KernelState::init(MemState &mem, const CallImportFunc &call_import, bool cpu_opt) {
+    corenum_allocator.set_max_core_count(MAX_CORE_COUNT);
+    start_tick = rtc_get_ticks(rtc_base_ticks());
+    base_tick = { rtc_base_ticks() };
+    this->call_import = call_import;
+    this->cpu_opt = cpu_opt;
+
+    // Generate halt instruction (NOP + WFI)
+    halt_instruction = alloc_block(mem, 4, "halt_instruction");
+    const auto halt_ptr = halt_instruction.get_ptr<uint16_t>().get(mem);
+    halt_ptr[0] = 0xBF00; // NOP
+    halt_ptr[1] = 0xBF30; // WFI
+    halt_instruction_pc = halt_instruction.get() | 1; // thumb mode pc
+
+    return true;
+}
+
+void KernelState::load_process_param(MemState &mem, Ptr<uint32_t> ptr) {
+    const SceProcessParam *param = ptr.cast<SceProcessParam>().get(mem);
+    if (param->version == 0) {
+        // Homebrews built with old vitasdk
+        process_param = nullptr;
+        return;
+    }
+    process_param = ptr.cast<SceProcessParam>();
+    // VAR_NID(__sce_libcparam, 0xDF084DFA)
+    // no memory leak because we don't allocate memory for this variable intially
+    export_nids[0xDF084DFA] = process_param.get(mem)->sce_libc_param.address();
+}
+
+void KernelState::set_memory_watch(bool enabled) {
+    std::lock_guard<std::mutex> lock(mutex);
+    for (const auto &thread : threads) {
+        auto &cpu = *thread.second->cpu;
+        if (enabled != get_log_mem(cpu)) {
+            if (enabled)
+                set_log_mem(cpu, true);
+            else
+                set_log_mem(cpu, false);
+        }
+    }
+}
+
+void KernelState::invalidate_jit_cache(Address start, size_t length) {
+    std::lock_guard<std::mutex> lock(mutex);
+    for (const auto &[_, thread] : threads) {
+        ::invalidate_jit_cache(*thread->cpu, start, length);
+    }
+}
+
+uint64_t KernelState::process_time_at(uint64_t clock_time) const {
+    // The process started at the host clock time start_tick - base_tick.tick
+    return clock_time - (start_tick - base_tick.tick);
+}
+
+ThreadStatePtr KernelState::get_thread(SceUID thread_id) {
+    const ThreadStatePtr thread = lock_and_find(thread_id, threads, mutex);
+    // A deleted thread stays in threads until its host thread ends, but guest calls can't find it
+    if (thread && thread->is_deleted())
+        return nullptr;
+    return thread;
+}
+
+SceUID KernelState::create_callback(const ThreadStatePtr &thread, const char *name, Ptr<SceKernelCallbackFunction> func, Ptr<void> common) {
+    const CallbackPtr cb = std::make_shared<Callback>(thread, name, func, common);
+    const SceUID uid = objects.add(cb, get_next_uid());
+    thread->add_callback(cb);
+    return uid;
+}
+
+bool KernelState::delete_callback(SceUID id) {
+    return objects.remove<Callback>(id);
+}
+
+ThreadStatePtr KernelState::create_thread(MemState &mem, const char *name, Ptr<const void> entry_point) {
+    return create_thread(mem, name, entry_point, SCE_KERNEL_DEFAULT_PRIORITY, SCE_KERNEL_THREAD_CPU_AFFINITY_MASK_DEFAULT, SCE_KERNEL_STACK_SIZE_USER_MAIN, 0, nullptr);
+}
+
+ThreadStatePtr KernelState::create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, SceUInt32 attr, const SceKernelThreadOptParam *option) {
+    const SceUID id = get_next_uid();
+    int core_num = corenum_allocator.new_corenum();
+    if (core_num < 0) {
+        LOG_ERROR("Out of core number to allocate, use 0");
+        core_num = 0;
+    }
+    CPUStatePtr cpu = init_cpu(cpu_opt, id, static_cast<std::size_t>(core_num), mem);
+    if (!cpu)
+        return nullptr;
+    ThreadStatePtr thread = std::make_shared<ThreadState>(id, *this, mem, std::move(cpu), name, entry_point.address(), init_priority, affinity_mask, stack_size, attr, option);
+
+    {
+        const std::lock_guard<std::mutex> lock(mutex);
+        threads.emplace(thread->id, thread);
+        if (threads_paused)
+            thread->pause();
+        if (threads_suspended)
+            thread->suspend();
+    }
+
+    ThreadParams params;
+    params.kernel = this;
+    params.thread = thread;
+
+    params.host_may_destroy_params = SDL_CreateSemaphore(0);
+    SDL_DetachThread(SDL_CreateThread(&thread_function, thread->name.c_str(), &params));
+    SDL_WaitSemaphore(params.host_may_destroy_params);
+    SDL_DestroySemaphore(params.host_may_destroy_params);
+
+    return thread;
+}
+
+Ptr<Ptr<void>> KernelState::get_thread_tls_addr(MemState &mem, SceUID thread_id, int key) {
+    Ptr<Ptr<void>> address(0);
+    // magic numbers taken from decompiled source. There is 0x400 unused bytes of unknown usage
+    if (key <= 0x100 && key >= 0) {
+        const ThreadStatePtr thread = get_thread(thread_id);
+        address = thread->tls.get_ptr<Ptr<void>>() + key;
+    } else {
+        LOG_ERROR("Wrong tls slot index. TID:{} index:{}", thread_id, key);
+    }
+    return address;
+}
+
+void KernelState::request_process_exit(int res, std::optional<AppLaunchRequest> relaunch) {
+    if (process_exit_callback)
+        process_exit_callback(res, std::move(relaunch));
+}
+
+void KernelState::process_exit() {
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        for (auto &[_, thread] : threads)
+            thread->remove();
+    }
+
+    std::unique_lock<std::mutex> lock(mutex);
+    thread_deleted_cond.wait(lock, [this] { return threads.empty(); });
+}
+
+void KernelState::pause_threads() {
+    const std::lock_guard<std::mutex> lock(mutex);
+    if (threads_paused)
+        return;
+    threads_paused = true;
+    for (auto &[_, thread] : threads)
+        thread->pause();
+}
+
+void KernelState::resume_threads() {
+    const std::lock_guard<std::mutex> lock(mutex);
+    for (auto &[_, thread] : threads)
+        thread->resume_from_pause();
+    threads_paused = false;
+}
+
+void KernelState::suspend_threads() {
+    const std::lock_guard<std::mutex> lock(mutex);
+    threads_suspended = true;
+    for (auto &[_, thread] : threads)
+        thread->suspend();
+}
+
+void KernelState::resume_suspended_threads() {
+    const std::lock_guard<std::mutex> lock(mutex);
+    threads_suspended = false;
+    for (auto &[_, thread] : threads)
+        thread->resume();
+}
+
+void KernelState::deinit(MemState &mem) {
+    process_exit();
+    threads.clear();
+
+    objects.clear();
+
+    loaded_modules.clear();
+    loaded_sysmodules.clear();
+    loaded_internal_sysmodules.clear();
+
+    {
+        std::lock_guard<std::mutex> lock(export_nids_mutex);
+        export_nids.clear();
+        export_nids_by_lib.clear();
+        export_nid_owners.clear();
+        func_binding_infos.clear();
+        var_binding_infos.clear();
+        module_uid_by_nid.clear();
+    }
+
+    corenum_allocator.alloc.reset();
+    corenum_allocator.alloc.set_maximum(0);
+
+    obj_store.clear();
+
+    tls_address = Ptr<const void>(0);
+    tls_psize = 0;
+    tls_msize = 0;
+
+    thread_event_start = Ptr<const void>(0);
+    thread_event_start_arg = 0;
+    thread_event_end = Ptr<const void>(0);
+    thread_event_end_arg = 0;
+
+    codec_blocks.clear();
+
+    halt_instruction = nullptr;
+    halt_instruction_pc = 0;
+
+    process_param = nullptr;
+    client_vtable = Ptr<void>(0);
+    shellsvc_client = Ptr<Address>(0);
+    libc_dso_handle_main = Ptr<void>(0);
+
+    debugger.deinit();
+
+    next_uid = 1;
+
+    threads_paused = false;
+}
+
+SceKernelModuleInfo *KernelState::find_module_by_addr(Address address) {
+    const auto lock = std::lock_guard(mutex);
+    for (auto &[_, mod] : loaded_modules) {
+        for (auto &seg : mod->info.segments) {
+            if (!seg.size)
+                continue;
+            if (seg.vaddr.address() <= address && address <= seg.vaddr.address() + seg.memsz) {
+                return &mod->info;
+            }
+        }
+    }
+    return nullptr;
+}

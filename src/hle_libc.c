@@ -13,6 +13,7 @@
 
 #include "vitarecomp/hle.h"
 #include "vitarecomp/recomp_rt.h"
+#include "atomic.h"
 
 #include <string.h>
 
@@ -102,7 +103,8 @@ void vita_hle__sceLibcErrnoLoc(void) { r0 = g_errno_slot; }
  * list when a run dies on exhaustion rather than before.
  */
 
-static uint32_t g_heap_base, g_heap_size, g_heap_used;
+static uint32_t g_heap_base, g_heap_size;
+static volatile uint32_t g_heap_used;  /* the cursor, claimed by CAS: threads allocate concurrently */
 
 void vita_heap_init(uint32_t base, uint32_t size) {
     g_heap_base = base;
@@ -112,7 +114,7 @@ void vita_heap_init(uint32_t base, uint32_t size) {
     if (size >= 4) { g_errno_slot = base; g_heap_used = 4; }
 }
 
-uint32_t vita_heap_used(void) { return g_heap_used; }
+uint32_t vita_heap_used(void) { return vita_atomic_load(&g_heap_used); }
 uint32_t vita_heap_size(void) { return g_heap_size; }
 
 static uint32_t heap_alloc(uint32_t n) {
@@ -122,15 +124,21 @@ static uint32_t heap_alloc(uint32_t n) {
      * aligned only while every reservation does the same, and the errno slot
      * does not — it is one word. Aligning here does not care who moved the
      * cursor or by how much. */
-    uint32_t at_off = (g_heap_used + 7u) & ~7u;
-    uint32_t size   = (n + 7u) & ~7u;
-    if (size < n || at_off < g_heap_used) return 0;         /* either add wrapped */
-    if (at_off > g_heap_size || size > g_heap_size - at_off) {
-        vita_trap_unimpl(g_heap_used, n, "guest heap exhausted");
-        return 0;
+    uint32_t size = (n + 7u) & ~7u;
+    if (size < n) return 0;                                 /* the add wrapped */
+    for (;;) {
+        uint32_t used   = vita_atomic_load(&g_heap_used);
+        uint32_t at_off = (used + 7u) & ~7u;
+        if (at_off < used) return 0;                        /* wrapped */
+        if (at_off > g_heap_size || size > g_heap_size - at_off) {
+            vita_trap_unimpl(used, n, "guest heap exhausted");
+            return 0;
+        }
+        /* Another thread may have moved the cursor since the load; then
+         * this reservation is stale and is recomputed, never shared. */
+        if (vita_atomic_cas(&g_heap_used, used, at_off + size))
+            return g_heap_base + at_off;
     }
-    g_heap_used = at_off + size;
-    return g_heap_base + at_off;
 }
 
 void vita_hle_malloc(void) {

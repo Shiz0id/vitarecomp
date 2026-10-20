@@ -45,11 +45,21 @@ add_library(vitarecomp STATIC
     src/dispatch.c
     src/vfp.c
     src/hle_libc.c
+    src/excl.c
 )
 
 target_include_directories(vitarecomp PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
+
+# One register file per host thread. PUBLIC, because the generated C and the
+# runtime must agree on it: a translation unit that sees plain globals linked
+# against one that defines thread-locals does not fail to link on every
+# toolchain, it just reads the wrong variable. See cpu.h.
+option(VITARECOMP_THREADED "Thread-local guest CPU state" OFF)
+if(VITARECOMP_THREADED)
+    target_compile_definitions(vitarecomp PUBLIC VITARECOMP_THREADED)
+endif()
 
 # --- the recompiler -----------------------------------------------------------
 

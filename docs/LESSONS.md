@@ -296,3 +296,93 @@ address ranges nothing had ever compiled, because the functions containing them
 were not discovered until data-segment scanning found the constructor table.
 Better discovery did not just add coverage — it added *reach*, and reach is
 what exposes emitter bugs.
+
+## A real emulator is a better test than a test
+
+The first time a recompiled module ran inside the full Vita3K build
+(bridgetest, see [`VITA3K_BRIDGE.md`](VITA3K_BRIDGE.md#first-run-bridgetest)),
+the decoder and emitter had passing unit tests and translated 98% of the
+module. Six silent miscompiles were still in it. None of them trapped. Each
+one produced wrong values, and each was found only because the program's
+output could be compared with stock Vita3K's.
+
+1. **`bx lr` was emitted as an indirect dispatch.** Vita3K starts a thread with
+   LR set to its own halt address, so the first function return asked the
+   dispatcher for `0x80001001` and trapped. A return in generated C is a C
+   `return`. Leaving the caller's frame is exactly what the guest asked for.
+2. **IT blocks were decoded and then ignored.** The ITSTATE was never applied
+   to the instructions it covers, so every `ITE` ran both arms. `poly()` and
+   the delay check failed. The rule that bites is the one the unit tests
+   missed: inside an IT block, 16-bit ALU instructions *do not set flags*
+   (except `CMP`/`CMN`/`TST`), so the decode itself changes.
+3. **An import call under IT was unconditional.** The import-binding path built
+   its call before the condition wrapper was applied, so a conditional
+   `blne sceFoo` always called firmware.
+4. **`rsb.w` ignored its immediate.** `rsb rd, rn, #imm` computes
+   `imm - rn`, and it was emitted as `0 - rn`. The report's length came out as 0, so `snprintf` wrote nothing and the file
+   read back empty. The read-back check is in bridgetest for this reason: a
+   write call returning success is not evidence that the bytes landed.
+5. **`teq` was decoded as `tst`**, which is AND where it should be XOR. The
+   two are one opcode value apart and have the same shape. No unit test
+   exercises the difference unless someone writes one for it.
+6. **The hint space was misread.** The condition-field test that separates
+   `B<cond>.W` from hints and barriers read the wrong bits, so `nop.w` and
+   `dmb`/`dsb`/`isb` decoded as conditional branches.
+
+One more was not a miscompile but had the same cause. `sceKernelExitProcess`
+is an import that *returns*. Vita3K's JIT checks for a pending exit after every
+SVC, but the generated code had no such check. It ran on into
+`__libc_fini_array` and dereferenced null. The bridge now checks the thread's
+`ending_requested()` after every import (a one-line Vita3K patch).
+
+**What made these findable was a reference implementation running the same
+binary.** Each had a passing unit test nearby, written from the same
+understanding that produced the bug. Stock Vita3K's output, by contrast, comes
+from dynarmic, which was not written by us, so it does not share our
+assumptions. Every test homebrew from here on should be run both ways, and the
+two outputs diffed.
+
+## The C library is the test suite
+
+The VitaSDK samples are smaller than bridgetest, and they found four more
+silent miscompiles. Each sample's own code is a few dozen lines. Everything
+else is newlib and libstdc++, and those are written for speed, so they
+reach for the instructions nobody writes by hand: `orn`, `uadd8`/`sel`,
+`vmov` to a core register, `revsh`.
+
+The ORN bug shows how such a bug hides. `strlen` takes a different entry
+path for a pointer at 4 mod 8, and only that path uses `orn`. So the bug
+showed up as some button labels missing and others present. The pattern only
+made sense once the missing strings' addresses were listed. A unit test of
+`strlen` on one string has an even chance of passing.
+
+Two discovery rules came out of the same runs:
+- **Code ends where the stubs end.** VitaSDK lays out `.text`, then the
+  import stubs, then `.fini`, then `.rodata`. An odd "pointer" past the last
+  stub is a ctype table or string. Bounding seeds there removed 214 traps
+  from one sample.
+- **A tail call is a call.** A `b.w` taken with the entry frame intact
+  (after an epilogue, from a thunk, or onto a prologue) has a function as its
+  target. It must not be absorbed into the caller's flow: the walk marks what
+  it decodes as seen, so the target's own walk would later find nothing.
+
+## A unit test checks your reading, not the instruction
+
+Every NEON helper had unit tests with hand-computed answers, and every one
+passed. But the person who wrote the helper also computed the answers, from the
+same reading of the manual. A misread lane order or rounding rule would have
+been wrong in both places and still passed. Five instruction families landed that way.
+
+`tests/vita/neontest` closes that gap. It is a Vita program that runs each
+NEON form on known bytes and prints the registers. `run.sh` runs it under stock
+Vita3K and recompiled, and fails if any line differs. Dynarmic was written by
+other people from the same manual, so agreement with it is evidence that
+our tests cannot provide on their own. Breaking VZIP's Q form in `neon.h` makes
+it fail on exactly the two VZIP lines.
+
+The same review found a quieter trap: the Vita3K build compiles the generated
+C against the main checkout's `include/`, even when the harness is run from a
+worktree. A new helper that existed only in a worktree failed to build there.
+Had it been an existing helper with changed behaviour, the old one would have
+been compiled in silently, and the run would have passed while checking the
+wrong code.
