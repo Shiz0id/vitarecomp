@@ -855,6 +855,56 @@ static int decode_neon(uint16_t h1, uint16_t h2, arm_insn *o) {
             set(o, A_SIMD, "vpadd.i");
             return 1;
         }
+        if (opc == 0xD && !(size & 1)) {                   /* float, .F32 only */
+            /* For floats the size field is sz (bit 20, 0 for F32) and bit 21
+             * (size>>1) is an operation bit, so the operation is picked by U,
+             * B and size>>1. Bit 4 (B) separates the adds from the multiplies:
+             *   U=0 B=0  VADD / VSUB     (bit 21 clear / set)
+             *   U=0 B=1  VMLA / VMLS     (bit 21 clear / set)
+             *   U=1 B=1  VMUL            (bit 21 clear)
+             * The other combinations are VABD and friends, not claimed. */
+            int sub = size >> 1;
+            o->neon_size = 2;                              /* 32-bit lanes */
+            if (B == 0 && U == 0) {
+                o->op = sub ? OP_NEON_FSUB : OP_NEON_FADD;
+                set(o, A_SIMD, sub ? "vsub.f32" : "vadd.f32");
+                return 1;
+            }
+            if (B == 1 && U == 0) {
+                o->op = sub ? OP_NEON_FMLS : OP_NEON_FMLA;
+                set(o, A_SIMD, sub ? "vmls.f32" : "vmla.f32");
+                return 1;
+            }
+            if (B == 1 && U == 1 && !sub) {
+                o->op = OP_NEON_FMUL;
+                set(o, A_SIMD, "vmul.f32");
+                return 1;
+            }
+        }
+        return 0;
+    }
+
+    /* Three registers and a scalar: h1 bit 7 set, bits 5:4 = 10 for F32.
+     * h2 is dddd opc(4) N 1 M 0 mmmm, so bit 6 and bit 4 are fixed. The scalar
+     * is a 32-bit lane: M selects the lane and Vm[3:0] the D register, so unlike
+     * the other forms M is NOT the top bit of the register number here. The Q
+     * bit is h1 bit 12, the same position as U in the same-length group. */
+    if ((h1 & 0x0080) && (h1 & 0x0030) == 0x0020 && (h2 & 0x0050) == 0x0040) {
+        int opc = (h2 >> 8) & 0xF;
+        int idx = (h2 >> 5) & 1;                           /* M: lane index  */
+        int reg = h2 & 0xF;                                /* Vm[3:0] only    */
+        int Qs = U;                                        /* Q, see above    */
+        if (Qs && ((d | n) & 1)) return 0;
+        if (opc == 0x1 || opc == 0x9) {                    /* VMLA / VMUL */
+            o->op = opc == 0x1 ? OP_NEON_FMLA_SCALAR : OP_NEON_FMUL_SCALAR;
+            o->vd = (int8_t)d; o->vn = (int8_t)n; o->vm = (int8_t)reg;
+            o->imm = (uint32_t)idx;
+            o->has_imm = 1;
+            o->neon_q = (uint8_t)Qs;
+            o->neon_size = 2;
+            set(o, A_SIMD, opc == 0x1 ? "vmla.f32" : "vmul.f32");
+            return 1;
+        }
         return 0;
     }
 

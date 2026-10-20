@@ -1152,6 +1152,41 @@ static int emit_insn(const vm_image *img, const vm_module *mod, const nid_db *db
             break;
         }
 
+        /* Float. Each helper does the whole D word, two F32 lanes, under the
+         * standard FPSCR rules (see neon.h). The scalar form reads its lane
+         * before either half of a Q destination is written, because the
+         * destination may be the very D register the scalar lives in. */
+        case OP_NEON_FADD: case OP_NEON_FSUB: case OP_NEON_FMUL:
+        case OP_NEON_FMLA: case OP_NEON_FMLS: {
+            int regs = in->neon_q ? 2 : 1;
+            for (int k = 0; k < regs; k++) {
+                int d = in->vd + k, n = in->vn + k, m = in->vm + k;
+                if (in->op == OP_NEON_FMLA || in->op == OP_NEON_FMLS)
+                    fprintf(f, "    neon_setd(%d, neon_%s(neon_getd(%d), neon_getd(%d), neon_getd(%d)));\n",
+                            d, in->op == OP_NEON_FMLA ? "fmla" : "fmls", d, n, m);
+                else
+                    fprintf(f, "    neon_setd(%d, neon_%s(neon_getd(%d), neon_getd(%d)));\n",
+                            d, in->op == OP_NEON_FADD ? "fadd" : in->op == OP_NEON_FSUB ? "fsub" : "fmul",
+                            n, m);
+            }
+            break;
+        }
+
+        case OP_NEON_FMUL_SCALAR: case OP_NEON_FMLA_SCALAR: {
+            int regs = in->neon_q ? 2 : 1;
+            fprintf(f, "    { uint64_t _s = neon_dup(neon_get_lane(neon_getd(%d), 2, %u, 1), 2);\n",
+                    in->vm, (unsigned)in->imm);
+            for (int k = 0; k < regs; k++) {
+                int d = in->vd + k, n = in->vn + k;
+                if (in->op == OP_NEON_FMLA_SCALAR)
+                    fprintf(f, "      neon_setd(%d, neon_fmla(neon_getd(%d), neon_getd(%d), _s));\n", d, d, n);
+                else
+                    fprintf(f, "      neon_setd(%d, neon_fmul(neon_getd(%d), _s));\n", d, n);
+            }
+            fprintf(f, "    }\n");
+            break;
+        }
+
         case OP_NEON_IMM: {
             int regs = in->neon_q ? 2 : 1;
             for (int k = 0; k < regs; k++) {

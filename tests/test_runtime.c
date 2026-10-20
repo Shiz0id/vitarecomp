@@ -12,6 +12,7 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <string.h>
 
 #ifdef NDEBUG
 #error "tests must be built with asserts enabled (NDEBUG is defined)"
@@ -568,6 +569,90 @@ static void test_neon_lanes(void) {
     printf("ok   neon lanes: ceq/tst on every lane size, padd, movn, dup, lane moves\n");
 }
 
+/* --- Advanced SIMD single precision ----------------------------------------- */
+
+static uint32_t f32_bits(float f) {
+    uint32_t u;
+    memcpy(&u, &f, sizeof(u));
+    return u;
+}
+
+static float f32_from(uint32_t u) {
+    float f;
+    memcpy(&f, &u, sizeof(f));
+    return f;
+}
+
+static uint64_t f32_pair(uint32_t hi, uint32_t lo) {
+    return ((uint64_t)hi << 32) | lo;
+}
+
+/* The two-step reference: the product is rounded to float first, in its own
+ * volatile so it cannot be fused with the add. */
+static float ref_mla(float d, float n, float m, int sub) {
+    volatile float p = n * m;
+    return sub ? d - p : d + p;
+}
+
+static void test_neon_f32(void) {
+    /* Ordinary values: the lanes are plain float arithmetic. */
+    float a0 = 1.5f, a1 = -3.25f, b0 = 0.5f, b1 = 2.0f, c0 = 4.0f, c1 = 0.125f;
+    uint64_t A = f32_pair(f32_bits(a1), f32_bits(a0));
+    uint64_t B = f32_pair(f32_bits(b1), f32_bits(b0));
+    uint64_t C = f32_pair(f32_bits(c1), f32_bits(c0));
+    assert(neon_fadd(A, B) == f32_pair(f32_bits(a1 + b1), f32_bits(a0 + b0)));
+    assert(neon_fsub(A, B) == f32_pair(f32_bits(a1 - b1), f32_bits(a0 - b0)));
+    assert(neon_fmul(A, B) == f32_pair(f32_bits(a1 * b1), f32_bits(a0 * b0)));
+    assert(neon_fmla(A, B, C) == f32_pair(f32_bits(ref_mla(a1, b1, c1, 0)), f32_bits(ref_mla(a0, b0, c0, 0))));
+    assert(neon_fmls(A, B, C) == f32_pair(f32_bits(ref_mla(a1, b1, c1, 1)), f32_bits(ref_mla(a0, b0, c0, 1))));
+
+    /* By scalar: the one lane, in every lane of the product. */
+    assert(neon_fmul_s(f32_pair(f32_bits(3.0f), f32_bits(2.0f)), f32_bits(4.0f))
+           == f32_pair(f32_bits(12.0f), f32_bits(8.0f)));
+    assert(neon_fmla_s(f32_pair(f32_bits(1.0f), f32_bits(1.0f)), f32_pair(f32_bits(3.0f), f32_bits(2.0f)), f32_bits(0.5f))
+           == f32_pair(f32_bits(2.5f), f32_bits(2.0f)));
+
+    /* Flush-to-zero on the input: 0x00400000 is 2^-127, a denormal. Read as
+     * zero, 2^-127 * 2^126 is +0; read as itself it would be 0.5. */
+    assert(neon_fmul(f32_pair(0x80400000u, 0x00400000u), f32_pair(0x7E800000u, 0x7E800000u))
+           == f32_pair(0x80000000u, 0x00000000u));
+    /* A denormal input plus zero: -denormal is a -0, and -0 + +0 is +0. */
+    assert(neon_fadd(f32_pair(0x00000001u, 0x80000001u), f32_pair(0x80000000u, 0x00000000u))
+           == f32_pair(0x00000000u, 0x00000000u));
+
+    /* Flush-to-zero on the result: 2^-126 * 2^-23 = 2^-149, the smallest
+     * denormal. It becomes +0, and -2^-149 becomes -0. */
+    assert(neon_fmul(f32_pair(0x80800000u, 0x00800000u), f32_pair(0x34000000u, 0x34000000u))
+           == f32_pair(0x80000000u, 0x00000000u));
+
+    /* NaN: the default NaN whatever the operands, for every operation. */
+    uint64_t nan_in = f32_pair(0xFFC00000u, 0x7F800001u);   /* qNaN negative, sNaN */
+    uint64_t one = f32_pair(f32_bits(1.0f), f32_bits(1.0f));
+    assert(neon_fadd(nan_in, one) == f32_pair(0x7FC00000u, 0x7FC00000u));
+    assert(neon_fmul(nan_in, one) == f32_pair(0x7FC00000u, 0x7FC00000u));
+    uint64_t inf = f32_pair(0x7F800000u, 0x7F800000u);
+    assert(neon_fsub(inf, inf) == f32_pair(0x7FC00000u, 0x7FC00000u));          /* inf - inf */
+    assert(neon_fmul(inf, f32_pair(0, 0)) == f32_pair(0x7FC00000u, 0x7FC00000u)); /* inf * 0 */
+    assert(neon_fmla(nan_in, one, one) == f32_pair(0x7FC00000u, 0x7FC00000u));  /* NaN accumulator */
+
+    /* Fused vs unfused. n = m = 1 + 2^-23, d = -(1 + 2^-22).
+     *   exact n*m + d = 2^-46             (what a fused multiply-add gives)
+     *   round(n*m) = 1 + 2^-22, + d = 0   (what VMLA gives: the product first)
+     * The exact result is computed in double, where it is exact, so the fused
+     * reference is not itself a rounded guess. */
+    uint32_t n = 0x3F800001u, d = 0xBF800002u;
+    double exact = (double)f32_from(n) * (double)f32_from(n) + (double)f32_from(d);
+    assert(f32_bits((float)exact) == 0x28800000u);              /* the fused answer */
+    assert(neon_f32_mla(d, n, n, 0) == 0x00000000u);            /* VMLA: two roundings */
+    assert(neon_f32_mla(d, n, n, 0) != f32_bits((float)exact)); /* a fused one would fail */
+    assert(neon_fmla(f32_pair(d, d), f32_pair(n, n), f32_pair(n, n)) == f32_pair(0, 0));
+    /* VMLS of the same numbers: d' = 1 + 2^-22, so the answer is 0 unfused and
+     * -2^-46 fused. */
+    assert(neon_f32_mla(0x3F800002u, n, n, 1) == 0x00000000u);
+
+    printf("ok   neon f32: add/sub/mul/mla/mls, scalar forms, denormals, default NaN, unfused mla\n");
+}
+
 static void test_bit_ops(void) {
     assert(vita_rbit(1u) == 0x80000000u);
     assert(vita_rbit(0x12345678u) == 0x1E6A2C48u);
@@ -599,6 +684,7 @@ int main(void) {
     test_exclusive();
     test_shifter_carry();
     test_neon_lanes();
+    test_neon_f32();
     test_bit_ops();
     test_parallel_and_lanes();
     test_vfp_d32();

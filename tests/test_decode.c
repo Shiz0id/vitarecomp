@@ -1011,7 +1011,76 @@ static void test_homebrew_forms(void) {
     in = dec(ARM_T32, BASE);
     assert(in.op == OP_VLDM && in.imm == 16);
 
-    printf("ok   homebrew forms: vld1/vst1, vdup, lane and pair moves, vceq, vpadd, vmovn, vcvt, rev/rbit, extends, smulxy\n");
+    /* Advanced SIMD float, three registers. Encodings from arm-vita-eabi-as.
+     * The integer vadd.i32 at the end must still be OP_NEON_ADD. */
+    put16(0, 0xEF01); put16(2, 0x0D02);                  /* vadd.f32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FADD && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q && in.neon_size == 2);
+    put16(0, 0xEF02); put16(2, 0x0D44);                  /* vadd.f32 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FADD && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.neon_q);
+    put16(0, 0xEF61); put16(2, 0x0DA2);                  /* vsub.f32 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FSUB && in.vd == 16 && in.vn == 17 && in.vm == 18 && !in.neon_q);
+    put16(0, 0xEF62); put16(2, 0x0DE4);                  /* vsub.f32 q8, q9, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FSUB && in.vd == 16 && in.vn == 18 && in.vm == 20 && in.neon_q);
+    put16(0, 0xFF01); put16(2, 0x0D12);                  /* vmul.f32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMUL && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q);
+    put16(0, 0xFF4A); put16(2, 0x8DFC);                  /* vmul.f32 q12, q13, q14 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMUL && in.vd == 24 && in.vn == 26 && in.vm == 28 && in.neon_q);
+    put16(0, 0xEF01); put16(2, 0x0D12);                  /* vmla.f32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMLA && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q);
+    put16(0, 0xEF02); put16(2, 0x0D54);                  /* vmla.f32 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMLA && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.neon_q);
+    put16(0, 0xEF41); put16(2, 0x0DB2);                  /* vmla.f32 d16, d17, d18 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMLA && in.vd == 16 && in.vn == 17 && in.vm == 18 && !in.neon_q);
+    put16(0, 0xEF21); put16(2, 0x0D12);                  /* vmls.f32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMLS && in.vd == 0 && in.vn == 1 && in.vm == 2 && !in.neon_q);
+    put16(0, 0xEF22); put16(2, 0x0D54);                  /* vmls.f32 q0, q1, q2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMLS && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.neon_q);
+    put16(0, 0xEF62); put16(2, 0x0DF4);                  /* vmls.f32 q8, q9, q10 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMLS && in.vd == 16 && in.vn == 18 && in.vm == 20 && in.neon_q);
+
+    /* Float by scalar: M is the lane (imm), Vm[3:0] the D register. The Q bit
+     * is h1 bit 12. d4[1] and d7[1] show the lane bit is not a register bit. */
+    put16(0, 0xFFA2); put16(2, 0x0964);                  /* vmul.f32 q0, q1, d4[1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMUL_SCALAR && in.vd == 0 && in.vn == 2 && in.vm == 4 && in.imm == 1 && in.neon_q);
+    put16(0, 0xEFA1); put16(2, 0x0142);                  /* vmla.f32 d0, d1, d2[0] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMLA_SCALAR && in.vd == 0 && in.vn == 1 && in.vm == 2 && in.imm == 0 && !in.neon_q);
+    put16(0, 0xEFE1); put16(2, 0x09E7);                  /* vmul.f32 d16, d17, d7[1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMUL_SCALAR && in.vd == 16 && in.vn == 17 && in.vm == 7 && in.imm == 1 && !in.neon_q);
+    put16(0, 0xFFE2); put16(2, 0x01EF);                  /* vmla.f32 q8, q9, d15[1] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_FMLA_SCALAR && in.vd == 16 && in.vn == 18 && in.vm == 15 && in.imm == 1 && in.neon_q);
+
+    /* Negative: the integer vadd.i32 shares the three-register group and must
+     * still be integer, with the float opc (1101) nowhere near it. */
+    put16(0, 0xEF21); put16(2, 0x0802);                  /* vadd.i32 d0, d1, d2 */
+    in = dec(ARM_T32, BASE);
+    assert(in.op == OP_NEON_ADD && in.neon_size == 2 && in.vd == 0 && in.vn == 1 && in.vm == 2);
+    /* The integer by-scalar forms have the same size bits and differ only in
+     * opc: VMLA.I32 is 0000 where VMLA.F32 is 0001, VMUL.I32 1000 against
+     * 1001. They must not be claimed as float. */
+    put16(0, 0xEFA1); put16(2, 0x0042);                  /* vmla.i32 d0, d1, d2[0] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_FMLA_SCALAR && in.cls == A_SIMD);
+    put16(0, 0xEFA1); put16(2, 0x0842);                  /* vmul.i32 d0, d1, d2[0] */
+    in = dec(ARM_T32, BASE);
+    assert(in.op != OP_NEON_FMUL_SCALAR && in.cls == A_SIMD);
+
+    printf("ok   homebrew forms: vld1/vst1, vdup, lane and pair moves, vceq, vpadd, vmovn, vcvt, rev/rbit, extends, smulxy, f32 vector\n");
 }
 
 static void test_shifts_and_indexing(void) {

@@ -107,6 +107,11 @@ typedef enum {
     OP_NEON_VLD1, OP_NEON_VST1, /* imm D registers from vd, at [rn]; rm is the
                                    post-increment register, writeback alone
                                    means "by the transfer size"              */
+    OP_NEON_FADD, OP_NEON_FSUB, /* float .F32 lanes, standard FPSCR          */
+    OP_NEON_FMUL,               /* float, vd = vn * vm                       */
+    OP_NEON_FMLA, OP_NEON_FMLS, /* vd = vd +/- round(vn * vm), not fused     */
+    OP_NEON_FMUL_SCALAR,        /* vd = vn * vm[imm], vm a D register        */
+    OP_NEON_FMLA_SCALAR,        /* vd = vd + vn * vm[imm], vm a D register   */
     OP_VMOV_V_RR,               /* two core regs (rt, rt2) -> a D register or
                                    an S pair, vm naming it                   */
     OP_VMOV_RR_V,               /* the reverse                              */

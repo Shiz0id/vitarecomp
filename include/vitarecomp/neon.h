@@ -17,6 +17,7 @@
 #include "vfp.h"
 
 #include <stdint.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -120,6 +121,101 @@ static inline uint32_t neon_get_lane(uint64_t d, int size, int idx, int is_unsig
     if (size == 0) return is_unsigned ? (v & 0xFF) : (uint32_t)(int32_t)(int8_t)v;
     if (size == 1) return is_unsigned ? (v & 0xFFFF) : (uint32_t)(int32_t)(int16_t)v;
     return v;
+}
+
+/* --- Advanced SIMD single precision ----------------------------------------
+ *
+ * Advanced SIMD ignores FPSCR and always runs with the "standard FPSCR value":
+ * round to nearest, flush-to-zero, default NaN. The host's float does none of
+ * that by default (it keeps denormals, and its NaNs carry the operands' sign
+ * and payload), so each lane is put through these rules explicitly:
+ *
+ *   an input denormal is read as a zero of the same sign;
+ *   a NaN result is the default NaN, 0x7FC00000, whatever the operands;
+ *   a denormal result is a zero of the same sign.
+ *
+ * Multiply-accumulate is NOT fused. The product is rounded to float (and
+ * flushed) and only then added, which is what the architecture defines. A
+ * fused fmaf() gives a different answer whenever the exact product carries
+ * bits a float cannot hold, and nothing downstream can tell which was done.
+ * The product is stored as bits through a volatile so the compiler cannot
+ * contract the multiply and add into one operation, whatever -ffp-contract
+ * says. */
+
+static inline uint32_t neon_lo32(uint64_t x) { return (uint32_t)x; }
+static inline uint32_t neon_hi32(uint64_t x) { return (uint32_t)(x >> 32); }
+static inline uint64_t neon_pack32(uint32_t lo, uint32_t hi) {
+    return ((uint64_t)hi << 32) | lo;
+}
+
+static inline float neon_f32_in(uint32_t bits) {
+    if ((bits & 0x7F800000u) == 0) bits &= 0x80000000u;   /* denormal or zero */
+    float f;
+    memcpy(&f, &bits, sizeof(f));
+    return f;
+}
+
+static inline uint32_t neon_f32_out(float f) {
+    uint32_t u;
+    memcpy(&u, &f, sizeof(u));
+    if ((u & 0x7F800000u) == 0x7F800000u && (u & 0x007FFFFFu)) return 0x7FC00000u;
+    if ((u & 0x7F800000u) == 0) return u & 0x80000000u;   /* denormal: signed zero */
+    return u;
+}
+
+static inline uint32_t neon_f32_add(uint32_t a, uint32_t b) {
+    return neon_f32_out(neon_f32_in(a) + neon_f32_in(b));
+}
+
+static inline uint32_t neon_f32_sub(uint32_t a, uint32_t b) {
+    return neon_f32_out(neon_f32_in(a) - neon_f32_in(b));
+}
+
+static inline uint32_t neon_f32_mul(uint32_t a, uint32_t b) {
+    return neon_f32_out(neon_f32_in(a) * neon_f32_in(b));
+}
+
+/* d + n*m (sub == 0) or d - n*m (sub != 0), with the product rounded and
+ * flushed on its own before the add. */
+static inline uint32_t neon_f32_mla(uint32_t d, uint32_t n, uint32_t m, int sub) {
+    volatile uint32_t p = neon_f32_mul(n, m);            /* no fusing across this */
+    float pf = neon_f32_in(p), df = neon_f32_in(d);
+    return neon_f32_out(sub ? df - pf : df + pf);
+}
+
+static inline uint64_t neon_fadd(uint64_t a, uint64_t b) {
+    return neon_pack32(neon_f32_add(neon_lo32(a), neon_lo32(b)),
+                       neon_f32_add(neon_hi32(a), neon_hi32(b)));
+}
+
+static inline uint64_t neon_fsub(uint64_t a, uint64_t b) {
+    return neon_pack32(neon_f32_sub(neon_lo32(a), neon_lo32(b)),
+                       neon_f32_sub(neon_hi32(a), neon_hi32(b)));
+}
+
+static inline uint64_t neon_fmul(uint64_t a, uint64_t b) {
+    return neon_pack32(neon_f32_mul(neon_lo32(a), neon_lo32(b)),
+                       neon_f32_mul(neon_hi32(a), neon_hi32(b)));
+}
+
+/* VMLA and VMLS: d is the accumulator, n and m the multiplicands. */
+static inline uint64_t neon_fmla(uint64_t d, uint64_t n, uint64_t m) {
+    return neon_pack32(neon_f32_mla(neon_lo32(d), neon_lo32(n), neon_lo32(m), 0),
+                       neon_f32_mla(neon_hi32(d), neon_hi32(n), neon_hi32(m), 0));
+}
+
+static inline uint64_t neon_fmls(uint64_t d, uint64_t n, uint64_t m) {
+    return neon_pack32(neon_f32_mla(neon_lo32(d), neon_lo32(n), neon_lo32(m), 1),
+                       neon_f32_mla(neon_hi32(d), neon_hi32(n), neon_hi32(m), 1));
+}
+
+/* By scalar: `s` is the 32-bit lane, the same in every lane of the product. */
+static inline uint64_t neon_fmul_s(uint64_t n, uint32_t s) {
+    return neon_fmul(n, neon_dup(s, 2));
+}
+
+static inline uint64_t neon_fmla_s(uint64_t d, uint64_t n, uint32_t s) {
+    return neon_fmla(d, n, neon_dup(s, 2));
 }
 
 #ifdef __cplusplus
