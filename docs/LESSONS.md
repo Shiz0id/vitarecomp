@@ -341,3 +341,27 @@ understanding that produced the bug. Stock Vita3K's output, by contrast, comes
 from dynarmic, which was not written by us, so it does not share our
 assumptions. Every test homebrew from here on should be run both ways, and the
 two outputs diffed.
+
+## The C library is the test suite
+
+The VitaSDK samples are smaller than bridgetest, and they found four more
+silent miscompiles. Each sample's own code is a few dozen lines. Everything
+else is newlib and libstdc++, and those are written for speed, so they
+reach for the instructions nobody writes by hand: `orn`, `uadd8`/`sel`,
+`vmov` to a core register, `revsh`.
+
+The ORN bug shows how such a bug hides. `strlen` takes a different entry
+path for a pointer at 4 mod 8, and only that path uses `orn`. So the bug
+showed up as some button labels missing and others present. The pattern only
+made sense once the missing strings' addresses were listed. A unit test of
+`strlen` on one string has an even chance of passing.
+
+Two discovery rules came out of the same runs:
+- **Code ends where the stubs end.** VitaSDK lays out `.text`, then the
+  import stubs, then `.fini`, then `.rodata`. An odd "pointer" past the last
+  stub is a ctype table or string. Bounding seeds there removed 214 traps
+  from one sample.
+- **A tail call is a call.** A `b.w` taken with the entry frame intact
+  (after an epilogue, from a thunk, or onto a prologue) has a function as its
+  target. It must not be absorbed into the caller's flow: the walk marks what
+  it decodes as seen, so the target's own walk would later find nothing.

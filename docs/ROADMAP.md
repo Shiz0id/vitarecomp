@@ -169,8 +169,14 @@ and functions are emitted in address order, so a prefix is not a sample.
       miscompiles ([`LESSONS.md`](LESSONS.md#a-real-emulator-is-a-better-test-than-a-test))
 - [x] **Thread-safe primitives.** Thumb `LDREX`/`STREX`/`CLREX` on a per-thread
       monitor, barriers as fences
-- [ ] A32 exclusives; shifter carry-out for flag-setting logical ops;
-      `LSR`/`ASR #0` meaning 32, and `RRX`, in operand 2
+- [x] Shifter carry-out for flag-setting logical ops; `LSR`/`ASR #0`
+      meaning 32, and `RRX`, in operand 2; branches into IT blocks
+- [x] **VitaSDK samples through the bridge**: hello_world, debug_print,
+      hello_cpp_world, ctrl and rtc identical to stock; json blocked on
+      `SceLibJson` exactly as stock is. Four miscompiles found and fixed
+      ([`TRANSLATION.md`](TRANSLATION.md#vitasdk-samples))
+- [ ] A32 exclusives. Waits on A32 operand decode, which waits on a title
+      that reaches A32 code
 - [ ] Run a commercial module through the bridge
 - [ ] The shallow ~92 of `SceGxm`: state setters, texture accessors, mapping
 - [x] **The link arrangement.** Import defaults are one file per import, built

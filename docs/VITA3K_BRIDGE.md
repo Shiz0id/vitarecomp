@@ -123,6 +123,22 @@ Getting there took six fixes, all of them silent miscompiles that the unit
 tests had not caught. They are listed in
 [`LESSONS.md`](LESSONS.md#a-real-emulator-is-a-better-test-than-a-test).
 
+## VitaSDK samples
+
+Five of the six VitaSDK samples tried run recompiled with output identical to stock
+Vita3K. The json sample stops where stock does, in a firmware library Vita3K
+does not implement. The table and the four miscompiles they found are in
+[`TRANSLATION.md`](TRANSLATION.md#vitasdk-samples).
+
+They also found an upstream race. debugScreen homebrew frees its
+framebuffer's memblock on exit, and the renderer thread could still be
+copying the last frame out of it: a SIGSEGV in `render_frame`'s `memcpy`. The
+window is small. Stock Vita3K hits it too once a debugger slows it down. It
+is fixed in the vendored tree:
+- `ksceKernelFreeMemBlock` clears any displayed or predicted frame inside
+  the freed block, under `display_info_mutex`.
+- Both renderers hold that mutex across the raw copy and re-check the base.
+
 ## Memory mapping and the GPU
 
 Vita3K's Vulkan renderer offers several ways to map guest memory, set in
@@ -159,7 +175,7 @@ Each limit below is stated where it bites, rather than left to be found:
   - `RecompCPU`, against the real Vita3K headers, clean under ASan, UBSan and
     TSan (`vita3k-bridge/check.sh`);
   - **the full Vita3K executable with `VITA3K_RECOMP=ON`, running bridgetest
-    to a clean exit** (above).
+    and the VitaSDK samples** (above).
 
   No commercial title has been run through it yet.
 - **Flat memory only.** See the mapping table above.

@@ -152,13 +152,50 @@ counts above predate:
   they reach, so a call through one binds the firmware function by name.
 - **`bx lr` is a C `return`.**
 
-Known gaps in what *is* translated, recorded so they are not mistaken for
-done:
+Gaps closed since: flag-setting logical ops set C from the shifter
+carry-out; `LSR #0`/`ASR #0` in operand 2 shift by 32 and `ROR #0` is `RRX`;
+a branch into the middle of an IT block keeps the remaining condition.
 
-- flag-setting logical ops do not yet set C from the shifter carry-out;
-- `LSR #0`/`ASR #0` in operand 2 mean a shift by 32, and `ROR #0` means
-  `RRX`. These are not handled yet;
-- a branch into the middle of an IT block loses the block's condition.
+Still open, recorded so it is not mistaken for done: **A32 exclusives**, and
+A32 in general. The decoder classifies A32 but decodes no operands, and
+discovery refuses to seed ARM code (`arm seeds refused`), so an A32
+`LDREX` has nowhere to go yet. No VitaSDK sample run so far contains
+reachable A32 code; it becomes worth doing when a title does.
+
+### VitaSDK samples
+
+The [vitasdk/samples](https://github.com/vitasdk/samples) homebrew, run
+recompiled through Vita3K and compared with stock (screenshot diff and log):
+
+| Sample | Translated | Result |
+|---|---|---|
+| hello_world | 99.69% | identical; exits 0 |
+| debug_print | 99.69% | identical; exits 0 |
+| hello_cpp_world (libstdc++) | 99.95% | identical; exits 0 |
+| ctrl | 99.68% | identical (runs until a button chord) |
+| rtc | 99.53% | identical apart from the live clock |
+| json | 99.58% | stops where stock does: Vita3K does not implement `SceLibJson`, so `String::c_str()` returns garbage under both CPUs |
+
+Translated here at first, but WRONG until fixed:
+
+- **ORN was decoded as MVN.** Opcode `0011` is MVN only when Rn is r15.
+  newlib's `strlen` uses `orn` on its misaligned entry, so every string at
+  4 mod 8 came back as length 0: four of ctrl's button labels and three of
+  rtc's RFC3339 lines printed as nothing.
+- **`vmov.32 r0, d2[0]` was decoded as VNMLS.** Bit 4 of the second
+  halfword separates core↔extension transfers from VFP data processing.
+- **Wide `SXTB`/`UXTH`/... and `REVSH`** were misread (`REVSH` as `REV`), and
+  VLDM/VSTM masked the register index with `&31` rather than `&63`.
+
+Added for them: `VLD1`/`VST1` (multiple), `VDUP`, `VMOV` scalar and core
+pair, `VCEQ`/`VTST`/`VPADD`/`VMOVN`, `VCVT` f32↔f64, `REV16`/`REVSH`/`RBIT`,
+`SXTB16`/`UXTB16` and extend-and-add, `SMULxy`/`SMLAxy`.
+
+What still traps in hello_cpp_world (95 of 182,000): the filler bodies of
+import stubs (never executed), the C++ unwinder's iWMMXt and
+`FLDMX`/`FSTMX` save/restore paths (no iWMMXt on the Vita's Cortex-A9), its
+`udf` "cannot happen" paths, and tail branches into computed-goto blocks that
+were seeded from address tables as functions.
 
 ## NEON: a minority of the code, but the majority of what is left
 
