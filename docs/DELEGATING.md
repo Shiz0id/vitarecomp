@@ -116,7 +116,11 @@ Do these in order, and stop at the first failure.
    stock logs "Undefined instruction", skips it and prints the registers
    unchanged, and `run.sh` fails the sample saying so. Check a new form's
    dynarmic decoder line (`external/dynarmic/src/dynarmic/frontend/A32/
-   decoder/asimd.inc`) before giving it a `T()` line.
+   decoder/asimd.inc`) before giving it a `T()` line. A gap in dynarmic is
+   never a reason not to port a form: the game runs it on real hardware.
+   Port it, and check it instead against a reference written independently
+   of the helper (exact arithmetic, every 8-bit input, random wider ones),
+   as VQRSHL was.
 
    The Vita3K build compiles the generated C against the **main checkout's**
    `include/`. A worktree that adds helpers needs its headers in the main
