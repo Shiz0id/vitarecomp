@@ -38,6 +38,13 @@ SceUID get_thread_id(CPUState &state) {
     return state.thread_id;
 }
 
+// vita3krecomp: see set_cpu_backend_factory in cpu/functions.h.
+static CPUBackendFactory backend_factory;
+
+void set_cpu_backend_factory(CPUBackendFactory factory) {
+    backend_factory = std::move(factory);
+}
+
 CPUStatePtr init_cpu(bool cpu_opt, SceUID thread_id, std::size_t processor_id, MemState &mem) {
     CPUStatePtr state(new CPUState(), delete_cpu_state);
     state->mem = &mem;
@@ -47,7 +54,10 @@ CPUStatePtr init_cpu(bool cpu_opt, SceUID thread_id, std::size_t processor_id, M
         return CPUStatePtr();
     }
 
-    state->cpu = std::make_unique<DynarmicCPU>(state.get(), processor_id, cpu_opt);
+    if (backend_factory)
+        state->cpu = backend_factory(state.get(), processor_id);
+    else
+        state->cpu = std::make_unique<DynarmicCPU>(state.get(), processor_id, cpu_opt);
 
     return state;
 }

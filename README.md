@@ -175,6 +175,7 @@ because a module reaches firmware through pointers as well as through `BL` and
 | **[Translation](docs/TRANSLATION.md)** | Coverage figures, `ThumbExpandImm` and its traps, what is still trapping ranked by value, the NEON/VFP breakdown |
 | **[Corpus](docs/CORPUS.md)** | The 15 measured modules, the plaintext finding, the `ET_SCE_EXEC` → `ET_SCE_RELEXEC` era split and why it makes the launch window the hard case |
 | **[Decryption](docs/DECRYPT.md)** | The SELF container, what is encrypted and what is not, and why the QA corpus needs no keys |
+| **[Vita3K bridge](docs/VITA3K_BRIDGE.md)** | Running recompiled code inside Vita3K: the CPU backend, import routing, shared memory, threads, and the known limits |
 | **[HLE](docs/HLE.md)** | The firmware surface, measured, and the order of work |
 | **[Lessons](docs/LESSONS.md)** | Corrections and bugs found by running rather than reasoning: `MOVT`, the wrong dominant-instruction-set metric, the SIMD undercount, the PS3-layout SELF header |
 | **[Roadmap](docs/ROADMAP.md)** | The six phases, checked off against what actually runs |
@@ -258,6 +259,12 @@ under its own GPLv2. The toolkit sources stay MIT and contain none of it; a
 per-game repo that incorporates Vita3K code becomes a GPLv2 combined work, which
 MIT permits. That keeps the toolkit forkable under MIT while letting a title
 whose bottleneck is `sceGxm` and GXP shaders reuse the work that already exists.
+
+**The Vita3K bridge.** [`vita3k-bridge/`](vita3k-bridge) (GPLv2) makes the
+recompiled code a Vita3K CPU backend. Vita3K's kernel runs the threads and its
+HLE modules answer the imports, while the generated C stands in for the JIT. It
+closes the firmware gaps by reusing Vita3K's HLE instead of rewriting it. See
+[docs/VITA3K_BRIDGE.md](docs/VITA3K_BRIDGE.md).
 
 *Licenses above are the working understanding and are re-checked before any code
 or data from a project is actually used.*

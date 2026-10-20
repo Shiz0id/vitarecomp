@@ -5,6 +5,21 @@ at upstream commit `287accffe904489fc7853fb28c61c2ca14411217` (2026-10-19),
 with its `.git` directory removed. It is **GPLv2** — see
 `third_party/Vita3K/COPYING.txt`.
 
+## Local changes
+
+The copy is upstream plus the changes below, each marked `vita3krecomp:` in
+the source. They add a CPU-backend hook and an opt-in build option; with
+`VITA3K_RECOMP` off, Vita3K builds and behaves exactly as upstream. See
+[`docs/VITA3K_BRIDGE.md`](../docs/VITA3K_BRIDGE.md).
+
+| File | Change |
+|---|---|
+| `vita3k/cpu/include/cpu/functions.h`, `vita3k/cpu/src/cpu.cpp` | `set_cpu_backend_factory`: `init_cpu` builds through it when set |
+| `vita3k/CMakeLists.txt` | `VITA3K_RECOMP` / `VITA3K_RECOMP_TARGET` link the bridge and a game target |
+| `vita3k/interface.cpp` | under `VITA3K_RECOMP`, register the recompiled functions and install the bridge before the kernel is created |
+
+## Dependencies
+
 Vita3K's own third-party dependencies are git submodules upstream and are **not**
 included. They are pinned at these commits (from `git submodule status`):
 

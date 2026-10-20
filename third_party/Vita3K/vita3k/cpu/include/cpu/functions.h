@@ -23,8 +23,16 @@
 #include <cpu/common.h>
 
 #include <cstdint>
+#include <functional>
 
 struct MemState;
+
+// vita3krecomp: replace the CPU backend. When set, init_cpu builds each
+// thread's CPU through this factory instead of constructing a DynarmicCPU,
+// which is how statically recompiled code takes the JIT's place. Must be set
+// before the kernel creates its first thread.
+using CPUBackendFactory = std::function<CPUInterfacePtr(CPUState *state, std::size_t processor_id)>;
+void set_cpu_backend_factory(CPUBackendFactory factory);
 
 CPUStatePtr init_cpu(bool cpu_opt, SceUID thread_id, std::size_t processor_id, MemState &mem);
 int run(CPUState &state);

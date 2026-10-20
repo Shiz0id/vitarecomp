@@ -157,6 +157,11 @@ and functions are emitted in address order, so a prefix is not a sample.
       are present — indistinguishable from missing coverage
 - [x] **Traps name the firmware function**, not just its NID. A NID is a hash;
       "implement 0xBFE02B3A" is not a task anyone can start
+- [x] **The Vita3K bridge** ([`VITA3K_BRIDGE.md`](VITA3K_BRIDGE.md)): recompiled
+      code as a Vita3K CPU backend, imports forwarded to Vita3K's HLE by NID,
+      guest memory shared with Vita3K's reservation, thread-local register
+      files (`VITARECOMP_THREADED`). Unit-tested against the real headers and
+      clean under TSan. The full Vita3K build with it is not yet run
 - [ ] The shallow ~92 of `SceGxm`: state setters, texture accessors, mapping
 - [x] **The link arrangement.** Import defaults are one file per import, built
       as a static library listed after the runtime. A linker pulls an archive
